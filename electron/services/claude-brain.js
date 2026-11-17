@@ -81,7 +81,19 @@ const MAX_TOOL_ROUNDS = () => parseInt(process.env.HANNIBAL_CLAUDE_MAX_TOOL_ROUN
 // One chat turn. onText(delta) fires as text streams in. When tools are on,
 // Claude may call Hannibal's actions; the turn loops until Claude is done.
 // `images`: optional base64 frames (camera / screenshots) shown with this turn.
-async function chat({ system, context, user, images }, onText) {
+// One turn at a time: the desk (voice) and the phone (Telegram) share one
+// conversation, so a second turn waits for the first instead of interleaving.
+let _queue = Promise.resolve();
+function chat(payload, onText, opts) {
+  const run = _queue.then(() => chatOnce(payload || {}, onText, opts || {}));
+  _queue = run.catch(() => {});
+  return run;
+}
+
+// opts.runTool overrides the default tool runner for this turn (Telegram uses
+// its own, so confirmations are asked on the phone instead of by voice).
+async function chatOnce({ system, context, user, images }, onText, opts = {}) {
+  const runTool = opts.runTool || runToolImpl;
   if (!enabled()) return { ok: false, error: 'Claude disabled or ANTHROPIC_API_KEY missing' };
   const frames = (Array.isArray(images) ? images : [])
     .filter((b) => typeof b === 'string' && claudeTools.mediaType(b)).slice(0, MAX_IMAGES);
@@ -95,7 +107,7 @@ async function chat({ system, context, user, images }, onText) {
   const nowLine = `Now: ${nowStamp()}.`;
   turn.push({ role: 'system', content: [nowLine, String(context || '').trim()].filter(Boolean).join('\n') });
 
-  const useTools = !!runToolImpl && claudeTools.enabled();
+  const useTools = !!runTool && claudeTools.enabled();
   const tools = useTools ? claudeTools.toolDefinitions() : undefined;
   let facts = '';
   try { facts = factStore().renderForPrompt(); } catch (_) {}
@@ -151,7 +163,7 @@ async function chat({ system, context, user, images }, onText) {
           continue;
         }
         try { onToolEvent && onToolEvent({ phase: 'start', tool: claudeTools.fromApiName(c.name) }); } catch (_) {}
-        const r = await runToolImpl(c.name, c.input);
+        const r = await runTool(c.name, c.input);
         toolsUsed.push({ tool: r.tool, status: r.status });
         console.log(`[claude] tool ${r.tool} → ${r.status}`);
         try { onToolEvent && onToolEvent({ phase: 'finish', tool: r.tool, status: r.status }); } catch (_) {}
