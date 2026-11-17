@@ -29,6 +29,7 @@ const { registerCameraControl } = require('./services/camera-control');
 // Chat brain: Claude API via the official SDK (streamed, prompt-cached). The
 // renderer falls back to Ollama on GEX131 whenever this returns ok:false.
 const claudeBrain = require('./services/claude-brain');
+const claudeTools = require('./services/claude-tools');
 installToolTap(ipcMain);
 
 // Only ONE Hannibal at a time. Two copies fight over the mic, the wake word and
@@ -41,7 +42,18 @@ app.on('second-instance', () => {
   if (win) { if (win.isMinimized()) win.restore(); win.show(); win.focus(); }
 });
 
-claudeBrain.registerClaudeBrain(ipcMain); // 'llm:chat' → tokens stream back on 'llm:token'
+// 'llm:chat' → tokens stream back on 'llm:token'. Claude can also use Hannibal's
+// actions: each tool call runs through the SAME executor + voice confirmation gate
+// as the agent loop (claude-tools.js). Turn off with HANNIBAL_CLAUDE_TOOLS=0.
+claudeBrain.registerClaudeBrain(ipcMain, {
+  runTool: (name, input) => claudeTools.runTool(name, input, {
+    confirmer: makeIpcConfirmer(),
+    // Log only: the renderer's agent:progress narration belongs to agent:run plans,
+    // and Claude narrates its own work.
+    emit: (ev) => { if (/^step:(start|finish|error|skipped|confirm)/.test(ev.type)) console.log('[claude-tool]', ev.type, ev.tool || ''); },
+  }),
+  onToolEvent: (ev) => { try { win && win.webContents.send('llm:tool', ev); } catch (_) {} },
+});
 registerControls(ipcMain); // 'browser-action' + 'mac-control' IPC handlers
 registerWorld(ipcMain);    // 'world:crypto' (after registerControls so EYES can reuse 'browser-action' open)
 // The coordinator (single owner of the gimbal) is returned so we can stop its
@@ -448,6 +460,7 @@ ipcMain.handle('voice:config', () => ({
   // Chat brain: Claude first (the key stays in main), Ollama on GEX131 as fallback.
   claudeEnabled: claudeBrain.enabled(),
   claudeModel: claudeBrain.model(),
+  claudeTools: claudeBrain.toolsEnabled(),
   // Phase D — autonomous-speech arbiter knobs (renderer-side; live-tunable via env).
   arbiterGapMs:          parseInt(process.env.HANNIBAL_ARBITER_GAP_MS || '30000', 10),  // min gap between ANY two autonomous lines
   arbiterPreemptMs:      parseInt(process.env.HANNIBAL_ARBITER_PREEMPT_MS || '6000', 10), // higher-priority line may jump in this soon after a lower one

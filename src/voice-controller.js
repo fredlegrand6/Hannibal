@@ -479,6 +479,11 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   // ONLY the gate's classifier and can never leak into chitchat. Set true for
   // the whole lifetime of handleConfirmRequest.
   let confirmInFlight = false;
+  // A Claude turn (which may call tools and hit the confirmation gate mid-turn)
+  // is in flight. While true, the gate must not reopen the mic or idle the brain —
+  // the turn itself re-listens when it ends.
+  let chatTurnActive = false;
+  let playingOne = false;    // a sentence is audibly playing right now (runPlayer)
 
   // ── Adaptive VAD state — the calibrated, per-room noise floor + onset cutoff. ──
   let noiseFloor = SILENCE_THRESH;
@@ -651,6 +656,7 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   // active TTS *stream* (the `speaking` flag, which streamChatAndSpeak sets and
   // whose own completion path re-arms instead).
   function restOrRearm() {
+    if (chatTurnActive) return;                 // a Claude turn is mid-flight; it re-listens itself
     if (continuousListen && !confirmInFlight && !autonomousSpeaking && !speaking) {
       setPhase('idle');                          // brief brain reconcile before mic reopens
       startListening({ conversation: true });
@@ -920,6 +926,14 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
         if (isDirectOnlyAction(transcript)) {
           await agentLoop(transcript);
           return true;
+        }
+        // Claude with tools is the primary brain for actions: hand the turn to
+        // respond(), where Claude plans and calls the real tools itself (same
+        // executor + voice gate). The Ollama planner below stays as the fallback
+        // when Claude or its tools are off.
+        if (cfg.claudeEnabled && cfg.claudeTools) {
+          console.log('[route] action → Claude with tools');
+          return false;
         }
         // Genuine agent-loop goal → the brain (or in-process fallback). The Mac
         // speaks the gate for any confirm:true write, exactly like the console path.
@@ -2027,8 +2041,10 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     while (speakQueue.length || !streamEnded) {
       if (!speakQueue.length) { await sleep(40); continue; }
       const sentence = speakQueue.shift();
+      playingOne = true;
       try { await speakOne(sentence); }
       catch (e) { console.warn('[voice] tts/play failed', e); }
+      finally { playingOne = false; }
     }
     speaking = false;
     brain.setAmplitude(0);
@@ -2119,12 +2135,21 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     // failure mid-reply keeps what was already said (no second, different answer).
     let claudeDone = false;
     if (claude && cfg.claudeEnabled && window.hannibal.claudeChat) {
+      chatTurnActive = true;
       try {
         const r = await window.hannibal.claudeChat(claude, onToken);
         if (r && r.ok) claudeDone = true;
+        else if (r && Array.isArray(r.toolsUsed) && r.toolsUsed.length) {
+          // Actions already ran this turn — never re-run the request on Ollama.
+          claudeDone = true;
+          console.warn('[voice] claude failed after actions ran —', r.error);
+          if (!gotToken) onToken("I started on that but lost my connection before I could finish. Ask me again to pick it up.");
+        }
         else console.warn('[voice] claude failed —', (r && r.error) || 'unknown', gotToken ? '(keeping partial reply)' : '→ falling back to Ollama');
       } catch (e) {
         console.warn('[voice] claude call failed —', e && e.message, gotToken ? '(keeping partial reply)' : '→ falling back to Ollama');
+      } finally {
+        chatTurnActive = false;
       }
       if (!claudeDone && !gotToken) emitModel(model);   // show the Ollama model we're falling back to
     }
@@ -2981,6 +3006,8 @@ RULES:
     unlock();
     // let any in-flight agent narration finish so the gate prompt doesn't overlap it
     for (let w = 0; narrating && w < 30; w++) await new Promise((r) => setTimeout(r, 50));
+    // ...and let Claude finish the sentence it's saying before the tool call (≤15s)
+    for (let w = 0; (speakQueue.length || playingOne) && w < 300; w++) await new Promise((r) => setTimeout(r, 50));
     let decided = false, decision = false, gateUI = null, heardVerdict = null;
     const finalize = (val, how) => {
       if (decided) return;
