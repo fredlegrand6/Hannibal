@@ -464,6 +464,7 @@ ipcMain.handle('voice:config', () => ({
   ollamaModelVision: CONFIG.ollamaModelVision,
   alwaysListen: CONFIG.alwaysListen,
   qdrantUrl: CONFIG.qdrantUrl,
+  qdrantApiKey: process.env.QDRANT_API_KEY || '',   // Qdrant on GEX131 requires it (api-key header)
   // Chat brain: Claude first (the key stays in main), Ollama on GEX131 as fallback.
   claudeEnabled: claudeBrain.enabled(),
   claudeModel: claudeBrain.model(),

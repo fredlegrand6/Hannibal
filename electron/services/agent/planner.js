@@ -67,7 +67,7 @@ async function queryMemory(text, limit = 5) {
   try {
     const r = await fetch(`${CONFIG.qdrantUrl}/collections/${CONFIG.qdrantCollection}/points/search`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...(process.env.QDRANT_API_KEY ? { 'api-key': process.env.QDRANT_API_KEY } : {}) },
       body: JSON.stringify({ vector: vec, limit, with_payload: true, score_threshold: 0.35 }),
       signal: AbortSignal.timeout(5000),
     });

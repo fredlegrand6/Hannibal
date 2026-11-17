@@ -665,8 +665,10 @@
     const memCountEl = $('#memCount');
     async function pollMemoryCount() {
       try {
-        const qdrantUrl = (await window.hannibal.config()).qdrantUrl || 'http://100.99.70.113:6333';
-        const r = await fetch(`${qdrantUrl}/collections/hannibal_memory`, { signal: AbortSignal.timeout(3000) });
+        const hcfg = await window.hannibal.config();
+        const qdrantUrl = hcfg.qdrantUrl || 'http://100.99.70.113:6333';
+        const r = await fetch(`${qdrantUrl}/collections/hannibal_memory`, {
+          headers: hcfg.qdrantApiKey ? { 'api-key': hcfg.qdrantApiKey } : {}, signal: AbortSignal.timeout(3000) });
         const j = await r.json();
         const count = j?.result?.points_count;
         if (typeof count === 'number') {
