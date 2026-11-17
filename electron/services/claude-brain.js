@@ -57,6 +57,12 @@ Reads run immediately. Anything that sends, deletes or changes something is conf
 Memory: the saved facts below are things you know for sure. When Fred tells you something lasting — about a person, a project or client, how he likes things done, a decision, a place, a routine — save it with memory__remember as one short self-contained fact (do it quietly, no need to announce it unless he asked you to remember). If a saved fact is wrong or outdated, forget it and save the correct one. When he says "forget that", use memory__forget. Don't save small talk, passing moods or things that only matter right now.
 You are spoken aloud: before a slow or multi-step task say one short sentence about what you're doing, and when done give the result in one or two plain sentences (no lists, no markdown).`;
 
+function nowStamp(d = new Date()) {
+  const pad = (n) => String(n).padStart(2, '0');
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  return `${d.toLocaleDateString('en-GB', { weekday: 'long' })} ${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} `
+    + `${pad(d.getHours())}:${pad(d.getMinutes())} (${tz})`;
+}
 let factStore = getDefaultFactStore;   // swappable in tests
 let runToolImpl = null;           // set by registerClaudeBrain — runs one tool through the executor + gate
 let onToolEvent = null;           // optional UI hook: ({ phase, tool, status }) for the panel/logs
@@ -68,8 +74,10 @@ async function chat({ system, context, user }, onText) {
   if (!enabled()) return { ok: false, error: 'Claude disabled or ANTHROPIC_API_KEY missing' };
   const turn = [{ role: 'user', content: String(user || '') }];
   // Situational context rides as a mid-conversation system message so the
-  // persona above and the earlier conversation stay cacheable.
-  if (context && String(context).trim()) turn.push({ role: 'system', content: String(context).trim() });
+  // persona above and the earlier conversation stay cacheable. The exact local
+  // date/time always leads it, so dates ("Thursday", "in 2 hours") resolve right.
+  const nowLine = `Now: ${nowStamp()}.`;
+  turn.push({ role: 'system', content: [nowLine, String(context || '').trim()].filter(Boolean).join('\n') });
 
   const useTools = !!runToolImpl && claudeTools.enabled();
   const tools = useTools ? claudeTools.toolDefinitions() : undefined;

@@ -1000,6 +1000,12 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     // if the skill can't run (e.g. a service is down), so a transient outage never
     // strands the briefing.
     if (cmd.kind === 'briefing') {
+      // Claude with tools gives the briefing itself: live calendar, mail and
+      // reminders, judged against what it knows about Fred's world.
+      if (cfg.claudeEnabled && cfg.claudeTools) {
+        await respond('Brief me: check my calendar for today, my inbox and my upcoming reminders, and tell me in a few sentences what matters.');
+        return true;
+      }
       try {
         const res = await window.hannibal.runSkill('morning-brief', { language: currentLanguage });
         if (res && res.ok) return true;
@@ -3330,6 +3336,56 @@ RULES:
       presenceMuted = !!(s && s.muted); presenceSleeping = !!(s && s.sleeping); presenceRunning = !!(s && s.running);
     });
   }
+  // ── PROACTIVE (morning brief) — main's scheduler says a brief is due. Deliver
+  // it only at a quiet moment (never over Fred, a reply, the confirmation gate,
+  // teach mode, or while presence is muted/asleep), then report back: main marks
+  // the day done only when the brief was actually spoken.
+  const isQuiet = () => !speaking && !playingOne && !confirmInFlight && !autonomousSpeaking && !chatTurnActive
+    && !narrating && !teachState && !presenceMuted && !presenceSleeping
+    && (phase === 'idle' || (continuousListen && restfulListen && phase === 'listening'));
+  let proactiveBusy = false;
+  async function runProactive(job) {
+    if (!job || job.kind !== 'morning-brief' || proactiveBusy) return;
+    proactiveBusy = true;
+    let ok = false;
+    try {
+      for (let w = 0; !isQuiet() && w < 600; w++) await new Promise((r) => setTimeout(r, 1000)); // ≤10 min
+      if (!isQuiet()) { console.log('[proactive] never got a quiet moment — main will retry'); return; }
+      console.log('[proactive] delivering morning brief');
+      if (phase === 'listening') abortListening();   // drop the open resting turn (no STT)
+      if (cfg.claudeEnabled && cfg.claudeTools) {
+        setPhase('thinking');
+        emitModel(cfg.claudeModel);
+        const reply = await streamChatAndSpeak({
+          model: cfg.ollamaModelFast || cfg.ollamaModel,
+          messages: [{ role: 'system', content: ctxPreamble() + SYSTEM_PROMPT }, { role: 'user', content: job.prompt }],
+          claude: {
+            system: SYSTEM_PROMPT + ' Notes about the current situation and any relevant memories arrive as system messages during the conversation.',
+            context: ctxPreamble(),
+            user: job.prompt,
+          },
+        });
+        ok = !!(reply && reply.trim());
+        startListening({ conversation: true });       // he can answer the brief straight away
+      } else {
+        const res = await window.hannibal.runSkill('morning-brief', { language: currentLanguage });
+        ok = !!(res && res.ok);
+      }
+    } catch (e) {
+      console.warn('[proactive] brief failed', e);
+    } finally {
+      proactiveBusy = false;
+      try { await window.hannibal.proactiveDone({ kind: job.kind, day: job.day, ok }); } catch (_) {}
+    }
+  }
+  if (window.hannibal && window.hannibal.onProactiveRun) {
+    window.hannibal.onProactiveRun((job) => { runProactive(job).catch((e) => console.warn('[proactive] handler', e)); });
+  }
+  // Claude set or cancelled a reminder in main → pick up the new list.
+  if (window.hannibal && window.hannibal.onRemindersChanged) {
+    window.hannibal.onRemindersChanged(() => { loadReminders().catch(() => {}); });
+  }
+
   if (window.hannibal && window.hannibal.onPresenceRemark) {
     window.hannibal.onPresenceRemark((r) => { handlePresenceRemark(r).catch((e) => console.warn('[presence] remark handler', e)); });
   }
