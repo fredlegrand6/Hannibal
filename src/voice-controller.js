@@ -479,6 +479,14 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   // ONLY the gate's classifier and can never leak into chitchat. Set true for
   // the whole lifetime of handleConfirmRequest.
   let confirmInFlight = false;
+  // A Claude turn (which may call tools and hit the confirmation gate mid-turn)
+  // is in flight. While true, the gate must not reopen the mic or idle the brain —
+  // the turn itself re-listens when it ends.
+  let chatTurnActive = false;
+  let playingOne = false;    // a sentence is audibly playing right now (runPlayer)
+  // handleCommand routed an ACTION request to Claude. If Claude is unreachable,
+  // respond() must hand it to the action-capable fallback (brain/planner), not plain chat.
+  let claudeActionTurn = false;
 
   // ── Adaptive VAD state — the calibrated, per-room noise floor + onset cutoff. ──
   let noiseFloor = SILENCE_THRESH;
@@ -651,6 +659,7 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   // active TTS *stream* (the `speaking` flag, which streamChatAndSpeak sets and
   // whose own completion path re-arms instead).
   function restOrRearm() {
+    if (chatTurnActive) return;                 // a Claude turn is mid-flight; it re-listens itself
     if (continuousListen && !confirmInFlight && !autonomousSpeaking && !speaking) {
       setPhase('idle');                          // brief brain reconcile before mic reopens
       startListening({ conversation: true });
@@ -921,6 +930,15 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
           await agentLoop(transcript);
           return true;
         }
+        // Claude with tools is the primary brain for actions: hand the turn to
+        // respond(), where Claude plans and calls the real tools itself (same
+        // executor + voice gate). The Ollama planner below stays as the fallback
+        // when Claude or its tools are off.
+        if (cfg.claudeEnabled && cfg.claudeTools) {
+          console.log('[route] action → Claude with tools');
+          claudeActionTurn = true;
+          return false;
+        }
         // Genuine agent-loop goal → the brain (or in-process fallback). The Mac
         // speaks the gate for any confirm:true write, exactly like the console path.
         const handled = await runViaBrain(transcript);
@@ -982,6 +1000,12 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     // if the skill can't run (e.g. a service is down), so a transient outage never
     // strands the briefing.
     if (cmd.kind === 'briefing') {
+      // Claude with tools gives the briefing itself: live calendar, mail and
+      // reminders, judged against what it knows about Fred's world.
+      if (cfg.claudeEnabled && cfg.claudeTools) {
+        await respond('Brief me: check my calendar for today, my inbox and my upcoming reminders, and tell me in a few sentences what matters.');
+        return true;
+      }
       try {
         const res = await window.hannibal.runSkill('morning-brief', { language: currentLanguage });
         if (res && res.ok) return true;
@@ -2027,8 +2051,10 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     while (speakQueue.length || !streamEnded) {
       if (!speakQueue.length) { await sleep(40); continue; }
       const sentence = speakQueue.shift();
+      playingOne = true;
       try { await speakOne(sentence); }
       catch (e) { console.warn('[voice] tts/play failed', e); }
+      finally { playingOne = false; }
     }
     speaking = false;
     brain.setAmplitude(0);
@@ -2076,7 +2102,7 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   // still returned for parseActionTags. Non-agent callers stream-speak as before.
   // `claude` ({ system, context, user }): try the Claude API first (via main); if
   // it fails before saying anything, the same turn falls back to Ollama below.
-  async function streamChatAndSpeak({ model, messages, connectTimeoutMs, errNoun = 'language model', stripTags = false, speakErrors = true, claude = null }) {
+  async function streamChatAndSpeak({ model, messages, connectTimeoutMs, errNoun = 'language model', stripTags = false, speakErrors = true, claude = null, onClaudeUnavailable = null }) {
     speakQueue.length = 0;
     streamEnded = false;
     speaking = false;
@@ -2119,12 +2145,29 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     // failure mid-reply keeps what was already said (no second, different answer).
     let claudeDone = false;
     if (claude && cfg.claudeEnabled && window.hannibal.claudeChat) {
+      chatTurnActive = true;
       try {
         const r = await window.hannibal.claudeChat(claude, onToken);
         if (r && r.ok) claudeDone = true;
+        else if (r && Array.isArray(r.toolsUsed) && r.toolsUsed.length) {
+          // Actions already ran this turn — never re-run the request on Ollama.
+          claudeDone = true;
+          console.warn('[voice] claude failed after actions ran —', r.error);
+          if (!gotToken) onToken("I started on that but lost my connection before I could finish. Ask me again to pick it up.");
+        }
         else console.warn('[voice] claude failed —', (r && r.error) || 'unknown', gotToken ? '(keeping partial reply)' : '→ falling back to Ollama');
       } catch (e) {
         console.warn('[voice] claude call failed —', e && e.message, gotToken ? '(keeping partial reply)' : '→ falling back to Ollama');
+      } finally {
+        chatTurnActive = false;
+      }
+      // An action request with Claude unreachable (nothing said, nothing run):
+      // hand it to the action-capable fallback instead of plain Ollama chat.
+      if (!claudeDone && !gotToken && onClaudeUnavailable) {
+        streamEnded = true;
+        console.warn('[voice] claude unavailable for an action → action fallback (brain/planner)');
+        await onClaudeUnavailable();
+        return null;
       }
       if (!claudeDone && !gotToken) emitModel(model);   // show the Ollama model we're falling back to
     }
@@ -2163,6 +2206,8 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   }
 
   async function respond(transcript) {
+    const actionTurn = claudeActionTurn;
+    claudeActionTurn = false;
     setPhase('thinking');
     // Multi-model router: simple conversation goes to the fast model; only
     // complex requests pay for the heavy 70b. Falls back to ollamaModel if the
@@ -2193,7 +2238,15 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
       context: ctxPreamble() + memoryContext,
       user: transcript,
     };
-    const reply = await streamChatAndSpeak({ model, messages, claude });
+    const reply = await streamChatAndSpeak({ model, messages, claude,
+      // Claude down on an action request → the previous action path (brain/planner,
+      // then the legacy loop only if no plan ran — never after a write executed).
+      onClaudeUnavailable: actionTurn ? async () => {
+        const handled = await runViaBrain(transcript);
+        if (!handled) await agentLoop(transcript);
+      } : null,
+    });
+    if (reply === null) return;                // the action fallback handled the turn
 
     // Store the exchange — fire-and-forget so it never delays the next turn.
     if (qdrantReady && reply && reply.trim()) {
@@ -2981,6 +3034,8 @@ RULES:
     unlock();
     // let any in-flight agent narration finish so the gate prompt doesn't overlap it
     for (let w = 0; narrating && w < 30; w++) await new Promise((r) => setTimeout(r, 50));
+    // ...and let Claude finish the sentence it's saying before the tool call (≤15s)
+    for (let w = 0; (speakQueue.length || playingOne) && w < 300; w++) await new Promise((r) => setTimeout(r, 50));
     let decided = false, decision = false, gateUI = null, heardVerdict = null;
     const finalize = (val, how) => {
       if (decided) return;
@@ -3281,6 +3336,56 @@ RULES:
       presenceMuted = !!(s && s.muted); presenceSleeping = !!(s && s.sleeping); presenceRunning = !!(s && s.running);
     });
   }
+  // ── PROACTIVE (morning brief) — main's scheduler says a brief is due. Deliver
+  // it only at a quiet moment (never over Fred, a reply, the confirmation gate,
+  // teach mode, or while presence is muted/asleep), then report back: main marks
+  // the day done only when the brief was actually spoken.
+  const isQuiet = () => !speaking && !playingOne && !confirmInFlight && !autonomousSpeaking && !chatTurnActive
+    && !narrating && !teachState && !presenceMuted && !presenceSleeping
+    && (phase === 'idle' || (continuousListen && restfulListen && phase === 'listening'));
+  let proactiveBusy = false;
+  async function runProactive(job) {
+    if (!job || job.kind !== 'morning-brief' || proactiveBusy) return;
+    proactiveBusy = true;
+    let ok = false;
+    try {
+      for (let w = 0; !isQuiet() && w < 600; w++) await new Promise((r) => setTimeout(r, 1000)); // ≤10 min
+      if (!isQuiet()) { console.log('[proactive] never got a quiet moment — main will retry'); return; }
+      console.log('[proactive] delivering morning brief');
+      if (phase === 'listening') abortListening();   // drop the open resting turn (no STT)
+      if (cfg.claudeEnabled && cfg.claudeTools) {
+        setPhase('thinking');
+        emitModel(cfg.claudeModel);
+        const reply = await streamChatAndSpeak({
+          model: cfg.ollamaModelFast || cfg.ollamaModel,
+          messages: [{ role: 'system', content: ctxPreamble() + SYSTEM_PROMPT }, { role: 'user', content: job.prompt }],
+          claude: {
+            system: SYSTEM_PROMPT + ' Notes about the current situation and any relevant memories arrive as system messages during the conversation.',
+            context: ctxPreamble(),
+            user: job.prompt,
+          },
+        });
+        ok = !!(reply && reply.trim());
+        startListening({ conversation: true });       // he can answer the brief straight away
+      } else {
+        const res = await window.hannibal.runSkill('morning-brief', { language: currentLanguage });
+        ok = !!(res && res.ok);
+      }
+    } catch (e) {
+      console.warn('[proactive] brief failed', e);
+    } finally {
+      proactiveBusy = false;
+      try { await window.hannibal.proactiveDone({ kind: job.kind, day: job.day, ok }); } catch (_) {}
+    }
+  }
+  if (window.hannibal && window.hannibal.onProactiveRun) {
+    window.hannibal.onProactiveRun((job) => { runProactive(job).catch((e) => console.warn('[proactive] handler', e)); });
+  }
+  // Claude set or cancelled a reminder in main → pick up the new list.
+  if (window.hannibal && window.hannibal.onRemindersChanged) {
+    window.hannibal.onRemindersChanged(() => { loadReminders().catch(() => {}); });
+  }
+
   if (window.hannibal && window.hannibal.onPresenceRemark) {
     window.hannibal.onPresenceRemark((r) => { handlePresenceRemark(r).catch((e) => console.warn('[presence] remark handler', e)); });
   }
