@@ -4897,8 +4897,16 @@ function parseVision(t) {
     /\bhow do i look\b/.test(t) ||
     /\b(do|can) you see\b/.test(t) ||
     /\bwhat do you see\b/.test(t) ||
-    /\blook at (me|this)\b/.test(t) ||
-    /\bsee me\b/.test(t);
+    /\blook at (me|this|that)\b/.test(t) ||
+    /\bsee me\b/.test(t) ||
+    // things Fred shows the camera: "what's in my hand", "what am I holding", "what is this?"
+    /\b(in|on) my (hand|hands|lap|shirt|t-?shirt|desk)\b/.test(t) ||
+    /\b(am i|i'?m) holding\b/.test(t) ||
+    /\bholding (up|this|that)\b/.test(t) ||
+    /^(what|who)(?:'s| is) (this|that)\??$/.test(t) ||
+    /\b(show|showing) you\b/.test(t) ||
+    // Dutch
+    /\b(hoe zie ik eruit|wat zie je|kijk naar|in mijn hand|wat houd ik vast|wat is dit)\b/.test(t);
   return camera ? { kind: 'vision', mode: 'camera' } : null;
 }
 
