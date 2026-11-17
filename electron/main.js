@@ -32,6 +32,7 @@ const claudeBrain = require('./services/claude-brain');
 const claudeTools = require('./services/claude-tools');
 const { registerFacts } = require('./services/memory-facts');
 const { registerProactive } = require('./services/proactive');
+const { createTelegramBridge, makeWhisperTranscriber } = require('./services/telegram');
 installToolTap(ipcMain);
 
 // Only ONE Hannibal at a time. Two copies fight over the mic, the wake word and
@@ -1243,6 +1244,27 @@ async function runAgentSelfTest() {
   console.log(JSON.stringify({ ok: res.ok, completedSteps: Object.keys(res.results) }, null, 2));
 }
 
+// ── TELEGRAM — the same brain, from Fred's phone (services/telegram.js) ──
+let telegram = null;
+function startTelegram() {
+  const token = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
+  if (!token || /^(0|off|false)$/i.test(process.env.HANNIBAL_TELEGRAM || '')) return;
+  telegram = createTelegramBridge({
+    token,
+    allowedIds: process.env.TELEGRAM_ALLOWED_USERS,
+    persona: "You are Hannibal, Fred's personal AI assistant. Be concise, direct, and natural, "
+      + 'with dry wit. Notes about the current situation arrive as system messages during the conversation.',
+    chat: (payload, onText, opts) => claudeBrain.chat(payload, onText, opts),
+    runTool: (name, input, { confirmer }) => claudeTools.runTool(name, input, {
+      confirmer,
+      emit: (ev) => { if (/^step:(start|finish|error|skipped|confirm)/.test(ev.type)) console.log('[telegram-tool]', ev.type, ev.tool || ''); },
+    }),
+    transcribe: makeWhisperTranscriber({ whisperUrl: CONFIG.whisperUrl, language: process.env.TELEGRAM_VOICE_LANG || 'auto' }),
+    onReset: () => claudeBrain.resetHistory(),
+  });
+  telegram.start().catch((e) => { console.warn('[telegram] could not start:', e.message); telegram = null; });
+}
+
 app.whenReady().then(async () => {
   ensureAliasesFile();
   ensureBehaviorLogFile();
@@ -1260,6 +1282,7 @@ app.whenReady().then(async () => {
   createWindow();
   startBrain();   // links this Mac as a BODY to the GEX131 brain when HANNIBAL_BRAIN=1
   ensureWhisper();
+  startTelegram();  // Hannibal on Fred's phone, when TELEGRAM_BOT_TOKEN is set
   // Microphone: get macOS permission BEFORE starting the wake-word and VAD
   // helpers. They inherit this app's permission; started without it, opening
   // the mic fails ("Input/output error") or delivers silence.
@@ -1320,6 +1343,7 @@ app.on('before-quit', () => { app.isQuiting = true; });
 app.on('will-quit', () => {
   if (wakeProc) wakeProc.kill();
   if (whisperProc) whisperProc.kill();
+  if (telegram) telegram.stop();
   if (vadProc) { try { vadProc.kill(); } catch (_) {} }
   if (ccIngestServer) { try { ccIngestServer.close(); } catch (_) {} }
   if (awareness) { try { awareness.stop(); } catch (_) {} }
