@@ -1,0 +1,32 @@
+{
+  "skills": [
+    {
+      "id": "todays-date",
+      "trigger": [
+        "what's today's date",
+        "what is today's date",
+        "what day is it",
+        "tell me the date",
+        "what date is it"
+      ],
+      "description": "Today's date",
+      "type": "terminal",
+      "command": "echo Today is $(date '+%A, %B %d, %Y')",
+      "learned_at": "2026-05-23T09:30:00Z",
+      "times_used": 0
+    },
+    {
+      "id": "home-directory",
+      "trigger": [
+        "where am i",
+        "what's my home directory",
+        "show my home folder"
+      ],
+      "description": "Show home directory",
+      "type": "terminal",
+      "command": "echo Your home directory is ${HOME}",
+      "learned_at": "2026-05-23T09:30:00Z",
+      "times_used": 0
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+#!/usr/bin/env python3.12
+"""Hannibal Wake Word Listener - 'Hey Hannibal' via Picovoice Porcupine"""
+import pvporcupine
+import pvrecorder
+import time
+import os
+
+# Config
+ACCESS_KEY = 'tC0BV4rvF3YJ4ky2Kr5e1jv/Vuvaz4OC1m71Hf91RpDBvLjc/hCirw=='
+KEYWORD_PATH = "/Users/Shared/HoloAssistant/wakeword-training/hey-Hannibal_en_mac_v4_0_0.ppn"
+
+if not ACCESS_KEY:
+    print("ERROR: No PICOVOICE_KEY set!", flush=True)
+    exit(1)
+
+print("Loading Porcupine 'Hey Hannibal'...", flush=True)
+porcupine = pvporcupine.create(
+    access_key=ACCESS_KEY,
+    keyword_paths=[KEYWORD_PATH],
+    sensitivities=[0.5]  # 0-1, higher = more sensitive — lowered for noise rejection
+)
+
+recorder = pvrecorder.PvRecorder(frame_length=porcupine.frame_length)
+recorder.start()
+
+print("Listening for 'Hey Hannibal'...", flush=True)
+
+cooldown = 0
+try:
+    while True:
+        pcm = recorder.read()
+        result = porcupine.process(pcm)
+        if result >= 0 and time.time() > cooldown:
+            print("WAKE_WORD_DETECTED", flush=True)
+            cooldown = time.time() + 1.5  # Short cooldown so interrupt works quickly
+except KeyboardInterrupt:
+    print("Stopping...")
+finally:
+    recorder.stop()
+    recorder.delete()
+    porcupine.delete()

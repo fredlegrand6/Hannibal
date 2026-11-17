@@ -1,0 +1,40 @@
+# Morning brief — the first skill. READ-ONLY: it fully acts (no gate fires) and
+# every tool it uses is real. Proves the loader → compiler → executor path end
+# to end. Invoke:  runSkill('morning-brief', { language: 'english' })
+[skill]
+name = "morning-brief"
+description = "Give Fred a short spoken morning briefing: today's calendar, unread mail, GEX131 status, and any relevant memory — woven into one natural narrative."
+version = "0.1.0"
+
+[[skill.params]]
+name = "language"
+type = "string"
+required = false
+default = "english"
+desc = "spoken language for the briefing"
+
+[[skill.steps]]
+tool = "calendar.events"
+description = "today + tomorrow's events"
+
+[[skill.steps]]
+tool = "mail.inbox"
+description = "unread count + latest messages"
+
+[[skill.steps]]
+tool = "gex131.metrics"
+description = "GEX131 GPU/CPU/mem snapshot"
+
+[[skill.steps]]
+tool = "memory.query"
+params = { text = "what should Fred know or follow up on this morning" }
+description = "relevant context from long-term memory"
+
+[[skill.steps]]
+tool = "text.compose"
+depends_on = [1, 2, 3, 4]
+description = "weave it into one short spoken briefing"
+params = { instruction = "Write a brief, warm, natural spoken morning briefing for Fred in {{language}}. Two or three sentences. Lead with what matters most. Mention the day's calendar and whether there's unread mail worth attention; only flag GEX131 if something looks off. Interpret — never read raw numbers or JSON. No preamble.", context = """Calendar: {{1}}
+Unread mail: {{2}}
+GEX131: {{3}}
+Relevant memory: {{4}}""" }

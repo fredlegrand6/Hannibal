@@ -1,0 +1,31 @@
+{
+  "response_length": {
+    "default": "normal",
+    "overrides": {
+      "chat_agent": "short"
+    }
+  },
+  "model_preferences": {},
+  "time_preferences": {
+    "before_08": {
+      "tone": "calm",
+      "length": "short"
+    },
+    "after_22": {
+      "tone": "calm",
+      "length": "short"
+    },
+    "work_hours": {
+      "tone": "energetic",
+      "length": "normal"
+    }
+  },
+  "corrections": [],
+  "interruption_counts": {
+    "timer": 1,
+    "vision_camera": 1,
+    "chat_agent": 4,
+    "chat": 2
+  },
+  "model_switch_counts": {}
+}

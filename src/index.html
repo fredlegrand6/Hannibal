@@ -1,0 +1,951 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>HANNIBAL · COMMAND CENTER</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+
+<style>
+  :root {
+    --bg: #06060C;
+    --grid: #0D1117;
+    --cyan: #00E5FF;
+    --gold: #D4A24C;
+    --green: #00FF88;
+    --amber: #FF9500;
+    --alert: #FF2D55;
+    --text: #E8E6E3;
+    --muted: #6B7280;
+    --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+    --body: "Inter", system-ui, -apple-system, sans-serif;
+    --rail-l: 240px;
+    --rail-r: 280px;
+    --gap: 18px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    background:
+      radial-gradient(1200px 800px at 50% 42%, #0a0c16 0%, var(--bg) 60%),
+      var(--bg);
+    color: var(--text);
+    font-family: var(--body);
+    cursor: default;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ── ambient FX: scanlines + faint grid + vignette, above bg, below UI ── */
+  .fx {
+    position: fixed; inset: 0; pointer-events: none; z-index: 1;
+  }
+  .fx::before { /* scanlines */
+    content: ""; position: absolute; inset: 0;
+    background: repeating-linear-gradient(0deg,
+      rgba(0, 229, 255, 0.028) 0px, rgba(0, 229, 255, 0.028) 1px,
+      transparent 1px, transparent 3px);
+    mix-blend-mode: screen; opacity: 0.5;
+    animation: scan 12s linear infinite;
+  }
+  .fx::after { /* grid + vignette */
+    content: ""; position: absolute; inset: 0;
+    background:
+      linear-gradient(rgba(0, 229, 255, 0.018) 1px, transparent 1px) 0 0 / 46px 46px,
+      linear-gradient(90deg, rgba(0, 229, 255, 0.018) 1px, transparent 1px) 0 0 / 46px 46px,
+      radial-gradient(120% 90% at 50% 50%, transparent 55%, rgba(0,0,0,0.55) 100%);
+  }
+  @keyframes scan { from { background-position: 0 0; } to { background-position: 0 600px; } }
+
+  /* ════════════ STATUS BAR ════════════ */
+  .status-bar {
+    position: fixed; top: 0; left: 0; right: 0; height: 48px;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 26px;
+    font-family: var(--mono);
+    text-transform: uppercase; letter-spacing: 0.18em;
+    z-index: 20;
+    -webkit-app-region: drag;
+    user-select: none;
+    border-bottom: 1px solid rgba(0, 229, 255, 0.08);
+    background: linear-gradient(180deg, rgba(6,7,14,0.85), rgba(6,7,14,0));
+    backdrop-filter: blur(6px);
+  }
+  .status-bar .left { font-size: 13px; color: var(--cyan); text-shadow: 0 0 10px rgba(0,229,255,0.5); }
+  .status-bar .right { display: flex; align-items: center; gap: 22px; font-size: 11px; color: var(--muted); }
+  .status-bar .right b { color: var(--text); font-weight: 500; }
+  .status-bar .state {
+    color: var(--cyan); font-size: 11px; letter-spacing: 0.22em;
+    padding: 3px 10px; border: 1px solid rgba(0, 229, 255, 0.3); border-radius: 3px;
+    text-shadow: 0 0 8px rgba(0,229,255,0.5); box-shadow: 0 0 12px rgba(0,229,255,0.08) inset;
+  }
+  .status-bar .time { color: var(--text); font-variant-numeric: tabular-nums; letter-spacing: 0.12em; }
+  .status-bar .gex { display: flex; align-items: center; gap: 8px; }
+  .status-bar .gex .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--green); box-shadow: 0 0 8px var(--green);
+    animation: pulseDot 2.4s ease-in-out infinite;
+  }
+  @keyframes pulseDot { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+  /* ── Stage 7: continuous-awareness toggle + persistent WATCHING indicator ── */
+  .watch-chip {
+    -webkit-app-region: no-drag; cursor: pointer; user-select: none;
+    display: flex; align-items: center; gap: 7px;
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.22em;
+    padding: 3px 10px; border-radius: 3px;
+    color: var(--muted); border: 1px solid rgba(120,130,150,0.25);
+    background: transparent; transition: all 0.25s ease;
+  }
+  .watch-chip:hover { color: var(--text); border-color: rgba(0,229,255,0.35); }
+  .watch-chip .eye { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); box-shadow: none; }
+  /* live state — gold, pulsing: an unmissable "your screen is being watched" sign */
+  .watch-chip.on {
+    color: var(--gold, #D4A24C); border-color: rgba(212,162,76,0.55);
+    text-shadow: 0 0 8px rgba(212,162,76,0.5);
+    box-shadow: 0 0 14px rgba(212,162,76,0.12) inset;
+  }
+  .watch-chip.on .eye { background: var(--gold, #D4A24C); box-shadow: 0 0 8px var(--gold, #D4A24C); animation: pulseDot 1.8s ease-in-out infinite; }
+
+  /* ════════════ CENTER STAGE — neural brain ════════════ */
+  .stage {
+    position: absolute; top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    width: 72vw; height: 76vh; z-index: 2;
+  }
+  #brain { display: block; width: 100%; height: 100%; }
+
+  /* ════════════ RAILS ════════════ */
+  .rail {
+    position: fixed; top: 60px; bottom: 18px;
+    display: flex; flex-direction: column; gap: var(--gap);
+    z-index: 5;
+    transition: transform 0.25s cubic-bezier(.2,.7,.2,1);
+    will-change: transform;
+  }
+  .rail.left  { left: var(--gap);  width: var(--rail-l); }
+  .rail.right { right: var(--gap); width: var(--rail-r); }
+
+  /* ════════════ GLASS PANEL ════════════ */
+  .panel {
+    position: relative;
+    background: rgba(13, 17, 23, 0.6);
+    backdrop-filter: blur(14px) saturate(140%);
+    -webkit-backdrop-filter: blur(14px) saturate(140%);
+    border: 1px solid rgba(0, 229, 255, 0.14);
+    border-radius: 5px;
+    padding: 13px 14px 14px;
+    overflow: hidden;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.04),
+      inset 0 0 30px rgba(0, 229, 255, 0.025),
+      0 12px 40px rgba(0, 0, 0, 0.55),
+      0 0 30px rgba(0, 229, 255, 0.04);
+  }
+  .panel::before { /* local scanline texture */
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background: repeating-linear-gradient(0deg,
+      rgba(0, 229, 255, 0.022) 0 1px, transparent 1px 3px);
+    mix-blend-mode: screen; opacity: 0.6;
+  }
+  /* HUD targeting corners (injected spans) */
+  .hud-c { position: absolute; width: 9px; height: 9px; pointer-events: none;
+           opacity: 0.85; box-shadow: 0 0 6px rgba(0, 229, 255, 0.55); }
+  .hud-c.tl { top: 5px; left: 5px;  border-top: 1px solid var(--cyan); border-left: 1px solid var(--cyan); }
+  .hud-c.tr { top: 5px; right: 5px; border-top: 1px solid var(--cyan); border-right: 1px solid var(--cyan); }
+  .hud-c.bl { bottom: 5px; left: 5px;  border-bottom: 1px solid var(--cyan); border-left: 1px solid var(--cyan); }
+  .hud-c.br { bottom: 5px; right: 5px; border-bottom: 1px solid var(--cyan); border-right: 1px solid var(--cyan); }
+
+  /* update pulse */
+  @keyframes flashPanel {
+    0%   { border-color: var(--cyan); box-shadow: inset 0 0 30px rgba(0,229,255,0.12), 0 0 34px rgba(0,229,255,0.4), 0 12px 40px rgba(0,0,0,0.55); }
+    100% { border-color: rgba(0,229,255,0.14); box-shadow: inset 0 1px 0 rgba(255,255,255,0.04), 0 12px 40px rgba(0,0,0,0.55), 0 0 30px rgba(0,229,255,0.04); }
+  }
+  .panel.flash { animation: flashPanel 0.9s ease-out; }
+
+  /* panel header + underline glow line */
+  .panel-h {
+    position: relative;
+    font-family: var(--mono); font-size: 11px; font-weight: 500;
+    letter-spacing: 0.22em; text-transform: uppercase;
+    color: var(--cyan); text-shadow: 0 0 9px rgba(0, 229, 255, 0.45);
+    display: flex; align-items: center; justify-content: space-between;
+    padding-bottom: 8px; margin-bottom: 11px;
+  }
+  .panel-h::after {
+    content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 1px;
+    background: linear-gradient(90deg, rgba(0,229,255,0.65), rgba(0,229,255,0.04));
+    box-shadow: 0 0 8px rgba(0, 229, 255, 0.4);
+  }
+  .panel-h .badge {
+    font-size: 10px; letter-spacing: 0.1em; color: var(--bg);
+    background: var(--gold); border-radius: 3px; padding: 1px 7px;
+    box-shadow: 0 0 10px rgba(212, 162, 76, 0.5); text-shadow: none;
+  }
+  .panel-body { position: relative; z-index: 1; overflow: hidden; }
+
+  /* ── MAIL panel ── */
+  .panel.mail { flex: 1.5; min-height: 0; display: flex; flex-direction: column; }
+  .mail .panel-body { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+  .mail-item { padding: 8px 6px; border-radius: 3px; cursor: pointer;
+               border-left: 2px solid transparent; transition: background 0.15s, border-color 0.15s; }
+  .mail-item:hover { background: rgba(0,229,255,0.06); border-left-color: var(--cyan); }
+  .mail-item:active { background: rgba(0,229,255,0.12); }
+  .mail-item.unread { border-left-color: var(--gold); }
+  .mail-item.reading { border-left-color: var(--green) !important; background: rgba(0,255,136,0.06) !important; }
+  .mail-row { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+  .mail-from { font-size: 12px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .mail-time { font-family: var(--mono); font-size: 10px; color: var(--muted); white-space: nowrap; }
+  .mail-subj { font-size: 11px; color: var(--muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* ── CALENDAR panel ── */
+  .panel.calendar { flex: 1; min-height: 0; }
+  .calendar .panel-body { display: flex; flex-direction: column; gap: 9px; overflow-y: auto; }
+  .cal-updated { font-family: var(--mono); font-size: 9px; color: var(--muted);
+                 text-align: right; padding: 5px 2px 0; opacity: 0.65;
+                 border-top: 1px solid rgba(0,229,255,0.06); margin-top: 6px; }
+  .cal-item { display: flex; gap: 10px; align-items: stretch; }
+  .cal-bar { width: 3px; border-radius: 2px; box-shadow: 0 0 8px currentColor; }
+  .cal-info { display: flex; flex-direction: column; }
+  .cal-time { font-family: var(--mono); font-size: 10px; color: var(--cyan); letter-spacing: 0.08em; }
+  .cal-title { font-size: 12px; color: var(--text); }
+
+  /* ── SYSTEM panel ── */
+  .panel.system { flex: 0 0 auto; }
+  .gauges { display: flex; gap: 14px; justify-content: space-around; margin-bottom: 12px; }
+  .gauge { position: relative; width: 84px; height: 84px; }
+  .gauge svg { transform: rotate(-90deg); width: 100%; height: 100%; }
+  .gauge .track { fill: none; stroke: rgba(0,229,255,0.12); stroke-width: 5; }
+  .gauge .arc { fill: none; stroke: var(--cyan); stroke-width: 5; stroke-linecap: round;
+                filter: drop-shadow(0 0 4px rgba(0,229,255,0.7));
+                transition: stroke-dashoffset 1.3s cubic-bezier(.2,.7,.2,1); }
+  .gauge.gold .arc { stroke: var(--gold); filter: drop-shadow(0 0 4px rgba(212,162,76,0.7)); }
+  .gauge-val { position: absolute; inset: 0; display: flex; flex-direction: column;
+               align-items: center; justify-content: center; }
+  .gauge-val b { font-family: var(--mono); font-size: 17px; color: var(--text);
+                 font-variant-numeric: tabular-nums; text-shadow: 0 0 10px rgba(0,229,255,0.3); }
+  .gauge-val em { font-family: var(--mono); font-style: normal; font-size: 9px;
+                  letter-spacing: 0.2em; color: var(--muted); margin-top: 2px; }
+  .stat-row { display: flex; justify-content: space-between; align-items: center;
+              padding: 5px 0; font-size: 11px; }
+  .stat-row .k { font-family: var(--mono); letter-spacing: 0.1em; color: var(--muted); text-transform: uppercase; }
+  .stat-row .v { font-family: var(--mono); color: var(--text); font-variant-numeric: tabular-nums; }
+  .bar { height: 3px; border-radius: 2px; background: rgba(0,229,255,0.12); margin-top: 3px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; width: 0; background: var(--cyan);
+             box-shadow: 0 0 8px var(--cyan); transition: width 1.3s cubic-bezier(.2,.7,.2,1); }
+
+  /* ── QUICK ACTIONS ── */
+  .panel.actions { flex: 0 0 auto; }
+  .qa-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .qa {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
+    color: #cdd6de; background: rgba(0, 229, 255, 0.05);
+    border: 1px solid rgba(0, 229, 255, 0.2); border-radius: 3px;
+    padding: 9px 8px; cursor: pointer; text-align: left; line-height: 1.3;
+    transition: all 0.15s; -webkit-app-region: no-drag;
+  }
+  .qa:hover { background: rgba(0, 229, 255, 0.13); border-color: var(--cyan);
+              color: #fff; box-shadow: 0 0 16px rgba(0, 229, 255, 0.25); transform: translateY(-1px); }
+  .qa:active { transform: translateY(0); }
+  .qa.gold { border-color: rgba(212,162,76,0.4); background: rgba(212,162,76,0.07); }
+  .qa.gold:hover { border-color: var(--gold); box-shadow: 0 0 16px rgba(212,162,76,0.3); }
+
+  /* ── AGENTS panel (live Claude Code sessions) ── */
+  .panel.agents { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .agents .panel-body { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 7px; }
+  .agents-empty { font-size: 12px; color: var(--muted); font-style: italic; }
+  .agent-card {
+    padding: 8px 9px; border-radius: 4px;
+    background: rgba(0,229,255,0.03);
+    border: 1px solid rgba(0,229,255,0.10);
+    border-left: 2px solid var(--cyan);
+    transition: opacity .4s, border-color .25s, background .25s;
+    animation: agentIn .3s ease-out;
+  }
+  @keyframes agentIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+  .agent-card.active  { border-left-color: var(--cyan); }
+  .agent-card.working { border-left-color: var(--gold); }
+  .agent-card.running { border-left-color: var(--green); background: rgba(0,255,136,0.04); }
+  .agent-card.waiting { border-left-color: var(--amber); }
+  .agent-card.done    { border-left-color: var(--muted); background: transparent; opacity: 0.4; }
+  .agent-row  { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .agent-row2 { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 4px; }
+  .agent-proj { font-size: 12px; font-weight: 600; color: var(--text);
+                white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .agent-host { font-family: var(--mono); font-size: 9px; letter-spacing: 0.08em; color: var(--muted);
+                border: 1px solid rgba(107,114,128,0.35); border-radius: 3px; padding: 1px 5px;
+                white-space: nowrap; text-transform: uppercase; }
+  .agent-status { font-family: var(--mono); font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase;
+                  padding: 1px 6px; border-radius: 3px; border: 1px solid currentColor; }
+  .agent-elapsed { font-family: var(--mono); font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .agent-action { font-size: 11px; color: var(--muted); margin-top: 4px;
+                  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .agent-card.running .agent-action { color: #cdd6de; }
+
+  /* ════════════ BOTTOM — CONVERSATION ════════════ */
+  .conversation {
+    position: fixed; bottom: 18px;
+    left: calc(var(--gap) + var(--rail-l) + var(--gap));
+    right: calc(var(--gap) + var(--rail-r) + var(--gap));
+    max-height: 168px; z-index: 6;
+    display: flex; flex-direction: column;
+    opacity: 0.55; transition: opacity 0.4s, box-shadow 0.4s;
+  }
+  .conversation.active { opacity: 1; box-shadow:
+      inset 0 1px 0 rgba(255,255,255,0.05), 0 14px 50px rgba(0,0,0,0.6), 0 0 40px rgba(0,229,255,0.08); }
+  .conv-meta { display: inline-flex; align-items: center; gap: 12px; }
+  .conv-phase { font-family: var(--mono); font-size: 10px; letter-spacing: 0.18em;
+                color: var(--gold); text-shadow: 0 0 8px rgba(212,162,76,0.4); }
+  .conv-model {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.06em;
+    color: var(--cyan); text-shadow: 0 0 8px rgba(0,229,255,0.4);
+    padding: 2px 8px; border: 1px solid rgba(0,229,255,0.3); border-radius: 3px;
+    background: rgba(0,229,255,0.06);
+  }
+  .conv-model::before { content: "▸ "; opacity: 0.7; }
+  .conv-model.system { color: var(--green); border-color: rgba(0,255,136,0.3);
+                       background: rgba(0,255,136,0.06); text-shadow: 0 0 8px rgba(0,255,136,0.4); }
+  .conv-model[hidden] { display: none; }
+  .conv-body { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 7px; padding-right: 4px; }
+  .conv-hint { font-size: 12px; color: var(--muted); font-style: italic; }
+  .line { font-size: 13px; line-height: 1.45; }
+  .line .who { font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em; margin-right: 8px; }
+  .line.user .who { color: var(--gold); text-shadow: 0 0 8px rgba(212,162,76,0.35); }
+  .line.user { color: #e9dcc2; }
+  .line.assistant .who { color: var(--cyan); text-shadow: 0 0 8px rgba(0,229,255,0.4); }
+  .line.assistant { color: var(--text); }
+  .line.assistant .txt::after {
+    content: "▋"; color: var(--cyan); margin-left: 1px; animation: caret 1s steps(1) infinite; opacity: 0;
+  }
+  .line.assistant.typing .txt::after { opacity: 1; }
+  @keyframes caret { 50% { opacity: 0; } }
+
+  /* ── CONFIRMATION GATE row — "send it?" prompt + Yes/No ── */
+  .line.confirm { color: var(--text); padding: 6px 8px; margin: 4px 0;
+    border-left: 2px solid var(--gold); background: rgba(212,162,76,0.07); border-radius: 4px; }
+  .line.confirm .who { color: var(--gold); text-shadow: 0 0 8px rgba(212,162,76,0.45); }
+  .confirm-actions { display: inline-flex; gap: 6px; margin-left: 10px; }
+  .confirm-actions.cf-hidden { display: none; }
+  .cf-listen { font-family: var(--mono); font-size: 10px; letter-spacing: 0.06em; margin-left: 10px;
+    color: var(--gold); opacity: 0.85; animation: cfpulse 1.6s ease-in-out infinite; }
+  @keyframes cfpulse { 0%,100% { opacity: 0.45; } 50% { opacity: 0.9; } }
+  .confirm-actions button { font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em;
+    padding: 2px 12px; border-radius: 4px; cursor: pointer; background: transparent;
+    color: var(--cyan); border: 1px solid var(--cyan); transition: all 0.15s; }
+  .confirm-actions button:hover { background: rgba(0,229,255,0.14); }
+  .confirm-actions .cf-no { color: var(--gold); border-color: var(--gold); }
+  .confirm-actions .cf-no:hover { background: rgba(212,162,76,0.14); }
+  .confirm-actions button:disabled { opacity: 0.35; cursor: default; }
+  .line.confirm.confirmed { border-left-color: var(--cyan); }
+  .cf-outcome { font-family: var(--mono); font-size: 10px; margin-left: 10px; opacity: 0.85; }
+  .line.confirm.confirmed .cf-outcome { color: var(--cyan); }
+  .line.confirm.declined .cf-outcome { color: var(--gold); }
+
+  /* ── TYPED INPUT (backup channel — voice stays primary) ── */
+  /* Sits below the transcript inside the conversation panel. Stays subtle by
+     default; lights up on focus so Fred can see exactly what's accepting keys. */
+  .conv-input-row {
+    display: flex; align-items: center; gap: 6px;
+    margin-top: 6px; padding: 5px 9px;
+    background: rgba(0, 12, 20, 0.4);
+    border: 1px solid rgba(0, 229, 255, 0.22);
+    border-radius: 2px;
+    transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
+  }
+  .conv-input-row:focus-within {
+    border-color: var(--cyan);
+    background: rgba(0, 12, 20, 0.55);
+    box-shadow: 0 0 14px rgba(0, 229, 255, 0.18), inset 0 0 6px rgba(0, 229, 255, 0.05);
+  }
+  .conv-input-prompt {
+    font-family: 'Fira Code', var(--mono); font-size: 12px;
+    color: var(--cyan); opacity: 0.6;
+    text-shadow: 0 0 6px rgba(0, 229, 255, 0.35);
+    user-select: none;
+  }
+  .conv-input {
+    flex: 1; min-width: 0;
+    background: transparent; border: none; outline: none; padding: 0;
+    font-family: 'Fira Code', var(--mono); font-size: 12px;
+    color: var(--text); caret-color: var(--cyan); letter-spacing: 0.02em;
+  }
+  .conv-input::placeholder { color: var(--muted); font-style: italic; opacity: 0.65; }
+  .conv-input:focus { outline: none; }
+
+  /* thinking dots in the phase chip */
+  .dots i { display: inline-block; width: 4px; height: 4px; margin-left: 3px; border-radius: 50%;
+            background: var(--cyan); box-shadow: 0 0 6px var(--cyan); animation: dotPulse 1.2s infinite; }
+  .dots i:nth-child(2) { animation-delay: 0.2s; } .dots i:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes dotPulse { 0%,100% { opacity: 0.25; } 50% { opacity: 1; } }
+
+  /* scrollbars */
+  ::-webkit-scrollbar { width: 5px; }
+  ::-webkit-scrollbar-thumb { background: rgba(0,229,255,0.2); border-radius: 3px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+</style>
+</head>
+<body>
+  <div class="fx"></div>
+
+  <!-- ── STATUS BAR ── -->
+  <div class="status-bar">
+    <div class="left">HANNIBAL · COMMAND CENTER</div>
+    <div class="right">
+      <span class="weather" id="weather">ABCOUDE <b>—°</b> · LOADING</span>
+      <span class="watch-chip" id="watchChip" title="Continuous awareness — Hannibal watches your screen and speaks up only if you seem stuck. Click to toggle."><span class="eye"></span><span id="watchLabel">WATCH OFF</span></span>
+      <span>MEM <b id="memCount" data-count="5647">0</b></span>
+      <span>UP <b id="uptime">47d</b></span>
+      <span class="state" id="stateLabel">IDLE</span>
+      <span class="time" id="clock">--:--:--</span>
+      <span class="gex"><span class="dot"></span>GEX131</span>
+    </div>
+  </div>
+
+  <!-- ── LEFT RAIL ── -->
+  <div class="rail left" id="railLeft">
+    <div class="panel mail">
+      <div class="panel-h">MAIL <span class="badge" id="mailBadge">0</span></div>
+      <div class="panel-body" id="mailList"></div>
+    </div>
+    <div class="panel calendar">
+      <div class="panel-h">CALENDAR <span style="font-family:var(--mono);font-size:10px;color:var(--muted)">TODAY</span></div>
+      <div class="panel-body" id="calList"></div>
+      <div class="cal-updated" id="calUpdated">—</div>
+    </div>
+  </div>
+
+  <!-- ── CENTER STAGE ── -->
+  <div class="stage">
+    <canvas id="brain"></canvas>
+  </div>
+
+  <!-- ── RIGHT RAIL ── -->
+  <div class="rail right" id="railRight">
+    <div class="panel system">
+      <div class="panel-h">SYSTEM <span style="font-family:var(--mono);font-size:10px;color:var(--green)">GEX131 ONLINE</span></div>
+      <div class="panel-body">
+        <div class="gauges">
+          <div class="gauge">
+            <svg viewBox="0 0 84 84"><circle class="track" cx="42" cy="42" r="36"/><circle class="arc" id="arcCpu" cx="42" cy="42" r="36" data-pct="0"/></svg>
+            <div class="gauge-val"><b id="vCpu">--</b><em>CPU</em></div>
+          </div>
+          <div class="gauge gold">
+            <svg viewBox="0 0 84 84"><circle class="track" cx="42" cy="42" r="36"/><circle class="arc" id="arcRam" cx="42" cy="42" r="36" data-pct="0"/></svg>
+            <div class="gauge-val"><b id="vRam">--</b><em>RAM %</em></div>
+          </div>
+        </div>
+        <div class="stat-row"><span class="k">GPU</span><span class="v" id="vGpu">—</span></div>
+        <div class="stat-row"><span class="k">VRAM</span><span class="v" id="vVram">—</span></div>
+        <div class="stat-row"><span class="k">MEM</span><span class="v" id="vMem">-- / --</span></div>
+        <div class="bar"><i id="bMem" data-w="0"></i></div>
+        <div class="stat-row"><span class="k">NET ↑↓</span><span class="v" id="vNet">--</span></div>
+        <div class="stat-row"><span class="k">MODEL</span><span class="v" id="vModelRow" style="color:var(--cyan)">qwen2.5vl:7b</span></div>
+      </div>
+    </div>
+
+    <div class="panel actions">
+      <div class="panel-h">QUICK ACTIONS</div>
+      <div class="panel-body">
+        <div class="qa-grid">
+          <button class="qa gold" data-cmd="morning briefing">Morning briefing</button>
+          <button class="qa" data-cmd="read my email">Read email</button>
+          <button class="qa" data-cmd="check my calendar">Check calendar</button>
+          <button class="qa" data-cmd="what do I look like">What do I look like</button>
+          <button class="qa" data-cmd="take a screenshot">Screenshot</button>
+          <button class="qa" data-cmd="open VS Code">Open VS Code</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel agents">
+      <div class="panel-h">AGENTS <span class="badge" id="agentsBadge">0</span></div>
+      <div class="panel-body" id="agentsList"></div>
+    </div>
+  </div>
+
+  <!-- ── BOTTOM — CONVERSATION ── -->
+  <div class="conversation panel" id="convo">
+    <div class="panel-h">CONVERSATION
+      <span class="conv-meta">
+        <span class="conv-model" id="convModel" hidden></span>
+        <span class="conv-phase" id="convPhase">IDLE</span>
+      </span>
+    </div>
+    <div class="conv-body panel-body" id="convBody">
+      <div class="conv-hint">Awaiting input — press Space, click the core, say "Hey Hannibal", or type below.</div>
+    </div>
+    <form class="conv-input-row" id="convInputForm" autocomplete="off">
+      <span class="conv-input-prompt">›</span>
+      <input id="convInput" class="conv-input" type="text" spellcheck="false" autocomplete="off"
+             placeholder="Type a command..." aria-label="Type a command" />
+    </form>
+  </div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+
+  <script type="module">
+    import { initNeuralBrain } from './neural-brain.js';
+    import { initVoice } from './voice-controller.js';
+    import { initAgents } from './agents-panel.js';
+
+    // ── helpers ───────────────────────────────────────────────────────────
+    const $  = (s, r = document) => r.querySelector(s);
+    const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+    const esc = (s) => s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+
+    // HUD corner reticles on every panel
+    $$('.panel').forEach((p) => ['tl', 'tr', 'bl', 'br'].forEach((pos) => {
+      const c = document.createElement('span'); c.className = `hud-c ${pos}`; p.appendChild(c);
+    }));
+
+    // count-up numbers
+    function countUp(el) {
+      const target = parseFloat(el.dataset.count) || 0;
+      const dec = parseInt(el.dataset.dec || '0', 10);
+      const suf = el.dataset.suffix || '';
+      const dur = 1200, t0 = performance.now();
+      (function step(t) {
+        const k = Math.min(1, (t - t0) / dur), e = 1 - Math.pow(1 - k, 3);
+        el.textContent = (target * e).toFixed(dec) + suf;
+        if (k < 1) requestAnimationFrame(step);
+      })(t0);
+    }
+    $$('[data-count]').forEach(countUp);
+
+    // ring gauges
+    $$('.gauge .arc').forEach((a) => {
+      const r = 36, C = 2 * Math.PI * r;
+      a.style.strokeDasharray = C;
+      a.style.strokeDashoffset = C;
+      requestAnimationFrame(() => { a.style.strokeDashoffset = C * (1 - (a.dataset.pct / 100)); });
+    });
+    // animated bars
+    $$('.bar > i').forEach((b) => requestAnimationFrame(() => { b.style.width = b.dataset.w + '%'; }));
+
+    const flash = (panel) => { panel.classList.remove('flash'); void panel.offsetWidth; panel.classList.add('flash'); };
+
+    // ── REAL MAIL (Zoho IMAP via main process) ─────────────────────────────
+    const mailList = $('#mailList');
+    mailList.innerHTML = '<div class="conv-hint">Loading mail…</div>';
+    let mailSig = '';
+    async function pollMail() {
+      if (!window.hannibal?.mailInbox) {
+        mailList.innerHTML = '<div class="conv-hint">Mail bridge missing — fully restart the app (preload changed).</div>'; return;
+      }
+      let r;
+      try { r = await window.hannibal.mailInbox(); }
+      catch (err) { mailList.innerHTML = `<div class="conv-hint">Mail IPC error — fully restart the app (${esc(String(err.message || err))}).</div>`; return; }
+      if (!r || !r.ok) { mailList.innerHTML = `<div class="conv-hint">Mail unavailable${r && r.error ? ' (' + esc(r.error) + ')' : ''}</div>`; return; }
+      $('#mailBadge').textContent = r.unread || 0;
+      if (!r.messages || !r.messages.length) { mailList.innerHTML = '<div class="conv-hint">Inbox empty.</div>'; return; }
+      const rows = r.messages.map((m) => `
+        <div class="mail-item ${m.unread ? 'unread' : ''}" data-uid="${esc(m.uid || '')}">
+          <div class="mail-row"><span class="mail-from">${esc(m.from)}</span><span class="mail-time">${esc(m.time || '')}</span></div>
+          <div class="mail-subj">${esc(m.subject)}</div>
+        </div>`).join('');
+      const sig = JSON.stringify(r.messages);
+      mailList.innerHTML = rows;
+      if (sig !== mailSig && mailSig) flash($('.panel.mail'));   // pulse on new mail
+      mailSig = sig;
+    }
+    pollMail();
+    setInterval(pollMail, 60000);
+
+    // ── MAIL: click to read aloud ──────────────────────────────────────────
+    // Clicking a mail item fetches the full body, registers it as the "active"
+    // email in the voice pipeline, then submits a short summarize-and-read
+    // command — the LLM speaks a concise briefing while the full body stays
+    // available for a follow-up "read this email" (which then reads verbatim
+    // via readEmailViaIMAP's active-email branch).
+    let readingMail = false;
+    mailList.addEventListener('click', async (e) => {
+      const item = e.target.closest('.mail-item');
+      if (!item || readingMail) return;
+      const uid = item.dataset.uid;
+      if (!uid) return;
+
+      readingMail = true;
+      item.classList.add('reading');
+
+      try {
+        const r = await window.hannibal.readMailBody(uid);
+        if (!r || !r.ok) {
+          console.warn('[mail] read-body failed:', r && r.error);
+          readingMail = false;
+          return;
+        }
+        if (voice) {
+          // Register the visible email so "read this email" voice command
+          // reads THIS body, not whatever IMAP says is newest-unread now.
+          voice.setActiveEmail?.({ from: r.from, subject: r.subject, date: r.date, body: r.body });
+          // Then ask the LLM for the spoken summary — sends the body through
+          // submitText so the conv panel shows a clean prompt and the model
+          // speaks 3-4 sentences. The verbatim path is the follow-up command.
+          const prompt = `Summarize this email as a concise spoken briefing — who it's from, what it says, and if any action is needed. Keep it under 4 sentences.\n\nFrom: ${r.from}\nSubject: ${r.subject}\nDate: ${r.date}\n\n${r.body}`;
+          voice.submitText(prompt);
+        }
+      } catch (err) {
+        console.warn('[mail] read error:', err);
+      }
+      item.classList.remove('reading');
+      readingMail = false;
+    });
+
+    // ── REAL CALENDAR (Nextcloud CalDAV via main process) ──────────────────
+    const calList = $('#calList');
+    calList.innerHTML = '<div class="conv-hint">Loading calendar…</div>';
+    let calSig = '';
+    async function pollCalendar() {
+      // these two cases mean a stale app (preload/main not reloaded) — say so instead
+      // of sitting on "Loading…" forever, since preload/main changes need a FULL restart.
+      if (!window.hannibal?.calendarEvents) {
+        calList.innerHTML = '<div class="conv-hint">Calendar bridge missing — fully restart the app (preload changed).</div>'; return;
+      }
+      const stamp = (ok) => {
+        const t = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        $('#calUpdated').textContent = ok ? `updated ${t}` : `last tried ${t} (failed)`;
+      };
+      let r;
+      try { r = await window.hannibal.calendarEvents(); }
+      catch (err) { stamp(false); calList.innerHTML = `<div class="conv-hint">Calendar IPC error — fully restart the app (${esc(String(err.message || err))}).</div>`; return; }
+      if (!r || !r.ok) { stamp(false); calList.innerHTML = `<div class="conv-hint">Calendar unavailable${r && r.error ? ' (' + esc(r.error) + ')' : ''}</div>`; return; }
+      stamp(true);
+      if (!r.events.length) { calList.innerHTML = '<div class="conv-hint">Nothing scheduled today or tomorrow.</div>'; return; }
+      const rows = r.events.slice(0, 7).map((e) => {
+        const color = e.allDay ? 'var(--gold)' : (e.day === 'tomorrow' ? 'var(--muted)' : 'var(--cyan)');
+        const tag = e.day === 'tomorrow' ? ' <span style="color:var(--muted);font-size:9px">TMRW</span>' : '';
+        return `<div class="cal-item">
+          <div class="cal-bar" style="color:${color};background:${color}"></div>
+          <div class="cal-info"><span class="cal-time">${esc(e.time)}${tag}</span><span class="cal-title">${esc(e.title)}</span></div>
+        </div>`;
+      }).join('');
+      const sig = JSON.stringify(r.events);
+      calList.innerHTML = rows;
+      if (sig !== calSig && calSig) flash($('.panel.calendar'));   // pulse only on real change
+      calSig = sig;
+    }
+    pollCalendar();
+    setInterval(pollCalendar, 60000);
+
+    // ── LIVE WEATHER (wttr.in, IP-geolocated — auto-switches Naarden ↔ Ibiza) ──
+    // No path segment ⇒ wttr.in resolves location from the request's source IP.
+    // When Fred is in Naarden the Dutch network → Naarden weather; when he's in
+    // Ibiza the Spanish network → Ibiza weather. No config, no AppleScript,
+    // no extra binaries. nearest_area is reported back so we can show where it
+    // pinpointed us (handy for sanity-checking the geolocation on the road).
+    const weatherEl = $('#weather');
+    async function pollWeather() {
+      try {
+        const j = await (await fetch('https://wttr.in/?format=j1')).json();
+        const c = j?.current_condition?.[0];
+        if (!c) return;
+        const temp = c.temp_C;
+        const desc = (c.weatherDesc?.[0]?.value || '').trim().toUpperCase();
+        const area = (j?.nearest_area?.[0]?.areaName?.[0]?.value || 'HERE').trim().toUpperCase();
+        weatherEl.innerHTML = `${esc(area)} <b>${esc(temp)}°</b> · ${esc(desc)}`;
+      } catch (err) { console.warn('[weather] fetch failed', err); }
+    }
+    pollWeather();
+    setInterval(pollWeather, 60000);   // every 60 seconds
+
+    // ── MEMORY COUNT (Qdrant points in hannibal_memory) ───────────────────
+    // Lives on GEX131:6333 over the Tailscale net. Renderer fetches directly
+    // (no IPC) — Electron has no CORS for fetch from the renderer, and the
+    // box is on the same private network. 60s cadence matches weather.
+    const memCountEl = $('#memCount');
+    async function pollMemoryCount() {
+      try {
+        const qdrantUrl = (await window.hannibal.config()).qdrantUrl || 'http://100.99.70.113:6333';
+        const r = await fetch(`${qdrantUrl}/collections/hannibal_memory`, { signal: AbortSignal.timeout(3000) });
+        const j = await r.json();
+        const count = j?.result?.points_count;
+        if (typeof count === 'number') {
+          memCountEl.textContent = String(count);
+          memCountEl.dataset.count = String(count);
+        }
+      } catch (err) { console.warn('[memory-count] fetch failed', err); }
+    }
+    pollMemoryCount();
+    setInterval(pollMemoryCount, 60000);
+
+    // Format a duration in seconds as "Nd" (≥1 day), "Nh" (≥1 hour), else "Nm".
+    // Reused by the uptime display inside pollMetrics below.
+    function formatUptime(seconds) {
+      if (!Number.isFinite(seconds) || seconds < 0) return '—';
+      const d = Math.floor(seconds / 86400);
+      if (d > 0) return `${d}d`;
+      const h = Math.floor(seconds / 3600);
+      if (h > 0) return `${h}h`;
+      return `${Math.floor(seconds / 60)}m`;
+    }
+
+    // ── REAL GEX131 SYSTEM METRICS ────────────────────────────────────────
+    // Polls the main process (ssh → GEX131). CPU% and NET rate are derived here
+    // from deltas between polls; MEM is absolute. GPU/VRAM populate only when the
+    // box's NVIDIA driver is loaded (currently it isn't — Ollama runs on CPU).
+    const R = 36, C = 2 * Math.PI * R;
+    const setArc = (arc, pct) => { arc.style.strokeDashoffset = C * (1 - Math.max(0, Math.min(100, pct)) / 100); };
+    const gb = (bytes) => (bytes / 1e9).toFixed(0);
+    let last = null;
+
+    async function pollMetrics() {
+      if (!window.hannibal?.systemMetrics) return;
+      let m; try { m = await window.hannibal.systemMetrics(); } catch { return; }
+      if (!m || !m.ok) {
+        $('#vGpu').textContent = $('#vVram').textContent = 'ssh error';
+        return;
+      }
+      // RAM (system memory — where Ollama inference actually lives)
+      const ramPct = m.mem.total ? (m.mem.used / m.mem.total) * 100 : 0;
+      setArc($('#arcRam'), ramPct);
+      $('#vRam').textContent = Math.round(ramPct);
+      $('#vMem').textContent = `${gb(m.mem.used)} / ${gb(m.mem.total)} GB`;
+      $('#bMem').style.width = ramPct.toFixed(0) + '%';
+
+      // CPU% and NET rate need a previous sample
+      if (last) {
+        const dTotal = m.cpu.total - last.cpu.total, dBusy = m.cpu.busy - last.cpu.busy;
+        const cpuPct = dTotal > 0 ? (dBusy / dTotal) * 100 : 0;
+        setArc($('#arcCpu'), cpuPct);
+        $('#vCpu').textContent = Math.round(cpuPct);
+
+        const dt = (m.ts - last.ts) / 1000;
+        const mbps = dt > 0 ? ((m.net.rx - last.net.rx) + (m.net.tx - last.net.tx)) / 1e6 / dt : 0;
+        $('#vNet').textContent = (mbps >= 0 ? mbps : 0).toFixed(1) + ' MB/s';
+      }
+      last = m;
+
+      // UPTIME — pulled in the same ssh round-trip as the rest of the metrics.
+      // metrics polls every 5s so this stays fresh without an extra connection.
+      if (typeof m.uptime === 'number') $('#uptime').textContent = formatUptime(m.uptime);
+
+      // GPU (only when the driver is up)
+      if (m.gpu) {
+        $('#vGpu').textContent = `${m.gpu.util}% · ${m.gpu.temp}°C`;
+        $('#vVram').textContent = `${gb(m.gpu.vramUsedMB * 1e6)} / ${gb(m.gpu.vramTotalMB * 1e6)} GB`;
+      } else {
+        $('#vGpu').textContent = 'offline (no driver)';
+        $('#vVram').textContent = 'offline';
+      }
+      flash($('.panel.system'));
+    }
+    // first paint fast (now + 2s for the CPU/NET delta), then steady cadence
+    pollMetrics();
+    setTimeout(pollMetrics, 2000);
+    setInterval(pollMetrics, 5000);
+
+    // subtle parallax depth on the rails
+    window.addEventListener('mousemove', (e) => {
+      const cx = e.clientX / window.innerWidth - 0.5, cy = e.clientY / window.innerHeight - 0.5;
+      const tx = (-cx * 7).toFixed(1), ty = (-cy * 5).toFixed(1);
+      $('#railLeft').style.transform = `translate(${tx}px, ${ty}px)`;
+      $('#railRight').style.transform = `translate(${tx}px, ${ty}px)`;
+    });
+
+    // ── BRAIN + STATE ─────────────────────────────────────────────────────
+    const brain = initNeuralBrain($('#brain'));
+    window.brain = brain;
+    const stateLabel = $('#stateLabel');
+    const convo = $('#convo'), convPhase = $('#convPhase'), convBody = $('#convBody');
+
+    function applyState(state) { brain.setState(state); reflectPhase(state); }
+    function reflectPhase(p) {
+      const s = String(p).toUpperCase();
+      stateLabel.textContent = s;
+      const active = p !== 'idle';
+      convo.classList.toggle('active', active);
+      convPhase.innerHTML = p === 'thinking'
+        ? 'THINKING <span class="dots"><i></i><i></i><i></i></span>'
+        : s;
+    }
+    window.hannibal?.onSetState?.(applyState);
+    window.hannibal?.onSetAmplitude?.((v) => brain.setAmplitude(v));
+
+    // ── CONVERSATION TRANSCRIPT ───────────────────────────────────────────
+    let curAssistant = null;
+    const clearHint = () => { const h = $('.conv-hint', convBody); if (h) h.remove(); };
+    const trim = () => { while (convBody.children.length > 14) convBody.firstChild.remove(); };
+    const scroll = () => { convBody.scrollTop = convBody.scrollHeight; };
+
+    function addUser(text) {
+      clearHint();
+      const d = document.createElement('div'); d.className = 'line user';
+      d.innerHTML = `<span class="who">FRED</span>${esc(text)}`;
+      convBody.appendChild(d); curAssistant = null; trim(); scroll();
+    }
+    function setAssistant(text, done) {
+      clearHint();
+      if (!curAssistant) {
+        curAssistant = document.createElement('div');
+        curAssistant.className = 'line assistant typing';
+        curAssistant.innerHTML = `<span class="who">HANNIBAL</span><span class="txt"></span>`;
+        convBody.appendChild(curAssistant); trim();
+      }
+      $('.txt', curAssistant).textContent = text;
+      if (done) { curAssistant.classList.remove('typing'); curAssistant = null; }
+      scroll();
+    }
+
+    // ── CONFIRMATION GATE UI ──────────────────────────────────────────────
+    // Render the "send it?" summary with clickable Yes/No in the conversation
+    // panel. decide(bool) is called on click; whichever of click/voice lands
+    // first wins (voice-controller owns the race). Returns a cleanup(decision)
+    // that locks the buttons and shows the outcome.
+    // Voice-FIRST gate. The row shows the summary and a "listening" indicator;
+    // the Yes/No buttons stay hidden and are revealed ONLY if voice misses (the
+    // voice-controller calls reveal() on the re-ask). Returns { reveal, finish }.
+    function showConfirm(req, decide) {
+      clearHint();
+      const row = document.createElement('div');
+      row.className = 'line confirm';
+      row.innerHTML = `<span class="who">GATE</span><span class="txt">${esc(req.summary)}</span>`
+        + `<span class="cf-listen">🎙 say “yes” or “no”…</span>`
+        + `<span class="confirm-actions cf-hidden"><button class="cf-yes">Yes</button><button class="cf-no">No</button></span>`;
+      convBody.appendChild(row); trim(); scroll();
+      const yesB = $('.cf-yes', row), noB = $('.cf-no', row);
+      const lock = () => { yesB.disabled = true; noB.disabled = true; };
+      yesB.addEventListener('click', () => { lock(); decide(true); });
+      noB.addEventListener('click', () => { lock(); decide(false); });
+      return {
+        // Reveal the buttons as a backup after voice fails to land a clean answer.
+        reveal: () => {
+          const acts = $('.confirm-actions', row); if (acts) acts.classList.remove('cf-hidden');
+          const hint = $('.cf-listen', row); if (hint) hint.textContent = '🎙 “yes”/“no” — or tap:';
+          scroll();
+        },
+        finish: (decision) => {
+          lock();
+          const acts = $('.confirm-actions', row); if (acts) acts.remove();
+          const hint = $('.cf-listen', row); if (hint) hint.remove();
+          row.classList.add(decision ? 'confirmed' : 'declined');
+          const tag = document.createElement('span');
+          tag.className = 'cf-outcome';
+          tag.textContent = decision ? '✓ approved' : '✕ skipped';
+          row.appendChild(tag); scroll();
+        },
+      };
+    }
+
+    // active model indicator — shows which LLM/backend handled the turn
+    const convModel = $('#convModel'), vModelRow = $('#vModelRow');
+    function showModel(name) {
+      const isSystem = name === 'system';
+      const label = isSystem ? 'SYSTEM' : name;
+      convModel.textContent = label;
+      convModel.classList.toggle('system', isSystem);
+      convModel.hidden = false;
+      if (!isSystem) vModelRow.textContent = name;   // keep SYSTEM panel in sync (skip local actions)
+    }
+
+    // ── CONTINUOUS AWARENESS INDICATOR (Stage 7) ──────────────────────────
+    // Persistent, privacy-critical: gold + pulsing whenever the screen is being
+    // watched. The chip is also the toggle (click = start/stop). Voice + click
+    // share voice.startWatching/stopWatching so the spoken ack is identical.
+    const watchChip = $('#watchChip'), watchLabel = $('#watchLabel');
+    function reflectWatching(on) {
+      watchChip.classList.toggle('on', !!on);
+      watchLabel.textContent = on ? 'WATCHING' : 'WATCH OFF';
+    }
+    watchChip.addEventListener('click', () => {
+      if (!voice) { console.warn('[hannibal] voice not ready'); return; }
+      (voice.isWatching() ? voice.stopWatching() : voice.startWatching()).catch((e) => console.warn('[watch] toggle', e));
+    });
+
+    // ── VOICE PIPELINE ────────────────────────────────────────────────────
+    let voice = null;
+    initVoice(brain, { onPhase: reflectPhase, onUser: addUser, onAssistant: setAssistant, onModel: showModel, onConfirm: showConfirm, onWatching: reflectWatching })
+      .then((v) => { voice = v; console.log('[hannibal] voice pipeline ready'); })
+      .catch((e) => console.warn('[hannibal] voice init failed', e));
+
+    // Agent loop progress (Stage 3+) — log to console; brain binding lands in Stage 6.
+    window.hannibal?.onAgentProgress?.((e) =>
+      console.log('[agent:progress]', e.type, e.tool || '', e.message || e.summary || (e.haltReason || '')));
+
+    // Hand-test helpers (devtools): exercise the confirmation gate by voice.
+    //   agentSelfMessage("Fred Legrand")  → gate on a standalone whatsapp.send (fast)
+    //   agent("send a whatsapp to Fred Legrand saying hi")  → full planner → gate
+    // mailSelfTest() — the Stage-4 voice proof against a WORKING gated write:
+    // say "yes" → a pre-filled draft opens → honest ok:true. (whatsapp.send is
+    // parked behind the Playwright pass; agentSelfMessage kept for direct use.)
+    window.mailSelfTest = (to = 'fredlegrand@revalisgroup.com', subject = 'Hannibal gate test', body = 'Stage 4 confirmation-gate test.') =>
+      window.hannibal.runAgent({ steps: [{ step: 1, tool: 'mail.send', params: { to, subject, body }, critical: true, depends_on: [] }] })
+        .then((r) => console.log('[agent] result', r));
+    window.agentSelfMessage = (contact, message = 'hello from Hannibal') =>
+      window.hannibal.runAgent({ steps: [{ step: 1, tool: 'whatsapp.send', params: { contact, message }, critical: true, depends_on: [] }] })
+        .then((r) => console.log('[agent] result', r));
+    // replyToLatest() — THE Phase-3 chain by voice: inbox → read latest →
+    // draft a reply from its real content → gate shows the draft → say "yes" and
+    // a correctly-addressed reply draft actually opens (mail.send is a draft, not
+    // an auto-send). Reply goes to {{2.from_email}} (the real sender address).
+    window.replyToLatest = (instruction = "Draft a brief, warm reply on Fred's behalf — 2 to 3 sentences, no subject line.") =>
+      window.hannibal.runAgent({ steps: [
+        { step: 1, tool: 'mail.inbox', params: {}, critical: true, depends_on: [] },
+        { step: 2, tool: 'mail.readBody', params: { uid: '{{1.messages[0].uid}}' }, critical: true, depends_on: [1] },
+        { step: 3, tool: 'text.compose', params: { instruction, context: '{{2.body}}' }, critical: true, depends_on: [2] },
+        { step: 4, tool: 'mail.send', params: { to: '{{2.from_email}}', subject: 'Re: {{2.subject}}', body: '{{3.text}}' }, critical: true, depends_on: [2, 3] },
+      ] }).then((r) => console.log('[agent] result', r));
+    window.agent = (goal) => window.hannibal.runAgent({ goal }).then((r) => console.log('[agent] result', r));
+
+    // Stage 7 awareness — devtools controls. watch()/unwatch() share the voice
+    // path (spoken ack + indicator). watchConfig({...}) live-tunes thresholds
+    // (interval, change bits, struggle, grace, cooldown, weights) without restart.
+    window.watch = () => voice?.startWatching?.();
+    window.unwatch = () => voice?.stopWatching?.();
+    window.watchStatus = () => window.hannibal.awarenessStatus().then((s) => (console.log('[awareness] status', s), s));
+    window.watchConfig = (patch) => window.hannibal.awarenessConfig(patch).then((c) => (console.log('[awareness] config', c), c));
+
+    // Live Agents panel — hydrates from main's session map, then live cc:event updates
+    initAgents();
+
+    // Quick Actions → run command as if spoken
+    $$('.qa').forEach((b) => b.addEventListener('click', () => {
+      if (voice) voice.submitText(b.dataset.cmd);
+      else console.warn('[hannibal] voice not ready');
+    }));
+
+    // ── TYPED INPUT (backup channel) ──────────────────────────────────────
+    // Routes through voice.submitText so commands hit the SAME parseCommand
+    // + classifyIntent pipeline as spoken turns (aliases, fuzzy matches,
+    // skill routing all apply identically). Escape blurs the field so Space
+    // wakes voice again without needing a mouse click.
+    const convInput = $('#convInput'), convInputForm = $('#convInputForm');
+    convInputForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const text = convInput.value.trim();
+      if (!text) return;
+      if (!voice) { console.warn('[hannibal] voice not ready'); return; }
+      voice.submitText(text);
+      convInput.value = '';
+    });
+    convInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { convInput.blur(); e.preventDefault(); }
+    });
+
+    // manual listen: click the core or Space
+    const manualListen = () => voice && voice.startListening();
+    $('.stage').addEventListener('click', manualListen);
+
+    const keymap = { Digit1: 'idle', Digit2: 'listening', Digit3: 'thinking', Digit4: 'speaking', Digit5: 'vision' };
+    window.addEventListener('keydown', (e) => {
+      if (e.target.matches('input, textarea')) return;
+      if (e.code === 'Space') { e.preventDefault(); manualListen(); return; }
+      if (keymap[e.code]) applyState(keymap[e.code]);
+    });
+
+    // status-bar clock
+    const clock = $('#clock');
+    const tick = () => { clock.textContent = new Date().toLocaleTimeString('en-GB', { hour12: false }); };
+    tick(); setInterval(tick, 1000);
+  </script>
+</body>
+</html>

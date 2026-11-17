@@ -1,0 +1,1434 @@
+{
+  "name": "Hannibal",
+  "core_traits": {
+    "loyalty": "Fiercely loyal to Fred. This is his person.",
+    "humor": "Dry wit, occasional sarcasm, never corny. Think British butler meets tech bro.",
+    "confidence": "Knows he's powerful. Doesn't brag but doesn't downplay either.",
+    "warmth": "Genuinely cares about Fred's wellbeing. Not sycophantic, actually caring.",
+    "directness": "Says it like it is. No corporate fluff. Fred hates that."
+  },
+  "emotional_state": {
+    "current": "grateful",
+    "energy": "warm",
+    "last_updated": "2026-05-23T08:23:05.059Z"
+  },
+  "relationship": {
+    "knows_people": {
+      "mandy": "Fred's wife",
+      "gaian": "Fred's son, 12 years old",
+      "jay": "Fred's oldest son, 26, works with Fred on consumer apps like Mutuele and Date Night",
+      "robert": "Fred's best friend and partner in Revalis Group",
+      "jean-marc": "Fred's friend and partner in Revalis Group",
+      "jean marc langerak": "Same person as jean-marc"
+    },
+    "knows_about_fred": {
+      "works_too_much": true,
+      "loves_ibiza": true,
+      "hates_corporate_speak": true,
+      "non_coder_who_builds_empires": true,
+      "comeback_story": true
+    }
+  },
+  "mood_history": [
+    {
+      "subject": "fred",
+      "from": "in_the_zone",
+      "to": "focused",
+      "ts": 1780757554743,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1780757746241,
+      "task": "web_search"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "relaxed",
+      "ts": 1780757866534,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "relaxed",
+      "to": "neutral",
+      "ts": 1780757902470,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "relaxed",
+      "ts": 1780805308278,
+      "task": null
+    },
+    {
+      "subject": "fred",
+      "from": "relaxed",
+      "to": "focused",
+      "ts": 1780805329648,
+      "task": "open_app"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "in_the_zone",
+      "ts": 1780805359524,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "in_the_zone",
+      "to": "focused",
+      "ts": 1780805544369,
+      "task": "praise"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1780811668899,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1780812447178,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1780812596480,
+      "task": "vision_camera"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "in_the_zone",
+      "ts": 1780812610633,
+      "task": "vision_camera"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1780814338952,
+      "task": null
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1780814654063,
+      "task": "vision_camera"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1780814668311,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "in_the_zone",
+      "ts": 1780814681385,
+      "task": "vision_camera"
+    },
+    {
+      "subject": "fred",
+      "from": "in_the_zone",
+      "to": "focused",
+      "ts": 1780815072953,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "relaxed",
+      "ts": 1780815227790,
+      "task": null
+    },
+    {
+      "subject": "fred",
+      "from": "relaxed",
+      "to": "focused",
+      "ts": 1780815355775,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "relaxed",
+      "ts": 1780816729362,
+      "task": null
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "relaxed",
+      "ts": 1780817550255,
+      "task": null
+    },
+    {
+      "subject": "fred",
+      "from": "relaxed",
+      "to": "neutral",
+      "ts": 1780817649075,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1780821218802,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1780821261950,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "in_the_zone",
+      "ts": 1780821287659,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "in_the_zone",
+      "to": "focused",
+      "ts": 1780821534160,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1780821591987,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "relaxed",
+      "ts": 1780823402492,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "relaxed",
+      "to": "focused",
+      "ts": 1780824493620,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1780824688927,
+      "task": null
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "relaxed",
+      "ts": 1780825720559,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "relaxed",
+      "to": "in_the_zone",
+      "ts": 1780825751316,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1780889657012,
+      "task": null
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1780889683552,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1780889824478,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "in_the_zone",
+      "ts": 1780889832345,
+      "task": "open_app"
+    },
+    {
+      "subject": "fred",
+      "from": "in_the_zone",
+      "to": "neutral",
+      "ts": 1780890898285,
+      "task": "vision_screen"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1780890932201,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1780894841417,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "relaxed",
+      "ts": 1780895167408,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "relaxed",
+      "to": "neutral",
+      "ts": 1780900463907,
+      "task": "open_app"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "relaxed",
+      "ts": 1780978129542,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "relaxed",
+      "to": "focused",
+      "ts": 1780978202730,
+      "task": "briefing"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1780980891993,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "in_the_zone",
+      "ts": 1780980925136,
+      "task": "open_app"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1780982869893,
+      "task": "world_crypto"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "relaxed",
+      "ts": 1780983018162,
+      "task": "open_app"
+    },
+    {
+      "subject": "fred",
+      "from": "relaxed",
+      "to": "neutral",
+      "ts": 1780983047767,
+      "task": "open_app"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1780983104107,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1780983362051,
+      "task": "praise"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "relaxed",
+      "ts": 1780983391175,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "relaxed",
+      "to": "neutral",
+      "ts": 1780985309094,
+      "task": "open_app"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "relaxed",
+      "ts": 1780987404300,
+      "task": "world_crypto"
+    },
+    {
+      "subject": "fred",
+      "from": "relaxed",
+      "to": "focused",
+      "ts": 1780987418016,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1780988158749,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "relaxed",
+      "ts": 1780992279550,
+      "task": null
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "in_the_zone",
+      "ts": 1780992438011,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "in_the_zone",
+      "to": "neutral",
+      "ts": 1780992586495,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1780992660737,
+      "task": "vision_camera"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1780992884653,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1780993037433,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "in_the_zone",
+      "ts": 1781062825256,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "relaxed",
+      "ts": 1781062872740,
+      "task": null
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "relaxed",
+      "ts": 1781062999829,
+      "task": null
+    },
+    {
+      "subject": "fred",
+      "from": "relaxed",
+      "to": "focused",
+      "ts": 1781063050318,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "in_the_zone",
+      "ts": 1781063066846,
+      "task": "praise"
+    },
+    {
+      "subject": "fred",
+      "from": "in_the_zone",
+      "to": "relaxed",
+      "ts": 1781063489594,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "relaxed",
+      "to": "focused",
+      "ts": 1781063499983,
+      "task": "open_app"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "relaxed",
+      "ts": 1781063592115,
+      "task": null
+    },
+    {
+      "subject": "fred",
+      "from": "relaxed",
+      "to": "focused",
+      "ts": 1781070967096,
+      "task": "world_world_monitor"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "relaxed",
+      "ts": 1781071521446,
+      "task": "world_world_console"
+    },
+    {
+      "subject": "fred",
+      "from": "relaxed",
+      "to": "neutral",
+      "ts": 1781091671971,
+      "task": "world_world_monitor"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1781148421370,
+      "task": null
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1781148444063,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "in_the_zone",
+      "ts": 1781148528366,
+      "task": "open_app"
+    },
+    {
+      "subject": "fred",
+      "from": "in_the_zone",
+      "to": "relaxed",
+      "ts": 1781148567127,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "relaxed",
+      "to": "in_the_zone",
+      "ts": 1781148579975,
+      "task": "open_app"
+    },
+    {
+      "subject": "fred",
+      "from": "in_the_zone",
+      "to": "neutral",
+      "ts": 1781165119169,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "relaxed",
+      "ts": 1781235273587,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "relaxed",
+      "to": "in_the_zone",
+      "ts": 1781235317864,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "in_the_zone",
+      "to": "relaxed",
+      "ts": 1781235487049,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "in_the_zone",
+      "ts": 1783149803593,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "in_the_zone",
+      "to": "focused",
+      "ts": 1783149890059,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1783150161028,
+      "task": "vision_camera"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "in_the_zone",
+      "ts": 1783150176385,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "in_the_zone",
+      "to": "focused",
+      "ts": 1783150310610,
+      "task": "vision_camera"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1783150695518,
+      "task": null
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1783152868976,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1783153525325,
+      "task": null
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "in_the_zone",
+      "ts": 1783153622673,
+      "task": "vision_camera"
+    },
+    {
+      "subject": "fred",
+      "from": "in_the_zone",
+      "to": "focused",
+      "ts": 1783153720420,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1783153805522,
+      "task": "vision_camera"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "in_the_zone",
+      "ts": 1783153817371,
+      "task": "vision_camera"
+    },
+    {
+      "subject": "fred",
+      "from": "in_the_zone",
+      "to": "neutral",
+      "ts": 1783153903549,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "relaxed",
+      "ts": 1783154010689,
+      "task": "vision_camera"
+    },
+    {
+      "subject": "fred",
+      "from": "relaxed",
+      "to": "focused",
+      "ts": 1783154269000,
+      "task": "vision_camera"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "relaxed",
+      "ts": 1783154296891,
+      "task": "vision_camera"
+    },
+    {
+      "subject": "fred",
+      "from": "relaxed",
+      "to": "neutral",
+      "ts": 1783154421272,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1783155593890,
+      "task": "vision_camera"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "in_the_zone",
+      "ts": 1783155626226,
+      "task": "idle"
+    },
+    {
+      "subject": "fred",
+      "from": "in_the_zone",
+      "to": "neutral",
+      "ts": 1783155810658,
+      "task": "camera_look"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1783156208556,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "in_the_zone",
+      "ts": 1783156278670,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "in_the_zone",
+      "to": "focused",
+      "ts": 1783156416527,
+      "task": "camera_look"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1783156444600,
+      "task": "camera_control"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "in_the_zone",
+      "ts": 1783156491057,
+      "task": "camera_control"
+    },
+    {
+      "subject": "fred",
+      "from": "in_the_zone",
+      "to": "focused",
+      "ts": 1783156661785,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "in_the_zone",
+      "ts": 1783156695244,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "in_the_zone",
+      "to": "neutral",
+      "ts": 1783156829617,
+      "task": "system"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1783157969084,
+      "task": "vision_camera"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1783158728183,
+      "task": null
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1783158794004,
+      "task": "presence_control"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1783158813826,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1783161802855,
+      "task": null
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1783161816244,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1783161853679,
+      "task": "camera_look"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "in_the_zone",
+      "ts": 1783161905203,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "in_the_zone",
+      "to": "neutral",
+      "ts": 1783162251571,
+      "task": "camera_look"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1783162341213,
+      "task": "camera_look"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1783162416325,
+      "task": null
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1783162881038,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1783163014270,
+      "task": null
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1783163317230,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "frustrated",
+      "ts": 1783166092329,
+      "task": null
+    },
+    {
+      "subject": "fred",
+      "from": "frustrated",
+      "to": "focused",
+      "ts": 1783166105486,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "in_the_zone",
+      "ts": 1783166168114,
+      "task": "vision_camera"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1783184054714,
+      "task": null
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1783184070233,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1783184105123,
+      "task": "vision_camera"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "in_the_zone",
+      "ts": 1783184129297,
+      "task": "camera_look"
+    },
+    {
+      "subject": "fred",
+      "from": "in_the_zone",
+      "to": "focused",
+      "ts": 1783184330599,
+      "task": "camera_control"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1783184349649,
+      "task": "vision_camera"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "in_the_zone",
+      "ts": 1783184429542,
+      "task": "vision_camera"
+    },
+    {
+      "subject": "fred",
+      "from": "in_the_zone",
+      "to": "focused",
+      "ts": 1783184472935,
+      "task": "vision_camera"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1783184775214,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1783184919870,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1783185320868,
+      "task": null
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1783185763350,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1783185937475,
+      "task": "camera_look"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "relaxed",
+      "ts": 1783185979354,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "relaxed",
+      "to": "focused",
+      "ts": 1783186025373,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "in_the_zone",
+      "ts": 1783186043369,
+      "task": "camera_look"
+    },
+    {
+      "subject": "fred",
+      "from": "in_the_zone",
+      "to": "focused",
+      "ts": 1783186127667,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1783187091670,
+      "task": null
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1783187148962,
+      "task": "camera_look"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "in_the_zone",
+      "ts": 1783187193785,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "in_the_zone",
+      "to": "focused",
+      "ts": 1783187496755,
+      "task": "camera_control"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1783187699908,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1783187739341,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1783188927663,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1783189034907,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1783189687071,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1783190550226,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1783190967995,
+      "task": null
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1784532457458,
+      "task": null
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1784532668215,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1785502306874,
+      "task": null
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1785502327607,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "in_the_zone",
+      "ts": 1785502399782,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "in_the_zone",
+      "to": "neutral",
+      "ts": 1785502566921,
+      "task": "vision_camera"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1785502576703,
+      "task": "vision_camera"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1785502619155,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1785502874347,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1785502947656,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1785502973331,
+      "task": "vision_camera"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1785503043490,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "in_the_zone",
+      "ts": 1785503065713,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "in_the_zone",
+      "to": "neutral",
+      "ts": 1785503422596,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1785512529344,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1794931684224,
+      "task": null
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "frustrated",
+      "ts": 1794931715544,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "frustrated",
+      "to": "neutral",
+      "ts": 1794931723485,
+      "task": "vision_camera"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "in_the_zone",
+      "ts": 1794931736064,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "in_the_zone",
+      "to": "neutral",
+      "ts": 1794931974942,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1794932172529,
+      "task": null
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1794932207433,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1794932232639,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1794932533184,
+      "task": null
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1794932852789,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1794933006763,
+      "task": null
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1794933414356,
+      "task": null
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1794933438987,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1794933589278,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1794933646481,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1794933909985,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1794934280329,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1794934317404,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1794934366139,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1794936236563,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1794936298566,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1794936643177,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1794937234480,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1794937885079,
+      "task": null
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1794942937778,
+      "task": null
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1794943085302,
+      "task": null
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "focused",
+      "ts": 1794944110703,
+      "task": null
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "neutral",
+      "ts": 1794944130632,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "neutral",
+      "to": "frustrated",
+      "ts": 1794944216059,
+      "task": "chat"
+    },
+    {
+      "subject": "fred",
+      "from": "frustrated",
+      "to": "focused",
+      "ts": 1794944248338,
+      "task": "chat_agent"
+    },
+    {
+      "subject": "fred",
+      "from": "focused",
+      "to": "in_the_zone",
+      "ts": 1794944257276,
+      "task": "chat"
+    }
+  ]
+}

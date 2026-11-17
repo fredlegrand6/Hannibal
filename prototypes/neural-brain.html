@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>HANNIBAL · NEURAL CORE</title>
+<style>
+  :root {
+    --bg: #06060C;
+    --cyan: #00E5FF;
+    --text: #6B7280;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: var(--bg); }
+  #scene { display: block; width: 100vw; height: 100vh; }
+
+  /* HUD overlay — sells the cockpit feel */
+  .hud {
+    position: fixed;
+    pointer-events: none;
+    font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+    color: var(--cyan);
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    -webkit-font-smoothing: antialiased;
+  }
+  .hud--tl { top: 22px; left: 26px; }
+  .hud--bl { bottom: 22px; left: 26px; }
+  .hud--br { bottom: 22px; right: 26px; text-align: right; }
+  .title { font-size: 13px; opacity: 0.9; }
+  .sub { font-size: 10px; opacity: 0.45; margin-top: 4px; letter-spacing: 0.3em; color: #6B7280; }
+  .meta { font-size: 10px; opacity: 0.5; letter-spacing: 0.25em; line-height: 1.7; }
+  .dot { color: #00FF88; }
+  .fps { font-variant-numeric: tabular-nums; }
+  .hint { font-size: 9px; opacity: 0.3; letter-spacing: 0.25em; }
+</style>
+</head>
+<body>
+  <canvas id="scene"></canvas>
+
+  <div class="hud hud--tl">
+    <div class="title">HANNIBAL · NEURAL CORE</div>
+    <div class="sub">V2 — IDLE STATE</div>
+  </div>
+  <div class="hud hud--bl">
+    <div class="meta">
+      <span class="dot">●</span> GEX131 ONLINE<br/>
+      NODES <span id="nodeCount">—</span> · LINKS <span id="linkCount">—</span><br/>
+      <span class="fps" id="fps">— FPS</span>
+    </div>
+  </div>
+  <div class="hud hud--br">
+    <div class="hint">DRAG TO ORBIT · SCROLL TO ZOOM</div>
+  </div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
+    import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
+    import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
+
+    // ─────────────────────────────────────────────────────────────
+    // CONFIG — tweak these to taste
+    // ─────────────────────────────────────────────────────────────
+    const CFG = {
+      count:        300,     // particle nodes
+      color:        0x00E5FF, // electric cyan
+      bg:           0x06060C, // near-black blue
+      particleSize: 0.16,    // base world-space glow diameter (scaled per tier)
+      linkDist:     0.52,    // max distance to draw a connection
+      linkMax:      6,       // max connections per node (keeps it clean)
+      linkWidth:    2.4,     // line thickness in pixels (real fat lines)
+      linkBright:   0.85,    // overall line brightness (additive)
+      linkRadius:   1.7,     // lines fade to invisible past this distance from orb
+      breatheAmp:   0.02,    // scale pulse: 0.98 .. 1.02
+      breathePeriod: 4.0,    // seconds per breath
+      rotateSpeed:  0.08,    // radians/sec — very slow Y float (~78s/rev)
+      fireRate:     2.5,     // random neuron firings per second
+    };
+
+    // ─────────────────────────────────────────────────────────────
+    // RENDERER / SCENE / CAMERA
+    // ─────────────────────────────────────────────────────────────
+    const canvas = document.getElementById('scene');
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setClearColor(CFG.bg, 1);
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
+    camera.position.set(0, 0.3, 4.4);
+
+    const controls = new OrbitControls(camera, canvas);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.06;
+    controls.minDistance = 2.5;
+    controls.maxDistance = 9;
+    controls.enablePan = false;
+    // Brain spins itself on Y (a floating drift); OrbitControls is just for inspection.
+
+    const brain = new THREE.Group();
+    scene.add(brain);
+
+    // ─────────────────────────────────────────────────────────────
+    // BRAIN-SHAPED POINT CLOUD
+    // ellipsoid shell + organic gyri noise + sagittal fissure
+    // ─────────────────────────────────────────────────────────────
+    function noise3(x, y, z) {
+      return (
+        Math.sin(x * 1.0 + y * 1.7 + z * 0.3) +
+        Math.sin(y * 1.3 + z * 1.9 + x * 0.5) +
+        Math.sin(z * 1.1 + x * 2.1 + y * 0.7)
+      ) / 3.0;
+    }
+
+    function generateBrainPoints(count) {
+      const pts = [];
+      const ax = 1.15, ay = 0.95, az = 1.45; // width, height, length(front-back)
+      while (pts.length < count) {
+        // uniform direction on sphere, biased toward the shell
+        const u = Math.random(), v = Math.random();
+        const theta = Math.acos(2 * v - 1);
+        const phi = 2 * Math.PI * u;
+        let r = 0.62 + 0.38 * Math.pow(Math.random(), 0.4);
+
+        let x = r * Math.sin(theta) * Math.cos(phi);
+        let y = r * Math.cos(theta);
+        let z = r * Math.sin(theta) * Math.sin(phi);
+
+        // gyri / folds — radial displacement by noise
+        const disp = 1.0 + 0.13 * noise3(x * 3.0, y * 3.0, z * 3.0);
+        x *= disp; y *= disp; z *= disp;
+
+        // ellipsoid scaling
+        x *= ax; y *= ay; z *= az;
+
+        // sagittal fissure — split into two hemispheres, sink a midline groove
+        if (Math.abs(x) < 0.13 && y > -0.15) {
+          x += (x >= 0 ? 1 : -1) * 0.13;
+          y -= 0.07;
+        }
+
+        pts.push(new THREE.Vector3(x, y, z));
+      }
+      return pts;
+    }
+
+    const points = generateBrainPoints(CFG.count);
+
+    // ─────────────────────────────────────────────────────────────
+    // PARTICLES — InstancedMesh of camera-facing quads + glow shader
+    // ─────────────────────────────────────────────────────────────
+    const particleGeo = new THREE.PlaneGeometry(1, 1);
+
+    // Three tiers of node: large bright cores (20%), mid glow (50%), small dim (30%)
+    const seeds  = new Float32Array(CFG.count);
+    const scales = new Float32Array(CFG.count);
+    const brights = new Float32Array(CFG.count);
+    const fires  = new Float32Array(CFG.count).fill(-100); // last fire time (none yet)
+    for (let i = 0; i < CFG.count; i++) {
+      seeds[i] = Math.random() * 100;
+      const tier = Math.random();
+      if (tier < 0.20) {            // large bright core
+        scales[i]  = 1.5 + Math.random() * 0.5;
+        brights[i] = 1.25 + Math.random() * 0.25;
+      } else if (tier < 0.70) {     // medium mid-glow
+        scales[i]  = 0.85 + Math.random() * 0.35;
+        brights[i] = 0.8 + Math.random() * 0.2;
+      } else {                      // small dim outer
+        scales[i]  = 0.45 + Math.random() * 0.25;
+        brights[i] = 0.4 + Math.random() * 0.18;
+      }
+    }
+    particleGeo.setAttribute('aSeed',   new THREE.InstancedBufferAttribute(seeds, 1));
+    particleGeo.setAttribute('aScale',  new THREE.InstancedBufferAttribute(scales, 1));
+    particleGeo.setAttribute('aBright', new THREE.InstancedBufferAttribute(brights, 1));
+    const fireAttr = new THREE.InstancedBufferAttribute(fires, 1);
+    fireAttr.setUsage(THREE.DynamicDrawUsage);
+    particleGeo.setAttribute('aFire', fireAttr);
+
+    const particleMat = new THREE.ShaderMaterial({
+      uniforms: {
+        uTime:  { value: 0 },
+        uSize:  { value: CFG.particleSize },
+        uColor: { value: new THREE.Color(CFG.color) },
+      },
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      vertexShader: /* glsl */`
+        attribute float aSeed;
+        attribute float aScale;
+        attribute float aBright;
+        attribute float aFire;
+        uniform float uTime;
+        uniform float uSize;
+        varying vec2 vUv;
+        varying float vBright;
+        void main() {
+          vUv = uv;
+          // gentle per-node twinkle around its tier brightness
+          float twinkle = 0.85 + 0.15 * sin(uTime * (0.8 + aSeed * 0.06) + aSeed * 6.28);
+          float base = aBright * twinkle;
+
+          // random neuron firing — sharp flash then exponential fade
+          float since = uTime - aFire;
+          float fire = (since >= 0.0) ? exp(-since * 5.0) : 0.0;
+          float bright = base + fire * 2.2;
+
+          vec4 center = instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+          vec4 mv = modelViewMatrix * center;
+
+          // depth cue — back of the brain dims
+          float depth = -mv.z;
+          float fade = smoothstep(6.8, 2.0, depth);
+          vBright = bright * fade;
+
+          // a firing node briefly swells too
+          float swell = 1.0 + fire * 0.6;
+
+          // billboard the quad toward the camera in view space
+          mv.xy += position.xy * uSize * aScale * swell;
+          gl_Position = projectionMatrix * mv;
+        }
+      `,
+      fragmentShader: /* glsl */`
+        uniform vec3 uColor;
+        varying vec2 vUv;
+        varying float vBright;
+        void main() {
+          float d = length(vUv - 0.5) * 2.0;
+          if (d > 1.0) discard;
+          float halo = pow(smoothstep(1.0, 0.0, d), 2.2);
+          float core = smoothstep(0.32, 0.0, d);
+          float intensity = (halo * 0.55 + core) * vBright;
+          vec3 col = uColor * intensity + vec3(1.0) * core * vBright * 0.25; // hot white core
+          gl_FragColor = vec4(col, intensity);
+        }
+      `,
+    });
+
+    const particles = new THREE.InstancedMesh(particleGeo, particleMat, CFG.count);
+    const dummy = new THREE.Object3D();
+    for (let i = 0; i < CFG.count; i++) {
+      dummy.position.copy(points[i]);
+      dummy.updateMatrix();
+      particles.setMatrixAt(i, dummy.matrix);
+    }
+    particles.instanceMatrix.needsUpdate = true;
+    brain.add(particles);
+
+    // ─────────────────────────────────────────────────────────────
+    // CONNECTIONS — proximity lines, alpha falls off with distance
+    // ─────────────────────────────────────────────────────────────
+    // Per-vertex brightness baked into color (additive): brighter near the orb,
+    // fading to near-zero at the brain's edges, with closer pairs slightly hotter.
+    const smoothstep = (e0, e1, x) => {
+      const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
+      return t * t * (3 - 2 * t);
+    };
+    const cyan = new THREE.Color(CFG.color);
+
+    function buildConnections(pts) {
+      const positions = [];
+      const colors = [];
+      const degree = new Array(pts.length).fill(0);
+      const seen = new Set();
+
+      const pushVertex = (p, dist) => {
+        const closeness = 0.5 + 0.5 * (1.0 - dist / CFG.linkDist);
+        // smoothstep(radius -> 0): 1 at center, 0 at edge
+        let centerFade = smoothstep(CFG.linkRadius, 0.0, p.length());
+        centerFade = Math.pow(centerFade, 1.6);
+        const intensity = Math.min(1, closeness * centerFade) * CFG.linkBright;
+        positions.push(p.x, p.y, p.z);
+        colors.push(cyan.r * intensity, cyan.g * intensity, cyan.b * intensity);
+      };
+
+      for (let i = 0; i < pts.length; i++) {
+        const near = [];
+        for (let j = 0; j < pts.length; j++) {
+          if (i === j) continue;
+          const dist = pts[i].distanceTo(pts[j]);
+          if (dist < CFG.linkDist) near.push({ j, dist });
+        }
+        near.sort((a, b) => a.dist - b.dist);
+
+        for (const { j, dist } of near) {
+          if (degree[i] >= CFG.linkMax) break;
+          if (degree[j] >= CFG.linkMax) continue;
+          const key = i < j ? `${i}_${j}` : `${j}_${i}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          degree[i]++; degree[j]++;
+          pushVertex(pts[i], dist);
+          pushVertex(pts[j], dist);
+        }
+      }
+      return { positions, colors, count: seen.size };
+    }
+
+    const conn = buildConnections(points);
+    const lineGeo = new LineSegmentsGeometry();
+    lineGeo.setPositions(conn.positions);
+    lineGeo.setColors(conn.colors);
+
+    const lineMat = new LineMaterial({
+      vertexColors: true,
+      linewidth: CFG.linkWidth,   // real thickness, in pixels
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      dashed: false,
+    });
+    lineMat.resolution.set(window.innerWidth, window.innerHeight);
+
+    const lines = new LineSegments2(lineGeo, lineMat);
+    lines.computeLineDistances();
+    brain.add(lines);
+
+    // ─────────────────────────────────────────────────────────────
+    // VOICE ORB — glowing sphere at the brain's core, gently pulsing
+    // (inner fresnel sphere + outer billboard halo for bloom)
+    // ─────────────────────────────────────────────────────────────
+    const orb = new THREE.Group();
+
+    const orbCore = new THREE.Mesh(
+      new THREE.IcosahedronGeometry(0.28, 5),
+      new THREE.ShaderMaterial({
+        uniforms: { uTime: { value: 0 }, uColor: { value: new THREE.Color(CFG.color) } },
+        transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+        vertexShader: /* glsl */`
+          varying vec3 vNormal;
+          varying vec3 vView;
+          void main() {
+            vNormal = normalize(normalMatrix * normal);
+            vec4 mv = modelViewMatrix * vec4(position, 1.0);
+            vView = normalize(-mv.xyz);
+            gl_Position = projectionMatrix * mv;
+          }
+        `,
+        fragmentShader: /* glsl */`
+          uniform vec3 uColor;
+          uniform float uTime;
+          varying vec3 vNormal;
+          varying vec3 vView;
+          void main() {
+            float fres = pow(1.0 - max(dot(vNormal, vView), 0.0), 2.0); // bright rim
+            float pulse = 0.85 + 0.15 * sin(uTime * 1.6);
+            float intensity = (0.35 + fres * 1.3) * pulse;
+            vec3 col = uColor * intensity + vec3(1.0) * fres * 0.4;
+            gl_FragColor = vec4(col, intensity);
+          }
+        `,
+      })
+    );
+    orb.add(orbCore);
+
+    const orbHalo = new THREE.Mesh(
+      new THREE.PlaneGeometry(1.6, 1.6),
+      new THREE.ShaderMaterial({
+        uniforms: { uTime: { value: 0 }, uColor: { value: new THREE.Color(CFG.color) } },
+        transparent: true, depthWrite: false, depthTest: false, blending: THREE.AdditiveBlending,
+        vertexShader: /* glsl */`
+          uniform float uTime;
+          varying vec2 vUv;
+          void main() {
+            vUv = uv;
+            float pulse = 1.0 + 0.06 * sin(uTime * 1.6);
+            vec4 mv = modelViewMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+            mv.xy += position.xy * pulse;          // camera-facing billboard
+            gl_Position = projectionMatrix * mv;
+          }
+        `,
+        fragmentShader: /* glsl */`
+          uniform vec3 uColor;
+          uniform float uTime;
+          varying vec2 vUv;
+          void main() {
+            float d = length(vUv - 0.5) * 2.0;
+            float glow = pow(smoothstep(1.0, 0.0, d), 3.0);
+            float pulse = 0.8 + 0.2 * sin(uTime * 1.6);
+            gl_FragColor = vec4(uColor * glow * pulse, glow * pulse * 0.7);
+          }
+        `,
+      })
+    );
+    orb.add(orbHalo);
+
+    // Large soft outer glow — the orb emitting light into the network.
+    // Wide, faint, very gradual falloff so it bleeds across nearby particles.
+    const orbGlow = new THREE.Mesh(
+      new THREE.PlaneGeometry(4.0, 4.0),
+      new THREE.ShaderMaterial({
+        uniforms: { uTime: { value: 0 }, uColor: { value: new THREE.Color(CFG.color) } },
+        transparent: true, depthWrite: false, depthTest: false, blending: THREE.AdditiveBlending,
+        vertexShader: /* glsl */`
+          uniform float uTime;
+          varying vec2 vUv;
+          void main() {
+            vUv = uv;
+            float breathe = 1.0 + 0.05 * sin(uTime * 1.6);
+            vec4 mv = modelViewMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+            mv.xy += position.xy * breathe;          // camera-facing billboard
+            gl_Position = projectionMatrix * mv;
+          }
+        `,
+        fragmentShader: /* glsl */`
+          uniform vec3 uColor;
+          uniform float uTime;
+          varying vec2 vUv;
+          void main() {
+            float d = length(vUv - 0.5) * 2.0;
+            // gentle quadratic falloff — soft light bleed, no hard edge
+            float glow = smoothstep(1.0, 0.0, d);
+            glow = glow * glow;
+            float pulse = 0.85 + 0.15 * sin(uTime * 1.6);
+            float a = glow * pulse * 0.22;           // faint, so it tints rather than washes out
+            gl_FragColor = vec4(uColor * a, a);
+          }
+        `,
+      })
+    );
+    orb.add(orbGlow);
+    brain.add(orb);
+
+    // HUD counts
+    document.getElementById('nodeCount').textContent = String(CFG.count);
+    document.getElementById('linkCount').textContent = String(conn.count);
+
+    // ─────────────────────────────────────────────────────────────
+    // ANIMATION LOOP
+    // ─────────────────────────────────────────────────────────────
+    const clock = new THREE.Clock();
+    let frames = 0, fpsTime = 0;
+    const fpsEl = document.getElementById('fps');
+
+    let fireAccum = 0;
+
+    function tick() {
+      const dt = clock.getDelta();
+      const t = clock.elapsedTime;
+
+      particleMat.uniforms.uTime.value = t;
+      orbCore.material.uniforms.uTime.value = t;
+      orbHalo.material.uniforms.uTime.value = t;
+      orbGlow.material.uniforms.uTime.value = t;
+
+      // breathing — scale pulse 0.98 .. 1.02 over breathePeriod seconds
+      const s = 1.0 + CFG.breatheAmp * Math.sin((t / CFG.breathePeriod) * Math.PI * 2.0);
+      brain.scale.setScalar(s);
+
+      // very slow Y-axis float
+      brain.rotation.y += dt * CFG.rotateSpeed;
+
+      // random neuron firings — ~fireRate per second
+      fireAccum += dt * CFG.fireRate;
+      while (fireAccum >= 1.0) {
+        const idx = (Math.random() * CFG.count) | 0;
+        fires[idx] = t;
+        fireAttr.needsUpdate = true;
+        fireAccum -= 1.0;
+      }
+
+      controls.update();
+      renderer.render(scene, camera);
+
+      // fps readout
+      frames++; fpsTime += dt;
+      if (fpsTime >= 0.5) {
+        fpsEl.textContent = `${Math.round(frames / fpsTime)} FPS`;
+        frames = 0; fpsTime = 0;
+      }
+      requestAnimationFrame(tick);
+    }
+    tick();
+
+    // ─────────────────────────────────────────────────────────────
+    // RESIZE
+    // ─────────────────────────────────────────────────────────────
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      lineMat.resolution.set(window.innerWidth, window.innerHeight);
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,22 @@
+{
+  "name": "hannibal-v2",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Hannibal V2 — Super PA command center",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "./start.sh",
+    "dev": "./start.sh --fg",
+    "stop": "./start.sh --stop"
+  },
+  "devDependencies": {
+    "electron": "^45.3.4"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.10.0",
+    "ws": "^8.21.0"
+  },
+  "allowScripts": {
+    "electron": true
+  }
+}
