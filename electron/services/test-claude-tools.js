@@ -185,7 +185,9 @@ function harness({ answer = true, invokeImpl } = {}) {
     const msgs = requests[2].messages;
     const iUse = msgs.findIndex((m) => Array.isArray(m.content) && m.content.some((b) => b.type === 'tool_use'));
     assert(iUse >= 0 && msgs[iUse + 1].content[0].type === 'tool_result');
-    assert.strictEqual(msgs[msgs.length - 1].content, 'thanks');
+    const lastUser = msgs.filter((m) => m.role === 'user' && typeof m.content === 'string').pop();
+    assert.strictEqual(lastUser.content, 'thanks');
+    assert.strictEqual(msgs[msgs.length - 1].role, 'system', 'the turn ends with its time/context note');
   });
   await test('HANNIBAL_CLAUDE_TOOLS=0 turns tools off', async () => {
     process.env.HANNIBAL_CLAUDE_TOOLS = '0';

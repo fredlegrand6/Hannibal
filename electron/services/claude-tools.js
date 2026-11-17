@@ -35,6 +35,7 @@ const EXCLUDED = new Set([
   'behavior.list', 'behavior.log',
   'skills.list', 'skills.save',
   'memory.store',
+  'reminders.save', 'timers.save', 'notes.save',   // whole-list replaces: one wrong call wipes the list
   'whatsapp.debugUi',
 ]);
 // Renderer-side tools that DO have a main-side runner in the executor.

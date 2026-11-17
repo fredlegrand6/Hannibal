@@ -1,0 +1,141 @@
+// ─────────────────────────────────────────────────────────────────────────
+// TEST — proactive layer: reminders Claude can set + the morning-brief schedule.
+// Offline, temp files, fixed clocks. Run:  node electron/services/test-proactive.js
+// ─────────────────────────────────────────────────────────────────────────
+'use strict';
+
+const assert = require('assert');
+const os = require('os');
+const fs = require('fs');
+const path = require('path');
+const Module = require('module');
+
+const fakeSdk = function Anthropic() {};
+fakeSdk.APIError = class extends Error {};
+const origLoad = Module._load;
+Module._load = function (req, ...rest) { return req === '@anthropic-ai/sdk' ? fakeSdk : origLoad.call(this, req, ...rest); };
+
+const { createReminderTools, createBriefScheduler } = require('./proactive');
+const claudeTools = require('./claude-tools');
+const brain = require('./claude-brain');
+
+const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'hannibal-proactive-'));
+let seq = 0;
+const tmp = (n) => path.join(TMP, `${n}${seq++}.json`);
+
+let passed = 0;
+async function test(name, fn) {
+  try { await fn(); passed += 1; console.log(`  ✓ ${name}`); }
+  catch (e) { console.error(`  ✗ ${name}\n      ${e.stack || e.message}`); process.exitCode = 1; }
+}
+
+(async () => {
+  console.log('Reminders Claude can set');
+  const NOW = Date.parse('2026-11-17T21:00:00');
+  await test('add writes the same shape the voice reminders use, and notifies the renderer', () => {
+    let notified = 0;
+    const file = tmp('rem');
+    const r = createReminderTools({ filePath: file, notify: () => notified++, now: () => NOW });
+    const out = r.add('call Jay about the Mutuele launch', '2026-11-19T10:00');
+    assert(out.ok, out.error);
+    const saved = JSON.parse(fs.readFileSync(file, 'utf8')).reminders[0];
+    assert.strictEqual(saved.message, 'call Jay about the Mutuele launch');
+    assert.strictEqual(saved.triggerTs, Date.parse('2026-11-19T10:00'));
+    assert.strictEqual(saved.fired, false);
+    assert.strictEqual(notified, 1);
+    assert(/Thursday/.test(out.when), out.when);
+  });
+  await test('past times and unreadable times are refused', () => {
+    const r = createReminderTools({ filePath: tmp('rem'), now: () => NOW });
+    assert.strictEqual(r.add('x', '2026-11-16T10:00').ok, false);
+    assert.strictEqual(r.add('x', 'next-ish week').ok, false);
+    assert.strictEqual(r.add('', '2026-11-19T10:00').ok, false);
+  });
+  await test('upcoming lists unfired reminders soonest first; cancel by words', () => {
+    const r = createReminderTools({ filePath: tmp('rem'), now: () => NOW });
+    r.add('pay the Hetzner invoice', '2026-11-20T09:00');
+    r.add('call HTS', '2026-11-18T11:00');
+    assert.deepStrictEqual(r.upcoming().reminders.map((x) => x.message), ['call HTS', 'pay the Hetzner invoice']);
+    assert.strictEqual(r.cancel('hetzner').ok, true);
+    assert.strictEqual(r.upcoming().reminders.length, 1);
+  });
+  await test('cancel refuses an ambiguous match', () => {
+    const r = createReminderTools({ filePath: tmp('rem'), now: () => NOW });
+    r.add('call Jay', '2026-11-18T09:00');
+    r.add('call Jay again', '2026-11-18T15:00');
+    const out = r.cancel('jay');
+    assert.strictEqual(out.ok, false);
+    assert.strictEqual(out.matches.length, 2);
+    assert.strictEqual(r.upcoming().reminders.length, 2);
+  });
+  await test('the whole-list replace tools are NOT given to Claude; add/cancel/upcoming are', () => {
+    const names = new Set(claudeTools.toolDefinitions().map((d) => claudeTools.fromApiName(d.name)));
+    for (const n of ['reminders.save', 'timers.save', 'notes.save']) assert(!names.has(n), n);
+    for (const n of ['reminders.add', 'reminders.cancel', 'reminders.upcoming']) assert(names.has(n), n);
+  });
+
+  console.log('Morning brief schedule');
+  const at = (hhmm, day = '2026-11-18') => () => new Date(`${day}T${hhmm}:00`);
+  await test('nothing before 08:00 or after 12:00; one send inside the window', () => {
+    const sent = [];
+    let clock = at('07:59');
+    const b = createBriefScheduler({ send: (j) => sent.push(j), statePath: tmp('st'), now: () => clock(), env: {} });
+    assert.strictEqual(b.tick(), 'outside-window');
+    clock = at('08:00');
+    assert.strictEqual(b.tick(), 'sent');
+    assert.strictEqual(sent[0].kind, 'morning-brief');
+    assert(/read-only/.test(sent[0].prompt));
+    clock = at('12:00');
+    assert.strictEqual(b.tick(), 'outside-window');
+  });
+  await test('waits for the renderer; only a spoken brief marks the day done', () => {
+    const sent = [];
+    let clock = at('08:05');
+    const statePath = tmp('st');
+    const b = createBriefScheduler({ send: (j) => sent.push(j), statePath, now: () => clock(), env: {} });
+    b.tick();
+    clock = at('08:06');
+    assert.strictEqual(b.tick(), 'waiting');
+    b.done({ kind: 'morning-brief', day: '2026-11-18', ok: false });   // not quiet → retry
+    assert.strictEqual(b.tick(), 'sent');
+    b.done({ kind: 'morning-brief', day: '2026-11-18', ok: true });
+    assert.strictEqual(b.tick(), 'done-today');
+    const again = createBriefScheduler({ send: () => {}, statePath, now: () => clock(), env: {} });
+    assert.strictEqual(again.tick(), 'done-today', 'survives a restart');
+    const tomorrow = createBriefScheduler({ send: () => {}, statePath, now: at('09:00', '2026-11-19'), env: {} });
+    assert.strictEqual(tomorrow.tick(), 'sent');
+  });
+  await test('a lost renderer answer is retried after 15 minutes', () => {
+    let clock = at('08:00');
+    const b = createBriefScheduler({ send: () => {}, statePath: tmp('st'), now: () => clock(), env: {} });
+    b.tick();
+    clock = at('08:14');
+    assert.strictEqual(b.tick(), 'waiting');
+    clock = at('08:16');
+    assert.strictEqual(b.tick(), 'sent');
+  });
+  await test('custom times and the off switch', () => {
+    const env = { HANNIBAL_BRIEF_TIME: '07:30', HANNIBAL_BRIEF_UNTIL: '10:00' };
+    const b = createBriefScheduler({ send: () => {}, statePath: tmp('st'), now: at('07:45'), env });
+    assert.strictEqual(b.tick(), 'sent');
+    const off = createBriefScheduler({ send: () => {}, statePath: tmp('st'), now: at('09:00'), env: { HANNIBAL_BRIEF: '0' } });
+    assert.strictEqual(off.tick(), 'disabled');
+  });
+
+  console.log('Claude knows the time');
+  await test('every turn starts its context with the exact local date and time', async () => {
+    process.env.ANTHROPIC_API_KEY = 'test-key';
+    let req = null;
+    brain._setClient({ beta: { messages: { stream: (r) => { req = r; return {
+      on: () => {}, finalMessage: async () => ({ model: 'fake', usage: {}, stop_reason: 'end_turn', content: [{ type: 'text', text: 'Ok.' }] }),
+    }; } } } });
+    brain._setFactStore({ renderForPrompt: () => '' });
+    await brain.chat({ system: 'S', context: 'mood: fine', user: 'remind me thursday' }, () => {});
+    const note = req.messages[req.messages.length - 1];
+    assert.strictEqual(note.role, 'system');
+    assert(/^Now: \w+day \d{4}-\d{2}-\d{2} \d{2}:\d{2} \(/.test(note.content), note.content);
+    assert(/mood: fine/.test(note.content));
+  });
+
+  console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ''}`);
+})();

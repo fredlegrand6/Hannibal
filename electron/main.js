@@ -31,6 +31,7 @@ const { registerCameraControl } = require('./services/camera-control');
 const claudeBrain = require('./services/claude-brain');
 const claudeTools = require('./services/claude-tools');
 const { registerFacts } = require('./services/memory-facts');
+const { registerProactive } = require('./services/proactive');
 installToolTap(ipcMain);
 
 // Only ONE Hannibal at a time. Two copies fight over the mic, the wake word and
@@ -43,6 +44,7 @@ app.on('second-instance', () => {
   if (win) { if (win.isMinimized()) win.restore(); win.show(); win.focus(); }
 });
 
+registerProactive(ipcMain, { getWindow: () => win });   // morning brief + reminders.add/cancel/upcoming
 registerFacts(ipcMain);   // 'facts:remember' / 'facts:forget' / 'facts:list' — saved facts Claude always knows
 // 'llm:chat' → tokens stream back on 'llm:token'. Claude can also use Hannibal's
 // actions: each tool call runs through the SAME executor + voice confirmation gate

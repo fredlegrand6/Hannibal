@@ -43,8 +43,20 @@ function createFactStore({ filePath, now = () => new Date().toISOString() } = {}
       const tmp = file + '.tmp';
       fs.writeFileSync(tmp, JSON.stringify({ version: 1, facts }, null, 2));
       fs.renameSync(tmp, file);              // atomic: a crash never leaves half a file
-    } catch (e) { console.warn('[facts] save failed:', e.message); }
+      return null;
+    } catch (e) { console.warn('[facts] save failed:', e.message); return e.message; }
   }
+  // Apply a change, persist it, and roll it back if the disk write fails, so the
+  // facts Claude sees never differ from what survives a restart.
+  function commit(mutate) {
+    const before = facts.map((f) => ({ ...f }));
+    const beforeSeq = seq;
+    const result = mutate();
+    const err = save();
+    if (err) { facts = before; seq = beforeSeq; return { ok: false, error: `could not save the facts file: ${err}` }; }
+    return result;
+  }
+  const words = (s) => norm(s).split(' ').filter(Boolean);
   const norm = (s) => String(s || '').toLowerCase().replace(/[^\p{L}\p{N} ]+/gu, ' ').replace(/\s+/g, ' ').trim();
 
   // Save one fact. A near-identical fact is updated instead of duplicated.
@@ -53,33 +65,41 @@ function createFactStore({ filePath, now = () => new Date().toISOString() } = {}
     if (!t) return { ok: false, error: 'empty fact' };
     const cat = CATEGORIES.includes(category) ? category : 'other';
     const n = norm(t);
-    const dup = facts.find((f) => norm(f.text) === n);
-    if (dup) { dup.updated = now(); dup.category = cat; save(); return { ok: true, id: dup.id, duplicate: true }; }
-    const fact = { id: `f${++seq}`, text: t, category: cat, created: now() };
-    facts.push(fact);
-    while (facts.length > MAX_FACTS) {
-      const i = facts.findIndex((f) => f.category === 'other');
-      facts.splice(i >= 0 ? i : 0, 1);
+    const dupIdx = facts.findIndex((f) => norm(f.text) === n);
+    if (dupIdx >= 0) {
+      return commit(() => {
+        facts[dupIdx] = { ...facts[dupIdx], updated: now(), category: cat };
+        return { ok: true, id: facts[dupIdx].id, duplicate: true };
+      });
     }
-    save();
-    return { ok: true, id: fact.id, total: facts.length };
+    return commit(() => {
+      const fact = { id: `f${++seq}`, text: t, category: cat, created: now() };
+      facts.push(fact);
+      while (facts.length > MAX_FACTS) {
+        const i = facts.findIndex((f) => f.category === 'other');
+        facts.splice(i >= 0 ? i : 0, 1);
+      }
+      return { ok: true, id: fact.id, total: facts.length };
+    });
   }
 
-  // Remove by id ("f12") or by text: every fact containing all the given words.
+  // Remove by id ("f12") or by text: every fact containing ALL the given words as
+  // whole words (so "project A" never matches "Project B").
   function forget(query) {
     const q = String(query || '').trim();
     if (!q) return { ok: false, error: 'say which fact to forget' };
     let hit;
     if (/^f\d+$/i.test(q)) hit = facts.filter((f) => f.id.toLowerCase() === q.toLowerCase());
     else {
-      const words = norm(q).split(' ').filter((w) => w.length > 1);
-      hit = facts.filter((f) => { const n = norm(f.text); return words.length && words.every((w) => n.includes(w)); });
+      const want = words(q);
+      hit = facts.filter((f) => { const have = new Set(words(f.text)); return want.length && want.every((w) => have.has(w)); });
     }
     if (!hit.length) return { ok: false, error: `no saved fact matches "${q}"`, removed: [] };
     if (hit.length > 5) return { ok: false, error: `"${q}" matches ${hit.length} facts — be more specific or use an id`, matches: hit.map((f) => ({ id: f.id, text: f.text })) };
-    facts = facts.filter((f) => !hit.includes(f));
-    save();
-    return { ok: true, removed: hit.map((f) => ({ id: f.id, text: f.text })) };
+    return commit(() => {
+      facts = facts.filter((f) => !hit.includes(f));
+      return { ok: true, removed: hit.map((f) => ({ id: f.id, text: f.text })) };
+    });
   }
 
   function list(category) {
