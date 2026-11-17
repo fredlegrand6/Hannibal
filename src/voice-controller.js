@@ -2314,9 +2314,20 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     const visionModel = cfg.ollamaModelVision || cfg.ollamaModel;
     emitModel(visionModel);
     console.log(`[vision] sending ${kb} KB image to ${visionModel} — encoding may take 30-80s before first word`);
+    // Claude looks first (it sees images directly); the Ollama vision model on
+    // GEX131 is the fallback if Claude is off or unreachable.
+    const claude = {
+      system: SYSTEM_PROMPT + ' Notes about the current situation and any relevant memories arrive as system messages during the conversation.',
+      context: ctxPreamble() + `You are shown ${isMultiScreen ? '' : 'a '}${view}.` + extra
+        + ' Answer what Fred asked about it directly, warmly and concisely — you are spoken aloud.',
+      user: prompt || (isCamera ? 'How do I look?' : "What's on my screen?"),
+      images,
+    };
+    if (cfg.claudeEnabled) emitModel(cfg.claudeModel);
     await streamChatAndSpeak({
       model: visionModel,
       messages,
+      claude,
       // Vision is encode-bound, not just cold-load-bound: Qwen2.5-VL spends 35-80s
       // encoding the frame's vision tokens (it scales with resolution, and the box
       // may be sharing GPU with a 70b) BEFORE the first token streams. The connect

@@ -193,7 +193,7 @@ async function runTool(apiName, input, opts = {}) {
 
 const enabled = () => !/^(0|false|off|no)$/i.test(process.env.HANNIBAL_CLAUDE_TOOLS || '');
 
-module.exports = { toolDefinitions, runTool, toApiName, fromApiName, exposed, enabled, stringify, toolResultContent };
+module.exports = { toolDefinitions, runTool, toApiName, fromApiName, exposed, enabled, stringify, toolResultContent, mediaType };
 
 // `node electron/services/claude-tools.js` lists what Claude can use (no app needed).
 if (require.main === module) {
