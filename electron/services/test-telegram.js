@@ -121,7 +121,7 @@ async function test(name, fn) {
     for (let i = 0; i < 5 && !b._pending.size; i++) await tick();
     const ask = tg.sent().find((m) => /Shall I go ahead/.test(m.text));
     assert(ask && ask.reply_markup.inline_keyboard[0].length === 2);
-    await b.handleUpdate({ callback_query: { id: 'q', from: { id: FRED }, data: 'yes', message: { chat: { id: FRED }, message_id: 100 } } });
+    await b.handleUpdate({ callback_query: { id: 'q', from: { id: FRED }, data: ask.reply_markup.inline_keyboard[0][0].callback_data, message: { chat: { id: FRED }, message_id: 100 } } });
     await b.idle();
     assert.strictEqual(result(), true);
     assert.strictEqual(tg.sent().pop().text, 'Sent.');
@@ -134,6 +134,26 @@ async function test(name, fn) {
     await b.handleUpdate(msg('nee'));
     await b.idle();
     assert.strictEqual(result(), false);
+  });
+  await test('"yes but wait" is not a yes; an old button token cannot approve', async () => {
+    const tg = fakeTelegram();
+    const { b, result } = withConfirm(tg);
+    await b.handleUpdate(msg('mail Jay'));
+    for (let i = 0; i < 5 && !b._pending.size; i++) await tick();
+    await b.handleUpdate(msg('yes but do not send it yet'));
+    await b.handleUpdate({ callback_query: { id: 'q', from: { id: FRED }, data: 'yes:old_token', message: { chat: { id: FRED }, message_id: 100 } } });
+    assert.strictEqual(b._pending.size, 1, 'still waiting');
+    await b.idle();
+    assert.strictEqual(result(), false);
+  });
+  await test('Fred in a group chat gets no answer (private chats only)', async () => {
+    const tg = fakeTelegram();
+    let chats = 0;
+    const b = createTelegramBridge({ token: 't', allowedIds: String(FRED), fetchImpl: tg.fetchImpl, log: () => {}, chat: async () => { chats++; return { ok: true, text: 'secret' }; } });
+    await b.handleUpdate({ message: { chat: { id: -77, type: 'group' }, from: { id: FRED }, text: 'what is in my inbox?' } });
+    await b.idle();
+    assert.strictEqual(chats, 0);
+    assert.strictEqual(tg.sent().length, 0);
   });
   await test('no answer means no', async () => {
     const tg = fakeTelegram();
@@ -148,7 +168,7 @@ async function test(name, fn) {
     const { b, result } = withConfirm(tg);
     await b.handleUpdate(msg('mail Jay'));
     for (let i = 0; i < 5 && !b._pending.size; i++) await tick();
-    await b.handleUpdate({ callback_query: { id: 'q', from: { id: 999 }, data: 'yes', message: { chat: { id: FRED }, message_id: 100 } } });
+    await b.handleUpdate({ callback_query: { id: 'q', from: { id: 999 }, data: tg.sent().find((m) => m.reply_markup).reply_markup.inline_keyboard[0][0].callback_data, message: { chat: { id: FRED }, message_id: 100 } } });
     await b.idle();
     assert.strictEqual(result(), false);
   });
