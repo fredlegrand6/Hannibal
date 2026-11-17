@@ -33,6 +33,7 @@ const claudeTools = require('./services/claude-tools');
 const { registerFacts } = require('./services/memory-facts');
 const { registerProactive } = require('./services/proactive');
 const { createTelegramBridge, makeWhisperTranscriber } = require('./services/telegram');
+const { createQdrantMemory } = require('./services/qdrant-memory');
 installToolTap(ipcMain);
 
 // Only ONE Hannibal at a time. Two copies fight over the mic, the wake word and
@@ -1260,6 +1261,7 @@ function startTelegram() {
       emit: (ev) => { if (/^step:(start|finish|error|skipped|confirm)/.test(ev.type)) console.log('[telegram-tool]', ev.type, ev.tool || ''); },
     }),
     transcribe: makeWhisperTranscriber({ whisperUrl: CONFIG.whisperUrl, language: process.env.TELEGRAM_VOICE_LANG || 'auto' }),
+    memory: createQdrantMemory({ qdrantUrl: CONFIG.qdrantUrl, ollamaUrl: CONFIG.ollamaUrl }),
     onReset: () => claudeBrain.resetHistory(),
   });
   telegram.start().catch((e) => { console.warn('[telegram] could not start:', e.message); telegram = null; });

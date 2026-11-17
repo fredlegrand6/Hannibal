@@ -58,6 +58,7 @@ const NO = /^(no|n|nee|non|nope|stop|cancel|don'?t)[\s.!]*$/i;
 //   chat(payload, onText, { runTool }) -> { ok, text, error }
 //   runTool(apiName, input, { confirmer }) -> result   (claude-tools.runTool)
 //   transcribe(oggBuffer) -> string                     (voice notes)
+//   memory { recall(text) -> string, store(text, meta) } (Qdrant, optional)
 //   fetchImpl, log, pollTimeoutS
 function createTelegramBridge(opts = {}) {
   const token = opts.token;
@@ -164,12 +165,21 @@ function createTelegramBridge(opts = {}) {
     const typing = setInterval(() => call('sendChatAction', { chat_id: chatId, action: 'typing' }).catch(() => {}), 4500);
     try {
       const confirmer = makeConfirmer(chatId);
+      // Long-term memory (Qdrant), same as at the desk: recall before, store after.
+      let memories = '';
+      if (opts.memory) { try { memories = await opts.memory.recall(text); } catch (_) {} }
       const r = await opts.chat(
-        { system: opts.persona || 'You are Hannibal, Fred\'s personal AI assistant.', context: PHONE_CONTEXT, user: text, images },
+        { system: opts.persona || 'You are Hannibal, Fred\'s personal AI assistant.',
+          context: [PHONE_CONTEXT, memories].filter(Boolean).join('\n\n'), user: text, images },
         null,
         { runTool: opts.runTool ? (name, input) => opts.runTool(name, input, { confirmer }) : undefined },
       );
-      if (r && r.ok && r.text) await send(chatId, r.text);
+      if (r && r.ok && r.text) {
+        await send(chatId, r.text);
+        if (opts.memory) {
+          opts.memory.store(`Fred said (Telegram): ${text}\nHannibal replied: ${r.text.slice(0, 500)}`, { type: 'conversation', channel: 'telegram' }).catch(() => {});
+        }
+      }
       else if (r && r.toolsUsed && r.toolsUsed.length) await send(chatId, `I ran ${r.toolsUsed.map((t) => t.tool).join(', ')} but then lost the connection to my brain. Check before asking again.`);
       else await send(chatId, `I can't think right now: ${(r && r.error) || 'no answer'}.`);
     } finally { clearInterval(typing); }
