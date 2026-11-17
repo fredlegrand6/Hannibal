@@ -484,6 +484,9 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   // the turn itself re-listens when it ends.
   let chatTurnActive = false;
   let playingOne = false;    // a sentence is audibly playing right now (runPlayer)
+  // handleCommand routed an ACTION request to Claude. If Claude is unreachable,
+  // respond() must hand it to the action-capable fallback (brain/planner), not plain chat.
+  let claudeActionTurn = false;
 
   // ── Adaptive VAD state — the calibrated, per-room noise floor + onset cutoff. ──
   let noiseFloor = SILENCE_THRESH;
@@ -933,6 +936,7 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
         // when Claude or its tools are off.
         if (cfg.claudeEnabled && cfg.claudeTools) {
           console.log('[route] action → Claude with tools');
+          claudeActionTurn = true;
           return false;
         }
         // Genuine agent-loop goal → the brain (or in-process fallback). The Mac
@@ -2092,7 +2096,7 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   // still returned for parseActionTags. Non-agent callers stream-speak as before.
   // `claude` ({ system, context, user }): try the Claude API first (via main); if
   // it fails before saying anything, the same turn falls back to Ollama below.
-  async function streamChatAndSpeak({ model, messages, connectTimeoutMs, errNoun = 'language model', stripTags = false, speakErrors = true, claude = null }) {
+  async function streamChatAndSpeak({ model, messages, connectTimeoutMs, errNoun = 'language model', stripTags = false, speakErrors = true, claude = null, onClaudeUnavailable = null }) {
     speakQueue.length = 0;
     streamEnded = false;
     speaking = false;
@@ -2151,6 +2155,14 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
       } finally {
         chatTurnActive = false;
       }
+      // An action request with Claude unreachable (nothing said, nothing run):
+      // hand it to the action-capable fallback instead of plain Ollama chat.
+      if (!claudeDone && !gotToken && onClaudeUnavailable) {
+        streamEnded = true;
+        console.warn('[voice] claude unavailable for an action → action fallback (brain/planner)');
+        await onClaudeUnavailable();
+        return null;
+      }
       if (!claudeDone && !gotToken) emitModel(model);   // show the Ollama model we're falling back to
     }
 
@@ -2188,6 +2200,8 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   }
 
   async function respond(transcript) {
+    const actionTurn = claudeActionTurn;
+    claudeActionTurn = false;
     setPhase('thinking');
     // Multi-model router: simple conversation goes to the fast model; only
     // complex requests pay for the heavy 70b. Falls back to ollamaModel if the
@@ -2218,7 +2232,15 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
       context: ctxPreamble() + memoryContext,
       user: transcript,
     };
-    const reply = await streamChatAndSpeak({ model, messages, claude });
+    const reply = await streamChatAndSpeak({ model, messages, claude,
+      // Claude down on an action request → the previous action path (brain/planner,
+      // then the legacy loop only if no plan ran — never after a write executed).
+      onClaudeUnavailable: actionTurn ? async () => {
+        const handled = await runViaBrain(transcript);
+        if (!handled) await agentLoop(transcript);
+      } : null,
+    });
+    if (reply === null) return;                // the action fallback handled the turn
 
     // Store the exchange — fire-and-forget so it never delays the next turn.
     if (qdrantReady && reply && reply.trim()) {

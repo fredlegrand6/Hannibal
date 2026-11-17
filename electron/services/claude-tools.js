@@ -112,6 +112,37 @@ function stringify(out) {
   return s;
 }
 
+// Screen / camera tools return frames as base64 (b64, images[], frames[]).
+// Those go back to Claude as real image content so it can actually look.
+const MAX_IMAGES = 3;
+function mediaType(b64) {
+  if (b64.startsWith('/9j/')) return 'image/jpeg';
+  if (b64.startsWith('iVBOR')) return 'image/png';
+  if (b64.startsWith('R0lG')) return 'image/gif';
+  if (b64.startsWith('UklG')) return 'image/webp';
+  return null;
+}
+function toolResultContent(out) {
+  if (!out || typeof out !== 'object' || Array.isArray(out) || Buffer.isBuffer(out)) return stringify(out);
+  const frames = [];
+  const rest = {};
+  for (const [k, v] of Object.entries(out)) {
+    const list = k === 'b64' ? [v] : (k === 'images' || k === 'frames') && Array.isArray(v) ? v : null;
+    if (list && list.every((x) => typeof x === 'string')) {
+      for (const x of list) if (mediaType(x) && !frames.includes(x)) frames.push(x);
+      if (list.some((x) => !mediaType(x))) rest[k] = v;   // not an image we recognise → keep as data
+      continue;
+    }
+    rest[k] = v;
+  }
+  if (!frames.length) return stringify(out);
+  const shown = frames.slice(0, MAX_IMAGES);
+  return [
+    ...shown.map((data) => ({ type: 'image', source: { type: 'base64', media_type: mediaType(data), data } })),
+    { type: 'text', text: stringify({ ...rest, frames_attached: shown.length, frames_total: frames.length }) },
+  ];
+}
+
 // Run one Claude tool call through the real executor + gate.
 // opts: { confirmer, emit, invoke, permissions } — passed straight to execute().
 // -> { content: string, is_error: boolean, tool: string, status }
@@ -150,7 +181,7 @@ async function runTool(apiName, input, opts = {}) {
   }
 
   const rec = (res.record || []).find((r) => r.step === 1) || {};
-  if (rec.ok) return { tool: name, status: 'ok', is_error: false, content: stringify(rec.output) };
+  if (rec.ok) return { tool: name, status: 'ok', is_error: false, content: toolResultContent(rec.output) };
   if (rec.skipped && /declined|auto-denied|cancel-beat/.test(rec.reason || '')) {
     return { tool: name, status: 'declined', is_error: false,
       content: 'Fred did NOT approve this action, so it was not done. Do not retry it unless he asks again.' };
@@ -161,7 +192,7 @@ async function runTool(apiName, input, opts = {}) {
 
 const enabled = () => !/^(0|false|off|no)$/i.test(process.env.HANNIBAL_CLAUDE_TOOLS || '');
 
-module.exports = { toolDefinitions, runTool, toApiName, fromApiName, exposed, enabled, stringify };
+module.exports = { toolDefinitions, runTool, toApiName, fromApiName, exposed, enabled, stringify, toolResultContent };
 
 // `node electron/services/claude-tools.js` lists what Claude can use (no app needed).
 if (require.main === module) {

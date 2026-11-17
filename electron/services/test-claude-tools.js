@@ -119,6 +119,23 @@ function harness({ answer = true, invokeImpl } = {}) {
     assert.strictEqual(r.status, 'invalid');
     assert.strictEqual(h.calls.invoke.length + h.calls.confirm.length, 0);
   });
+  await test('screen/camera frames go back to Claude as real images', async () => {
+    const jpeg = '/9j/' + 'A'.repeat(6000);
+    const h = harness({ invokeImpl: () => ({ ok: true, b64: jpeg, displays: 1 }) });
+    const r = await claudeTools.runTool('vision__capture', { kind: 'screen' }, h.opts);
+    assert.strictEqual(r.status, 'ok');
+    assert(Array.isArray(r.content), 'content is blocks');
+    assert.strictEqual(r.content[0].type, 'image');
+    assert.strictEqual(r.content[0].source.media_type, 'image/jpeg');
+    assert.strictEqual(r.content[0].source.data, jpeg);
+    assert(/"displays":1/.test(r.content[1].text) && !/AAAA/.test(r.content[1].text));
+  });
+  await test('multi-frame results attach at most 3 images', () => {
+    const png = (i) => 'iVBOR' + String(i).repeat(100);
+    const c = claudeTools.toolResultContent({ ok: true, images: [png(1), png(2), png(3), png(4)] });
+    assert.strictEqual(c.filter((b) => b.type === 'image').length, 3);
+    assert(/"frames_total":4/.test(c[c.length - 1].text));
+  });
   await test('huge results are truncated', () => {
     const s = claudeTools.stringify('x'.repeat(50000));
     assert(s.length < 13000 && /truncated/.test(s));
