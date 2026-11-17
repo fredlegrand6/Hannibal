@@ -76,6 +76,27 @@ async function test(name, fn) {
     assert.strictEqual(tg.sent().pop().text, 'You have two meetings tomorrow.');
   });
 
+  console.log('Long-term memory');
+  await test('Qdrant memories ride in the context, and the exchange is stored', async () => {
+    const tg = fakeTelegram();
+    let got = null; const stored = [];
+    const b = createTelegramBridge({ token: 't', allowedIds: String(FRED), fetchImpl: tg.fetchImpl, log: () => {},
+      memory: { recall: async (q) => { assert.strictEqual(q, 'who is Alex?'); return 'RELEVANT MEMORIES:\n- Alex is a friend of Fred\'s'; },
+        store: async (txt, meta) => { stored.push({ txt, meta }); } },
+      chat: async (p) => { got = p; return { ok: true, text: 'Alex is your friend.' }; } });
+    await b.handleUpdate(msg('who is Alex?'));
+    await b.idle();
+    assert(got.context.startsWith(PHONE_CONTEXT) && /Alex is a friend/.test(got.context));
+    assert.strictEqual(stored.length, 1);
+    assert(/Telegram\): who is Alex\?/.test(stored[0].txt) && stored[0].meta.channel === 'telegram');
+  });
+  await test('memory being down never blocks the answer', async () => {
+    const { createQdrantMemory } = require('./qdrant-memory');
+    const mem = createQdrantMemory({ qdrantUrl: 'http://q', ollamaUrl: 'http://o', log: () => {}, fetchImpl: async () => { throw new Error('offline'); } });
+    assert.strictEqual(await mem.recall('x'), '');
+    assert.strictEqual(await mem.store('x'), false);
+  });
+
   console.log('Voice notes and photos');
   await test('a voice note is transcribed, echoed, and answered', async () => {
     const tg = fakeTelegram();
