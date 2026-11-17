@@ -102,7 +102,8 @@ const CONFIG = {
   // Qwen2.5-VL vision-token count scales with resolution, so latency tracks image
   // size hard: a raw retina screenshot (3456px) takes ~78s to encode, 1024px ~35s,
   // 768px ~18s. We downscale every captured frame to this long-edge before sending.
-  visionMaxPx: process.env.HANNIBAL_VISION_MAX_PX || '1024',
+  // 1568px long edge = the detail Claude can actually use (read a label, see what's in a hand).
+  visionMaxPx: process.env.HANNIBAL_VISION_MAX_PX || '1568',
   ttsScript:  path.join(__dirname, 'services', 'nova-tts.py'),
   wakeScript: path.join(__dirname, 'services', 'wakeword.py'),
   vadScript:  path.join(__dirname, 'services', 'vad-stream.py'), // streaming silero VAD (real speech/not-speech)
@@ -968,8 +969,12 @@ async function captureCameraFrame() {
   // offers 15/30fps only) — that mismatch fails with "Input/output error" before
   // any frame is read. Pin -framerate 30 and a supported -video_size; sips then
   // downscales. -frames:v 1 + -update 1 writes a single still (no %d pattern).
+  // The very first frames from a webcam are dark/blurry while auto-exposure and
+  // focus settle, so skip ~0.6s (output-side -ss) and keep the frame after that.
+  const warmup = String(process.env.HANNIBAL_CAMERA_WARMUP_S || '0.6');
   const args = ['-y', '-f', 'avfoundation', '-framerate', '30',
                 '-video_size', '1280x720', '-i', CONFIG.cameraIndex,
+                ...(Number(warmup) > 0 ? ['-ss', warmup] : []),
                 '-frames:v', '1', '-update', '1', raw];
   try {
     await runToFile(CONFIG.ffmpeg, args, raw);
