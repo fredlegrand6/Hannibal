@@ -49,8 +49,9 @@ function splitMessage(text, max = MAX_MSG) {
   return out;
 }
 
-const YES = /^(yes|y|ja|jep|yep|oui|ok|okay|go|do it|doe maar|sure)\b/i;
-const NO = /^(no|n|nee|non|nope|stop|cancel|don'?t)\b/i;
+// A typed answer counts only when it is JUST yes or no ("yes but wait" is neither).
+const YES = /^(yes|y|ja|jep|yep|oui|ok|okay|go|go ahead|do it|doe maar|sure)[\s.!👍]*$/i;
+const NO = /^(no|n|nee|non|nope|stop|cancel|don'?t)[\s.!]*$/i;
 
 // opts:
 //   token, allowedIds (Set|string), persona (string),
@@ -72,6 +73,7 @@ function createTelegramBridge(opts = {}) {
   let queue = Promise.resolve();
   const pendingConfirms = new Map();   // chatId -> { resolve, timer, messageId }
   const warnedStrangers = new Set();
+  let confirmSeq = 0;
 
   async function call(method, body) {
     const r = await fetchImpl(`${api}/${method}`, {
@@ -100,7 +102,9 @@ function createTelegramBridge(opts = {}) {
     return (_step, summary) => new Promise((resolve) => {
       const prev = pendingConfirms.get(chatId);
       if (prev) { clearTimeout(prev.timer); prev.resolve(false); }
-      const entry = { resolve: null, timer: null, messageId: null };
+      // Each prompt's buttons carry their own token, so a late tap on an old
+      // prompt can never approve a newer action.
+      const entry = { resolve: null, timer: null, messageId: null, token: `c${++confirmSeq}_${Date.now().toString(36)}` };
       const finish = (ok, note) => {
         if (pendingConfirms.get(chatId) !== entry) return;
         pendingConfirms.delete(chatId);
@@ -115,7 +119,7 @@ function createTelegramBridge(opts = {}) {
       entry.timer = setTimeout(() => finish(false, '✗ No answer in 2 minutes, so I did not do it.'), opts.confirmTimeoutMs || CONFIRM_TIMEOUT_MS);
       pendingConfirms.set(chatId, entry);
       send(chatId, `${summary}\n\nShall I go ahead?`, {
-        reply_markup: { inline_keyboard: [[{ text: 'Yes', callback_data: 'yes' }, { text: 'No', callback_data: 'no' }]] },
+        reply_markup: { inline_keyboard: [[{ text: 'Yes', callback_data: `yes:${entry.token}` }, { text: 'No', callback_data: `no:${entry.token}` }]] },
       }).then((m) => { entry.messageId = m && m.message_id; })
         .catch((e) => { log('confirm send failed:', e.message); finish(false); });
     });
@@ -176,8 +180,9 @@ function createTelegramBridge(opts = {}) {
       const q = u.callback_query;
       if (!allowed.has(String(q.from && q.from.id))) return;
       call('answerCallbackQuery', { callback_query_id: q.id }).catch(() => {});
+      const [answer, tok] = String(q.data || '').split(':');
       const p = pendingConfirms.get(q.message && q.message.chat.id);
-      if (p && (!p.messageId || p.messageId === q.message.message_id)) p.resolve(q.data === 'yes');
+      if (p && tok && tok === p.token) p.resolve(answer === 'yes');
       return;
     }
     const msg = u.message;
@@ -189,6 +194,12 @@ function createTelegramBridge(opts = {}) {
         warnedStrangers.add(from);
         await send(msg.chat.id, `Not authorised. Your Telegram id is ${from}.`).catch(() => {});
       }
+      return;
+    }
+    // Private chats only: in a group, replies (mail, calendar, facts) would be
+    // seen by people who are not Fred.
+    if (msg.chat.type !== 'private') {
+      log(`ignored ${msg.chat.type} chat ${msg.chat.id} — Hannibal only answers in a private chat`);
       return;
     }
     // A plain yes/no while a confirmation is waiting answers it (no new turn).
