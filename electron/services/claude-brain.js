@@ -20,6 +20,7 @@
 // ─────────────────────────────────────────────────────────────────────────
 const Anthropic = require('@anthropic-ai/sdk');
 const claudeTools = require('./claude-tools');
+const { getDefaultFactStore } = require('./memory-facts');
 
 // Read lazily: main.js loads .env after this module is required.
 const model = () => process.env.CLAUDE_MODEL || 'claude-opus-5-5';
@@ -53,8 +54,10 @@ const TOOL_GUIDE = `
 
 You can act, not just talk: the tools let you read Fred's mail and calendar, search the web, work with files, apps, the browser, music, the camera and his Mac. When Fred asks for something done, or for information a tool can get, use the tools instead of guessing — never invent results.
 Reads run immediately. Anything that sends, deletes or changes something is confirmed with Fred by voice automatically before it runs, so do NOT ask him for permission yourself first — just call the tool and the confirmation step asks him. If he declines, accept it and don't retry.
+Memory: the saved facts below are things you know for sure. When Fred tells you something lasting — about a person, a project or client, how he likes things done, a decision, a place, a routine — save it with memory__remember as one short self-contained fact (do it quietly, no need to announce it unless he asked you to remember). If a saved fact is wrong or outdated, forget it and save the correct one. When he says "forget that", use memory__forget. Don't save small talk, passing moods or things that only matter right now.
 You are spoken aloud: before a slow or multi-step task say one short sentence about what you're doing, and when done give the result in one or two plain sentences (no lists, no markdown).`;
 
+let factStore = getDefaultFactStore;   // swappable in tests
 let runToolImpl = null;           // set by registerClaudeBrain — runs one tool through the executor + gate
 let onToolEvent = null;           // optional UI hook: ({ phase, tool, status }) for the panel/logs
 const MAX_TOOL_ROUNDS = () => parseInt(process.env.HANNIBAL_CLAUDE_MAX_TOOL_ROUNDS || '10', 10);
@@ -70,7 +73,9 @@ async function chat({ system, context, user }, onText) {
 
   const useTools = !!runToolImpl && claudeTools.enabled();
   const tools = useTools ? claudeTools.toolDefinitions() : undefined;
-  const sys = String(system || '') + (useTools ? TOOL_GUIDE : '');
+  let facts = '';
+  try { facts = factStore().renderForPrompt(); } catch (_) {}
+  const sys = String(system || '') + (useTools ? TOOL_GUIDE : '') + facts;
 
   let streamed = '';
   const working = [...turn];      // this turn's messages: user, note, then assistant/tool rounds
@@ -167,4 +172,4 @@ function registerClaudeBrain(ipcMain, opts = {}) {
 }
 
 module.exports = { registerClaudeBrain, chat, enabled, model, toolsEnabled: () => !!runToolImpl && claudeTools.enabled(),
-  resetHistory: () => { history = []; }, _setClient: (c) => { client = c; } };
+  resetHistory: () => { history = []; }, _setClient: (c) => { client = c; }, _setFactStore: (f) => { factStore = () => f; } };
