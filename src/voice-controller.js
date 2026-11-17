@@ -35,17 +35,19 @@ const SYSTEM_PROMPT =
 // and inject them as additional system context. After each turn we store the exchange.
 // Default = GEX131's Tailscale IP; overridden from main's config (QDRANT_URL in .env).
 let QDRANT_URL = 'http://100.99.70.113:6333';
+// Qdrant on GEX131 requires an API key (QDRANT_API_KEY in .env, passed via config).
+let QDRANT_HEADERS = { 'Content-Type': 'application/json' };
 const QDRANT_COLLECTION = 'hannibal_memory';
 const EMBED_MODEL = 'nomic-embed-text';
 
 async function ensureQdrantCollection(ollamaUrl) {
   try {
-    const r = await fetch(`${QDRANT_URL}/collections/${QDRANT_COLLECTION}`, { signal: AbortSignal.timeout(3000) });
+    const r = await fetch(`${QDRANT_URL}/collections/${QDRANT_COLLECTION}`, { headers: QDRANT_HEADERS, signal: AbortSignal.timeout(3000) });
     if (r.ok) return true;
     // Create the collection (nomic-embed-text = 768 dim)
     const cr = await fetch(`${QDRANT_URL}/collections/${QDRANT_COLLECTION}`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers: QDRANT_HEADERS,
       body: JSON.stringify({ vectors: { size: 768, distance: 'Cosine' } }),
       signal: AbortSignal.timeout(5000),
     });
@@ -79,7 +81,7 @@ async function queryMemory(text, ollamaUrl, limit = 3) {
   try {
     const r = await fetch(`${QDRANT_URL}/collections/${QDRANT_COLLECTION}/points/search`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: QDRANT_HEADERS,
       body: JSON.stringify({ vector: vec, limit, with_payload: true, score_threshold: 0.35 }),
       signal: AbortSignal.timeout(5000),
     });
@@ -102,7 +104,7 @@ async function storeMemory(text, ollamaUrl, metadata = {}) {
   try {
     await fetch(`${QDRANT_URL}/collections/${QDRANT_COLLECTION}/points`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers: QDRANT_HEADERS,
       body: JSON.stringify({
         points: [{
           id, vector: vec,
@@ -455,6 +457,7 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   // background so a missing or unreachable backend never blocks voice startup.
   let qdrantReady = false;
   if (cfg.qdrantUrl) QDRANT_URL = cfg.qdrantUrl;
+  if (cfg.qdrantApiKey) QDRANT_HEADERS = { 'Content-Type': 'application/json', 'api-key': cfg.qdrantApiKey };
   ensureQdrantCollection(cfg.ollamaUrl).then((ok) => { qdrantReady = ok; console.log('[memory] qdrant ready:', ok); });
 
   // Transcript taps for the command-center conversation panel. `emitUser` fires once

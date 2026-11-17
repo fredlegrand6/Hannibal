@@ -78,7 +78,7 @@ async function memoryQuery({ text, limit = 5 } = {}) {
   if (!vec) return { ok: false, error: 'embed returned no vector' };
   try {
     const r = await fetch(`${CFG.qdrantUrl}/collections/${CFG.qdrantCollection}/points/search`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json', ...(process.env.QDRANT_API_KEY ? { 'api-key': process.env.QDRANT_API_KEY } : {}) },
       body: JSON.stringify({ vector: vec, limit, with_payload: true, score_threshold: 0.35 }),
       signal: AbortSignal.timeout(5000),
     });

@@ -11,8 +11,9 @@ const crypto = require('crypto');
 const COLLECTION = 'hannibal_memory';
 const EMBED_MODEL = 'nomic-embed-text';
 
-function createQdrantMemory({ qdrantUrl, ollamaUrl, fetchImpl = fetch, log = (...a) => console.warn('[memory]', ...a) }) {
+function createQdrantMemory({ qdrantUrl, ollamaUrl, apiKey = process.env.QDRANT_API_KEY, fetchImpl = fetch, log = (...a) => console.warn('[memory]', ...a) }) {
   const base = String(qdrantUrl || '').replace(/\/+$/, '');
+  const qHeaders = { 'Content-Type': 'application/json', ...(apiKey ? { 'api-key': apiKey } : {}) };
 
   async function embed(text) {
     try {
@@ -32,7 +33,7 @@ function createQdrantMemory({ qdrantUrl, ollamaUrl, fetchImpl = fetch, log = (..
     if (!vec) return '';
     try {
       const r = await fetchImpl(`${base}/collections/${COLLECTION}/points/search`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: qHeaders,
         body: JSON.stringify({ vector: vec, limit, with_payload: true, score_threshold: 0.35 }),
         signal: AbortSignal.timeout(5000),
       });
@@ -47,7 +48,7 @@ function createQdrantMemory({ qdrantUrl, ollamaUrl, fetchImpl = fetch, log = (..
     if (!vec) return false;
     try {
       await fetchImpl(`${base}/collections/${COLLECTION}/points`, {
-        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        method: 'PUT', headers: qHeaders,
         body: JSON.stringify({ points: [{ id: crypto.randomUUID(), vector: vec,
           payload: { text, source: 'hannibal', timestamp: new Date().toISOString(), ...metadata } }] }),
         signal: AbortSignal.timeout(5000),
