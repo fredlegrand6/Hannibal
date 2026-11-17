@@ -63,16 +63,31 @@ function nowStamp(d = new Date()) {
   return `${d.toLocaleDateString('en-GB', { weekday: 'long' })} ${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} `
     + `${pad(d.getHours())}:${pad(d.getMinutes())} (${tz})`;
 }
-let factStore = getDefaultFactStore;   // swappable in tests
+let factStore = getDefaultFactStore;
+const MAX_IMAGES = 5;
+// Swap image blocks for a short note (also inside tool results) before a turn
+// goes into the running history, so old frames aren't re-sent every turn.
+function lightenImages(m) {
+  if (!Array.isArray(m.content)) return m;
+  const strip = (blocks) => blocks.map((b) => (b && b.type === 'image' ? { type: 'text', text: '[image shown earlier]' } : b));
+  return { ...m, content: m.content.map((b) => (b && b.type === 'tool_result' && Array.isArray(b.content)
+    ? { ...b, content: strip(b.content) } : b)).map((b) => (b && b.type === 'image' ? { type: 'text', text: '[image shown earlier]' } : b)) };
+}   // swappable in tests
 let runToolImpl = null;           // set by registerClaudeBrain — runs one tool through the executor + gate
 let onToolEvent = null;           // optional UI hook: ({ phase, tool, status }) for the panel/logs
 const MAX_TOOL_ROUNDS = () => parseInt(process.env.HANNIBAL_CLAUDE_MAX_TOOL_ROUNDS || '10', 10);
 
 // One chat turn. onText(delta) fires as text streams in. When tools are on,
 // Claude may call Hannibal's actions; the turn loops until Claude is done.
-async function chat({ system, context, user }, onText) {
+// `images`: optional base64 frames (camera / screenshots) shown with this turn.
+async function chat({ system, context, user, images }, onText) {
   if (!enabled()) return { ok: false, error: 'Claude disabled or ANTHROPIC_API_KEY missing' };
-  const turn = [{ role: 'user', content: String(user || '') }];
+  const frames = (Array.isArray(images) ? images : [])
+    .filter((b) => typeof b === 'string' && claudeTools.mediaType(b)).slice(0, MAX_IMAGES);
+  const turn = [{ role: 'user', content: frames.length
+    ? [...frames.map((data) => ({ type: 'image', source: { type: 'base64', media_type: claudeTools.mediaType(data), data } })),
+      { type: 'text', text: String(user || '') }]
+    : String(user || '') }];
   // Situational context rides as a mid-conversation system message so the
   // persona above and the earlier conversation stay cacheable. The exact local
   // date/time always leads it, so dates ("Thursday", "in 2 hours") resolve right.
@@ -149,11 +164,14 @@ async function chat({ system, context, user }, onText) {
       .flatMap((m) => m.content).filter((b) => b.type === 'text').map((b) => b.text).join(' ').trim();
     if (!text && !toolsUsed.length) return { ok: false, error: 'Claude returned no text', partial: streamed };
 
-    history.push(...working);
+    // Images are only needed for the turn they were shown in; keep history light.
+    history.push(...working.map(lightenImages));
     if (history.length > HISTORY_MAX) {
       history = history.slice(-HISTORY_KEEP);
       // must start on a plain user turn (never on a tool result or assistant turn)
-      while (history.length && !(history[0].role === 'user' && typeof history[0].content === 'string')) history.shift();
+      const plainUser = (m) => m.role === 'user' && (typeof m.content === 'string'
+        || (Array.isArray(m.content) && !m.content.some((b) => b && b.type === 'tool_result')));
+      while (history.length && !plainUser(history[0])) history.shift();
     }
     console.log(`[claude] ${lastModel} in=${total.input} cache_read=${total.cacheRead} `
       + `cache_write=${total.cacheWrite} out=${total.output}${toolsUsed.length ? ` tools=${toolsUsed.map((t) => t.tool).join(',')}` : ''}`);

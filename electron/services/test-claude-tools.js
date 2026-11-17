@@ -189,11 +189,27 @@ function harness({ answer = true, invokeImpl } = {}) {
     assert.strictEqual(lastUser.content, 'thanks');
     assert.strictEqual(msgs[msgs.length - 1].role, 'system', 'the turn ends with its time/context note');
   });
+  await test('a camera frame is shown to Claude as an image, then dropped from history', async () => {
+    const jpeg = '/9j/' + 'B'.repeat(3000);
+    script.push({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'Sharp as ever.' }] });
+    script.push({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'Sure.' }] });
+    const start = requests.length;
+    const r = await brain.chat({ system: 'You are Hannibal.', user: 'how do I look?', images: [jpeg, 'not-an-image'] }, quiet);
+    assert(r.ok);
+    const sent = requests[start].messages.filter((m) => m.role === 'user').pop().content;
+    assert(Array.isArray(sent) && sent[0].type === 'image' && sent[0].source.media_type === 'image/jpeg');
+    assert.strictEqual(sent.filter((b) => b.type === 'image').length, 1, 'non-images are ignored');
+    assert.strictEqual(sent[sent.length - 1].text, 'how do I look?');
+    await brain.chat({ system: 'You are Hannibal.', user: 'thanks' }, quiet);
+    const replay = JSON.stringify(requests[start + 1].messages);
+    assert(!replay.includes('BBBB'), 'the frame is not re-sent on later turns');
+    assert(replay.includes('[image shown earlier]'));
+  });
   await test('HANNIBAL_CLAUDE_TOOLS=0 turns tools off', async () => {
     process.env.HANNIBAL_CLAUDE_TOOLS = '0';
     script.push({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'Hi.' }] });
     await brain.chat({ system: 'S', user: 'hi' }, quiet);
-    assert(!requests[3].tools);
+    assert(!requests[requests.length - 1].tools);
     delete process.env.HANNIBAL_CLAUDE_TOOLS;
   });
   await test('a runaway tool loop stops at the step budget with a valid conversation', async () => {
