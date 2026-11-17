@@ -63,6 +63,32 @@ async function test(name, fn) {
     assert.strictEqual(s.size, 0);
     assert.strictEqual(s.forget('nothing like this').ok, false);
   });
+  await test('forget matches whole words: "project A" never removes "Project B"', () => {
+    const s = fresh();
+    s.remember('Project A is on hold', 'project');
+    s.remember('Project B is active', 'project');
+    const r = s.forget('project A');
+    assert.deepStrictEqual(r.removed.map((f) => f.text), ['Project A is on hold']);
+    assert.strictEqual(s.list().facts[0].text, 'Project B is active');
+    assert.strictEqual(s.forget('proj').ok, false, 'no partial-word matches');
+  });
+  await test('a failed disk write is reported and rolled back', () => {
+    const dir = path.join(TMP, 'breakme');
+    fs.mkdirSync(dir, { recursive: true });
+    const s = createFactStore({ filePath: path.join(dir, 'facts.json') });
+    assert(s.remember('Kept fact', 'other').ok);
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.writeFileSync(dir, 'not a directory');        // the folder is now a file → every save fails (even as root)
+    try {
+      const r = s.remember('Lost fact', 'other');
+      assert.strictEqual(r.ok, false);
+      assert(/could not save/.test(r.error), r.error);
+      assert.strictEqual(s.size, 1, 'in-memory list rolled back');
+      assert.strictEqual(s.forget('kept fact').ok, false);
+      assert.strictEqual(s.size, 1, 'forget rolled back');
+      assert(!/Lost fact/.test(s.renderForPrompt()), 'prompt never shows an unsaved fact');
+    } finally { fs.rmSync(dir, { force: true }); }
+  });
   await test('forget refuses a vague match that would wipe many facts', () => {
     const s = fresh();
     for (let i = 0; i < 7; i++) s.remember(`Revalis note ${i}`, 'project');
