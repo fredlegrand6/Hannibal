@@ -601,6 +601,29 @@ const TOOLS = [
       { name: 'metadata', type: 'object', required: false },
     ], side_effect: SIDE_EFFECT.WRITE, confirm: false, executor: EXECUTOR.RENDERER,
     via: { module: 'src/voice-controller.js', fn: 'storeMemory' } },
+  // Saved FACTS (electron/services/memory-facts.js): short lasting facts that ride
+  // in Claude's system prompt every turn — people, projects, preferences, decisions.
+  { name: 'memory.remember', domain: 'memory',
+    description: "Save one lasting fact about Fred's world (a person, project, preference, decision, place or routine) so Hannibal always knows it.",
+    params: [
+      { name: 'fact', type: 'string', required: true, desc: 'one short, self-contained fact, e.g. "HTS is a hotel group and Revalis Hospitality\'s first client"' },
+      { name: 'category', type: 'enum', required: false, enum: ['person', 'project', 'preference', 'decision', 'place', 'routine', 'other'] },
+    ], side_effect: SIDE_EFFECT.WRITE, confirm: false, executor: EXECUTOR.MAIN,
+    via: { channel: 'facts:remember' },
+    returns: '{ ok, id, duplicate? }',
+    note: 'Local data/memory-facts.json. A near-identical fact is updated, not duplicated.' },
+  { name: 'memory.forget', domain: 'memory',
+    description: 'Remove saved facts, by id (e.g. "f12") or by words they contain.',
+    params: [{ name: 'query', type: 'string', required: true }],
+    side_effect: SIDE_EFFECT.WRITE, confirm: false, executor: EXECUTOR.MAIN,
+    via: { channel: 'facts:forget' },
+    returns: '{ ok, removed:[{ id, text }] }  (refuses if more than 5 facts match)' },
+  { name: 'memory.facts', domain: 'memory',
+    description: 'List the saved facts, optionally one category.',
+    params: [{ name: 'category', type: 'enum', required: false, enum: ['person', 'project', 'preference', 'decision', 'place', 'routine', 'other'] }],
+    side_effect: SIDE_EFFECT.READ, executor: EXECUTOR.MAIN,
+    via: { channel: 'facts:list' },
+    returns: '{ ok, count, facts:[{ id, category, text }] }' },
 
   // ═══════════════════════ VOICE / TTS ═══════════════════════
   { name: 'voice.tts', domain: 'voice',
