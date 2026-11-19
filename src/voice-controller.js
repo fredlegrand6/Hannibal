@@ -2941,6 +2941,7 @@ RULES:
           r.fired = true;
           r.firedAt = now;
           emitModel('system');
+          try { window.hannibal.reminderFired && window.hannibal.reminderFired(r.message || 'you asked me to remind you'); } catch (_) {}
           try { await speakLine(`Fred, reminder: ${r.message || 'you asked me to remind you'}.`); }
           catch (_) {}
         }
@@ -3369,6 +3370,7 @@ RULES:
     if (!job || job.kind !== 'morning-brief' || proactiveBusy) return;
     proactiveBusy = true;
     let ok = false;
+    let briefText = '';
     try {
       for (let w = 0; !isQuiet() && w < 600; w++) await new Promise((r) => setTimeout(r, 1000)); // ≤10 min
       if (!isQuiet()) { console.log('[proactive] never got a quiet moment — main will retry'); return; }
@@ -3387,6 +3389,7 @@ RULES:
           },
         });
         ok = !!(reply && reply.trim());
+        if (ok) briefText = reply.trim();
         startListening({ conversation: true });       // he can answer the brief straight away
       } else {
         const res = await window.hannibal.runSkill('morning-brief', { language: currentLanguage });
@@ -3396,7 +3399,7 @@ RULES:
       console.warn('[proactive] brief failed', e);
     } finally {
       proactiveBusy = false;
-      try { await window.hannibal.proactiveDone({ kind: job.kind, day: job.day, ok }); } catch (_) {}
+      try { await window.hannibal.proactiveDone({ kind: job.kind, day: job.day, ok, text: briefText }); } catch (_) {}
     }
   }
   if (window.hannibal && window.hannibal.onProactiveRun) {

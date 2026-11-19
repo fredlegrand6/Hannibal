@@ -22,7 +22,7 @@ function fakeTelegram() {
   const fetchImpl = async (url, init) => {
     if (url.includes('/file/bot')) return { ok: true, arrayBuffer: async () => Buffer.from('AUDIO') };
     const method = url.split('/').pop();
-    const body = init && init.body ? JSON.parse(init.body) : {};
+    const body = init && typeof init.body === 'string' ? JSON.parse(init.body) : (init && init.body ? { form: init.body } : {});
     calls.push({ method, body });
     let result = true;
     if (method === 'sendMessage') result = { message_id: nextId++ };
@@ -192,6 +192,71 @@ async function test(name, fn) {
     await b.handleUpdate({ callback_query: { id: 'q', from: { id: 999 }, data: tg.sent().find((m) => m.reply_markup).reply_markup.inline_keyboard[0][0].callback_data, message: { chat: { id: FRED }, message_id: 100 } } });
     await b.idle();
     assert.strictEqual(result(), false);
+  });
+
+  console.log('Voice replies and Hannibal starting the conversation');
+  await test('a voice note gets a text AND a voice-note reply; typed text gets text only', async () => {
+    const tg = fakeTelegram();
+    const spoken = [];
+    const b = createTelegramBridge({ token: 't', allowedIds: String(FRED), fetchImpl: tg.fetchImpl, log: () => {},
+      transcribe: async () => 'how is my day',
+      speak: async (txt) => { spoken.push(txt); return Buffer.from('OGG'); },
+      chat: async () => ({ ok: true, text: 'Two meetings.' }) });
+    await b.handleUpdate(msg(undefined, FRED, { voice: { file_id: 'v1' } }));
+    await b.idle();
+    assert.deepStrictEqual(spoken, ['Two meetings.']);
+    const v = tg.calls.find((c) => c.method === 'sendVoice');
+    assert(v && v.body.form instanceof FormData && v.body.form.get('chat_id') === String(FRED));
+    await b.handleUpdate(msg('and tomorrow?'));
+    await b.idle();
+    assert.strictEqual(spoken.length, 1, 'typed message → no voice note');
+  });
+  await test('/voice on makes every reply a voice note; /voice off stops it', async () => {
+    const tg = fakeTelegram();
+    let n = 0;
+    const b = createTelegramBridge({ token: 't', allowedIds: String(FRED), fetchImpl: tg.fetchImpl, log: () => {},
+      speak: async () => { n++; return Buffer.from('OGG'); }, chat: async () => ({ ok: true, text: 'ok' }) });
+    await b.handleUpdate(msg('/voice on')); await b.idle();
+    await b.handleUpdate(msg('hi')); await b.idle();
+    assert.strictEqual(n, 1);
+    await b.handleUpdate(msg('/voice off')); await b.idle();
+    await b.handleUpdate(msg('hi')); await b.idle();
+    assert.strictEqual(n, 1);
+  });
+  await test('a failing voice never breaks the text reply', async () => {
+    const tg = fakeTelegram();
+    const b = createTelegramBridge({ token: 't', allowedIds: String(FRED), fetchImpl: tg.fetchImpl, log: () => {},
+      transcribe: async () => 'x', speak: async () => { throw new Error('ElevenLabs quota'); }, chat: async () => ({ ok: true, text: 'Still here.' }) });
+    await b.handleUpdate(msg(undefined, FRED, { voice: { file_id: 'v1' } }));
+    await b.idle();
+    assert(tg.sent().some((m) => m.text === 'Still here.'));
+  });
+  await test('notify sends a reminder / brief to every allowed account (with voice when asked)', async () => {
+    const tg = fakeTelegram();
+    let n = 0;
+    const b = createTelegramBridge({ token: 't', allowedIds: `${FRED},77`, fetchImpl: tg.fetchImpl, log: () => {},
+      speak: async () => { n++; return Buffer.from('OGG'); }, chat: async () => ({ ok: true, text: '' }) });
+    assert.strictEqual((await b.notify('x')).sent, 0, 'not running yet → nothing sent');
+    b._setRunning(true);
+    const r = await b.notify('⏰ Reminder: call Jay');
+    assert.strictEqual(r.sent, 2);
+    assert.deepStrictEqual(tg.sent().map((m) => String(m.chat_id)).sort(), ['4242', '77']);
+    assert.strictEqual(n, 0);
+    await b.notify('☀️ Morning brief', { voice: true });
+    assert.strictEqual(n, 2);
+  });
+
+  await test('the desk hands its spoken brief and fired reminders to the phone', async () => {
+    const { registerProactive } = require('./proactive');
+    const handlers = {}; const out = [];
+    const ipc = { handle: (ch, fn) => { handlers[ch] = fn; } };
+    const tmp = require('fs').mkdtempSync(require('path').join(require('os').tmpdir(), 'hannibal-tg-'));
+    const p = registerProactive(ipc, { statePath: require('path').join(tmp, 'p.json'), remindersPath: require('path').join(tmp, 'r.json'), getWindow: () => null, onBrief: (t) => out.push(['brief', t]), onReminder: (m) => out.push(['rem', m]) });
+    p.stop();
+    await handlers['proactive:done'](null, { kind: 'morning-brief', day: '2026-11-19', ok: true, text: 'Two meetings today.' });
+    await handlers['proactive:done'](null, { kind: 'morning-brief', day: '2026-11-19', ok: false, text: 'x' });
+    await handlers['reminders:fired'](null, 'call Jay');
+    assert.deepStrictEqual(out, [['brief', 'Two meetings today.'], ['rem', 'call Jay']]);
   });
 
   console.log('Shared brain');

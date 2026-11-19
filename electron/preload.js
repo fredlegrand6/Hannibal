@@ -68,7 +68,8 @@ contextBridge.exposeInMainWorld('hannibal', {
   saveReminders: (list) => ipcRenderer.invoke('reminders:save', list),   // -> { ok }
   onRemindersChanged: (cb) => ipcRenderer.on('reminders:changed', () => cb()),   // main (Claude) changed the list → reload
   onProactiveRun: (cb) => ipcRenderer.on('proactive:run', (_e, job) => cb(job)),  // { kind:'morning-brief', day, prompt }
-  proactiveDone: (r) => ipcRenderer.invoke('proactive:done', r),                 // { kind, day, ok }
+  proactiveDone: (r) => ipcRenderer.invoke('proactive:done', r),                 // { kind, day, ok, text }
+  reminderFired: (message) => ipcRenderer.invoke('reminders:fired', message),   // → also sent to Fred's phone
   loadNotes: () => ipcRenderer.invoke('notes:load'),                     // -> { ok, notes:[] }
   saveNotes: (list) => ipcRenderer.invoke('notes:save', list),           // -> { ok }
   loadTimers: () => ipcRenderer.invoke('timers:load'),                   // -> { ok, timers:[] }

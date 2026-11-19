@@ -46,7 +46,12 @@ app.on('second-instance', () => {
   if (win) { if (win.isMinimized()) win.restore(); win.show(); win.focus(); }
 });
 
-registerProactive(ipcMain, { getWindow: () => win });   // morning brief + reminders.add/cancel/upcoming
+registerProactive(ipcMain, {
+  getWindow: () => win,
+  // Briefs and reminders also reach Fred's phone (Telegram), wherever he is.
+  onBrief: (text) => { if (telegram) telegram.notify(`☀️ Morning brief\n\n${text}`, { voice: true }).catch(() => {}); },
+  onReminder: (message) => { if (telegram) telegram.notify(`⏰ Reminder: ${message}`).catch(() => {}); },
+});   // morning brief + reminders.add/cancel/upcoming
 registerFacts(ipcMain);   // 'facts:remember' / 'facts:forget' / 'facts:list' — saved facts Claude always knows
 // 'llm:chat' → tokens stream back on 'llm:token'. Claude can also use Hannibal's
 // actions: each tool call runs through the SAME executor + voice confirmation gate
@@ -273,6 +278,19 @@ function runTts(cmd, args, stdinText) {
     if (stdinText != null) { p.stdin.write(stdinText); p.stdin.end(); }
   });
 }
+// Hannibal's voice as an OGG/Opus voice note (for Telegram). ElevenLabs only:
+// if it fails, no voice note is sent (the text reply already went out).
+async function voiceNote(text) {
+  const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const mp3 = `/tmp/hannibal-vn-${stamp}.mp3`;
+  const ogg = `/tmp/hannibal-vn-${stamp}.ogg`;
+  try {
+    await runTts(CONFIG.pythonTTS, [CONFIG.ttsScript, mp3], String(text || ''));
+    await runTts(CONFIG.ffmpeg, ['-nostdin', '-y', '-loglevel', 'error', '-i', mp3, '-c:a', 'libopus', '-b:a', '48k', '-ac', '1', ogg], null);
+    return fs.readFileSync(ogg);
+  } finally { fs.unlink(mp3, () => {}); fs.unlink(ogg, () => {}); }
+}
+
 ipcMain.handle('voice:tts', async (_e, text) => {
   // Unique per call — two sentences requested in the same millisecond must not share a file.
   const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -1273,6 +1291,8 @@ function startTelegram() {
     }),
     transcribe: makeWhisperTranscriber({ whisperUrl: CONFIG.whisperUrl, language: process.env.TELEGRAM_VOICE_LANG || 'auto' }),
     memory: createQdrantMemory({ qdrantUrl: CONFIG.qdrantUrl, ollamaUrl: CONFIG.ollamaUrl }),
+    speak: voiceNote,
+    voiceAlways: process.env.TELEGRAM_VOICE_ALWAYS,
     onReset: () => claudeBrain.resetHistory(),
   });
   // At login the network (and Tailscale/VPN) is often not up yet: keep retrying.

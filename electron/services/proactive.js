@@ -130,22 +130,32 @@ function createBriefScheduler({ send, statePath = path.join(DATA, 'proactive.jso
 }
 
 // Wire both into Electron main.
-function registerProactive(ipcMain, { getWindow }) {
+function registerProactive(ipcMain, { getWindow, onBrief, onReminder, statePath, remindersPath } = {}) {
   const toRenderer = (channel, payload) => {
     const w = getWindow && getWindow();
     try { w && !w.isDestroyed() && w.webContents.send(channel, payload); } catch (_) {}
   };
-  const reminders = createReminderTools({ notify: () => toRenderer('reminders:changed', {}) });
+  const reminders = createReminderTools({ ...(remindersPath ? { filePath: remindersPath } : {}), notify: () => toRenderer('reminders:changed', {}) });
   ipcMain.handle('reminders:add', (_e, message, at) => reminders.add(message, at));
   ipcMain.handle('reminders:cancel', (_e, query) => reminders.cancel(query));
   ipcMain.handle('reminders:upcoming', () => reminders.upcoming());
 
-  const brief = createBriefScheduler({ send: (job) => { console.log('[proactive] morning brief due → renderer'); toRenderer('proactive:run', job); } });
-  ipcMain.handle('proactive:done', (_e, r) => brief.done(r));
+  const brief = createBriefScheduler({ ...(statePath ? { statePath } : {}), send: (job) => { console.log('[proactive] morning brief due → renderer'); toRenderer('proactive:run', job); } });
+  ipcMain.handle('proactive:done', (_e, r) => {
+    const res = brief.done(r);
+    // The brief that was spoken at the desk also goes to Fred's phone.
+    if (r && r.ok && r.kind === 'morning-brief' && r.text && onBrief) { try { onBrief(String(r.text)); } catch (_) {} }
+    return res;
+  });
+  // A reminder fired at the desk → also on the phone.
+  ipcMain.handle('reminders:fired', (_e, message) => {
+    if (onReminder && message) { try { onReminder(String(message)); } catch (_) {} }
+    return { ok: true };
+  });
   // First check shortly after launch (the window needs a moment), then every minute.
-  setTimeout(() => brief.tick(), 45000);
+  const first = setTimeout(() => brief.tick(), 45000);
   const timer = setInterval(() => brief.tick(), 60000);
-  return { reminders, brief, stop: () => clearInterval(timer) };
+  return { reminders, brief, stop: () => { clearTimeout(first); clearInterval(timer); } };
 }
 
 module.exports = { createReminderTools, createBriefScheduler, registerProactive, BRIEF_PROMPT };
