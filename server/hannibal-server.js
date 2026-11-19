@@ -55,7 +55,7 @@ const registry = installToolTap(ipc);
 
 const { registerInfo } = require(path.join(SERVICES, 'info-handlers'));
 const { createFactStore, registerFacts } = require(path.join(SERVICES, 'memory-facts'));
-const { createReminderTools, createBriefScheduler } = require(path.join(SERVICES, 'proactive'));
+const { createReminderTools, createBriefScheduler, cancelAcross } = require(path.join(SERVICES, 'proactive'));
 const { createQdrantMemory } = require(path.join(SERVICES, 'qdrant-memory'));
 const { createTelegramBridge, makeElevenLabsTranscriber, PHONE_CONTEXT } = require(path.join(SERVICES, 'telegram'));
 const { registerWorld } = require(path.join(SERVICES, 'world'));
@@ -77,20 +77,19 @@ ipc.handle('facts:list', (_e, category) => facts.list(category));
 const reminders = createReminderTools({ filePath: path.join(CFG.dataDir, 'reminders.json') });
 ipc.handle('reminders:add', (_e, message, at) => reminders.add(message, at));
 // Reminders set at the desk live on the Mac: when it is linked, both lists count.
-ipc.handle('reminders:cancel', async (_e, query) => {
-  const here = reminders.cancel(query);
-  if (here.ok || !hub || !hub.linked()) return here;
-  try { const mac = await hub.invoke('reminders.cancel', { query }, 15000); if (mac && mac.ok) return mac; } catch (_) {}
-  return here;
-});
+async function macUpcoming() {
+  if (!hub || !hub.linked()) return [];
+  try { const mac = await hub.invoke('reminders.upcoming', {}, 15000); return (mac && Array.isArray(mac.reminders)) ? mac.reminders : []; }
+  catch (_) { return []; }
+}
+ipc.handle('reminders:cancel', async (_e, query) => cancelAcross({
+  local: reminders, query, remote: await macUpcoming(),
+  cancelRemote: (id) => hub.invoke('reminders.cancel', { query: id }, 15000),
+}));
 ipc.handle('reminders:upcoming', async () => {
   const here = reminders.upcoming();
-  if (!hub || !hub.linked()) return here;
-  try {
-    const mac = await hub.invoke('reminders.upcoming', {}, 15000);
-    if (mac && Array.isArray(mac.reminders)) return { ok: true, reminders: [...here.reminders, ...mac.reminders.map((r) => ({ ...r, set: 'at the desk' }))] };
-  } catch (_) {}
-  return here;
+  const mac = await macUpcoming();
+  return mac.length ? { ok: true, reminders: [...here.reminders, ...mac.map((r) => ({ ...r, set: 'at the desk' }))] } : here;
 });
 
 const memory = createQdrantMemory({ qdrantUrl: CFG.qdrantUrl, ollamaUrl: CFG.ollamaUrl });
@@ -198,13 +197,29 @@ if (process.env.BODY_LINK_TOKEN) {
       onUnlink: () => refreshTools(),
       methods: {
         // The Mac's facts on (re)link: anything new is added here, then both use this list.
-        'facts.sync': ({ facts: macFacts } = {}) => {
-          let added = 0;
-          for (const f of Array.isArray(macFacts) ? macFacts : []) {
+        // Reconcile the desk's facts after a time apart, against the list both
+        // last agreed on (lastSynced): what the desk added since is added here,
+        // what the desk deleted since is deleted here, and what was deleted here
+        // (on the phone) is not brought back. No lastSynced (first link): add all.
+        'facts.sync': ({ facts: deskList, lastSynced } = {}) => {
+          const key = (t) => String(t || '').toLowerCase().replace(/[^\p{L}\p{N} ]+/gu, ' ').replace(/\s+/g, ' ').trim();
+          const desk = Array.isArray(deskList) ? deskList : [];
+          const base = Array.isArray(lastSynced) ? new Set(lastSynced.map((f) => key(f.text))) : null;
+          const deskKeys = new Set(desk.map((f) => key(f.text)));
+          let added = 0; let removed = 0;
+          for (const f of desk) {
+            if (base && base.has(key(f.text))) continue;          // known before: not new
             const r = facts.remember(f.text, f.category);
             if (r.ok && !r.duplicate) added += 1;
           }
-          if (added) console.log(`[body] ${added} new fact(s) from the desk`);
+          if (base) {
+            for (const k of base) {
+              if (deskKeys.has(k)) continue;                       // still on the desk
+              const gone = facts.all().find((f) => key(f.text) === k);
+              if (gone && facts.forget(gone.id).ok) removed += 1;
+            }
+          }
+          if (added || removed) console.log(`[body] facts from the desk: ${added} added, ${removed} removed`);
           return { facts: facts.all() };
         },
         'facts.remember': ({ text, category } = {}) => ({ result: factsChanged(facts.remember(text, category)), facts: facts.all() }),

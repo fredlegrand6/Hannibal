@@ -144,5 +144,58 @@ async function test(name, fn) {
     assert.throws(() => createBodyHub({ host: '127.0.0.1', port: port + 1, token: 'short', WebSocketServer }), /BODY_LINK_TOKEN/);
   });
 
+  // ── review fixes: reminders across both lists, facts reconcile ──
+  const { cancelAcross } = require(path.join(S, 'proactive'));
+  await test('cancel asks again when several reminders match across server and desk', async () => {
+    const t = Date.parse('2026-11-19T10:00:00');
+    const local = createReminderTools({ filePath: path.join(TMP, 'rem2.json'), now: () => t });
+    local.add('call Jay', '2026-11-19T12:00'); local.add('call Joe', '2026-11-19T13:00');
+    let remoteCancelled = null;
+    const remote = [{ id: 'r-desk-1', message: 'call dentist', when: 'Friday' }];
+    const r = await cancelAcross({ local, remote, query: 'call', cancelRemote: async (id) => { remoteCancelled = id; return { ok: true }; } });
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.matches.length, 3);
+    assert.strictEqual(remoteCancelled, null);
+    assert.strictEqual(local.upcoming().reminders.length, 2);          // nothing touched
+  });
+  await test('one clear match is cancelled where it lives', async () => {
+    const t = Date.parse('2026-11-19T10:00:00');
+    const local = createReminderTools({ filePath: path.join(TMP, 'rem3.json'), now: () => t });
+    local.add('call Jay', '2026-11-19T12:00');
+    let remoteCancelled = null;
+    const remote = [{ id: 'r-desk-1', message: 'call dentist', when: 'Friday' }];
+    const r1 = await cancelAcross({ local, remote, query: 'dentist', cancelRemote: async (id) => { remoteCancelled = id; return { ok: true }; } });
+    assert.ok(r1.ok); assert.strictEqual(remoteCancelled, 'r-desk-1');
+    assert.strictEqual(local.upcoming().reminders.length, 1);
+    const r2 = await cancelAcross({ local, remote: [], query: 'jay', cancelRemote: async () => { throw new Error('no'); } });
+    assert.ok(r2.ok); assert.strictEqual(local.upcoming().reminders.length, 0);
+  });
+
+  await test('facts reconcile on relink: desk adds and deletes count, phone deletes are not undone', async () => {
+    const data = fs.mkdtempSync(path.join(TMP, 'sync-'));
+    fs.writeFileSync(path.join(data, 'memory-facts.json'), JSON.stringify({ version: 1, facts: [
+      { id: 'f1', text: 'Jay is Fred\'s son', category: 'person' },
+      { id: 'f4', text: 'Fred flies to Ibiza every 4 weeks', category: 'routine' },
+    ] }));
+    const p2 = 19300 + Math.floor(Math.random() * 500);
+    const srv = spawn(process.execPath, [path.join(__dirname, 'hannibal-server.js')], {
+      env: { ...process.env, HANNIBAL_ENV: '/dev/null', HANNIBAL_DATA: data, TELEGRAM_BOT_TOKEN: '1:test', ANTHROPIC_API_KEY: 'x',
+        HANNIBAL_BRIEF: '0', BODY_LINK_TOKEN: TOKEN, BODY_LINK_HOST: '127.0.0.1', BODY_LINK_PORT: String(p2) },
+    });
+    try {
+      await new Promise((resolve) => { let o = ''; srv.stdout.on('data', (d) => { o += d; if (/waiting for the Mac/.test(o)) resolve(); }); setTimeout(resolve, 4000); });
+      const c = new BrainClient({ url: `ws://127.0.0.1:${p2}`, token: TOKEN, bodyId: 'mac', reconnect: false }); c.on('error', () => {});
+      c.connect(); await c.waitReady(3000);
+      // Last agreed: Jay, "Gaian is 12" (since deleted on the phone), Ibiza (since deleted at the desk).
+      const lastSynced = [{ id: 'f1', text: 'Jay is Fred\'s son' }, { id: 'f2', text: 'Gaian is 12' }, { id: 'f4', text: 'Fred flies to Ibiza every 4 weeks' }];
+      const desk = [{ id: 'f1', text: 'Jay is Fred\'s son', category: 'person' }, { id: 'f2', text: 'Gaian is 12', category: 'person' },
+        { id: 'f9', text: 'Fred likes espresso', category: 'preference' }];
+      const r = await c.request('facts.sync', { facts: desk, lastSynced });
+      const texts = r.facts.map((f) => f.text).sort();
+      assert.deepStrictEqual(texts, ['Fred likes espresso', 'Jay is Fred\'s son']);
+      c.close();
+    } finally { srv.kill('SIGTERM'); }
+  });
+
   console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ''}`);
 })();
