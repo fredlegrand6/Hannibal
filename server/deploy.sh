@@ -20,6 +20,10 @@ grep -q '^TELEGRAM_BOT_TOKEN=' .env || { echo "TELEGRAM_BOT_TOKEN is missing fro
 if ! grep -q '^BODY_LINK_TOKEN=' .env; then
   printf '\nBODY_LINK_TOKEN=%s\n' "$(openssl rand -hex 24)" >> .env
 fi
+# The key for the phone app (made once, kept in .env).
+if ! grep -q '^PHONE_APP_TOKEN=' .env; then
+  printf '\nPHONE_APP_TOKEN=%s\n' "$(openssl rand -hex 24)" >> .env
+fi
 
 echo "1/4  Copying Hannibal to $HOST ..."
 export COPYFILE_DISABLE=1   # no macOS extended attributes in the copy
@@ -52,4 +56,5 @@ sleep 2
 open ~/Applications/Hannibal.app 2>/dev/null || ./start.sh
 echo
 echo "Done. Hannibal now answers on Telegram from the server, even with the Mac off."
+echo "The phone app link was sent to you on Telegram (once): open it on your phone."
 echo "Undo: set HANNIBAL_SERVER_TELEGRAM=0 in .env, restart Hannibal, and run: ssh $HOST docker stop hannibal-server"

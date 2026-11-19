@@ -133,6 +133,13 @@ async function voiceNote(text) {
   } finally { fs.unlink(mp3, () => {}); fs.unlink(ogg, () => {}); }
 }
 
+// Hannibal's voice as MP3 (the phone app plays it straight in the browser).
+async function voiceMp3(text) {
+  const mp3 = path.join(os.tmpdir(), `hannibal-app-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.mp3`);
+  try { await run(CFG.python, [path.join(SERVICES, 'nova-tts.py'), mp3], String(text || '')); return fs.readFileSync(mp3); }
+  finally { fs.unlink(mp3, () => {}); }
+}
+
 // A tool runs here if the server has it, otherwise on the linked Mac. The
 // confirmation gate has already asked Fred (on his phone) before invoke runs.
 const localInvoke = makeIpcInvoker(registry);
@@ -164,6 +171,35 @@ const telegram = createTelegramBridge({
   onReset: () => claudeBrain.resetHistory(),
 });
 
+// ── the phone app (private web app over Tailscale) ──
+let phoneApp = null;
+if (process.env.PHONE_APP_TOKEN) {
+  try {
+    const { createPhoneApp } = require('./phone-app');
+    phoneApp = createPhoneApp({
+      token: process.env.PHONE_APP_TOKEN,
+      // Tailscale only (+ localhost for `tailscale serve` https). Never the public address.
+      hosts: ['127.0.0.1', process.env.BODY_LINK_HOST || '100.99.70.113'],
+      port: Number(process.env.PHONE_APP_PORT || 8791),
+      persona: PERSONA,
+      chat: (payload, onText, opts) => claudeBrain.chat(
+        { ...payload, context: [serverContext(), payload.context].filter(Boolean).join('\n\n') }, onText, opts),
+      runTool,
+      transcribe: makeElevenLabsTranscriber({ apiKey: process.env.ELEVENLABS_API_KEY, model: process.env.ELEVENLABS_STT_MODEL || 'scribe_v1' }),
+      speak: voiceMp3,
+      memory,
+      status: () => ({ mac: !!(hub && hub.linked()) }),
+      onReset: () => claudeBrain.resetHistory(),
+    });
+    phoneApp.start();
+  } catch (e) { console.warn('[phone] app disabled:', e.message); phoneApp = null; }
+} else console.log('[phone] PHONE_APP_TOKEN not set: no phone app');
+// Things Hannibal tells Fred go to Telegram and, if it is open, the app.
+const tellFred = async (text, { voice = false } = {}) => {
+  if (phoneApp) phoneApp.notify(text);
+  return telegram.notify(text, { voice });
+};
+
 // ── morning brief: Claude reads calendar/mail/reminders, Fred gets it on the phone ──
 const brief = createBriefScheduler({
   statePath: path.join(CFG.dataDir, 'proactive.json'),
@@ -177,7 +213,7 @@ const brief = createBriefScheduler({
         user: job.prompt,
       }, null, { runTool: (name, input) => runTool(name, input, { confirmer: async () => false }) });  // read-only: any write is declined
       if (r && r.ok && r.text) {
-        await telegram.notify(`☀️ Morning brief\n\n${r.text}`, { voice: true });
+        await tellFred(`☀️ Morning brief\n\n${r.text}`, { voice: true });
         ok = true;
       } else console.warn('[brief] no brief:', (r && r.error) || 'empty');
     } catch (e) { console.warn('[brief] failed:', e.message); }
@@ -225,7 +261,7 @@ if (process.env.BODY_LINK_TOKEN) {
         'facts.remember': ({ text, category } = {}) => ({ result: factsChanged(facts.remember(text, category)), facts: facts.all() }),
         'facts.forget': ({ query } = {}) => ({ result: factsChanged(facts.forget(query)), facts: facts.all() }),
         // The desk sends something to Fred's phone (a reminder that fired there).
-        'phone.notify': async ({ text, voice } = {}) => { await telegram.notify(String(text || ''), { voice: !!voice }); return { ok: true }; },
+        'phone.notify': async ({ text, voice } = {}) => { await tellFred(String(text || ''), { voice: !!voice }); return { ok: true }; },
       },
     });
   } catch (e) { console.warn('[body] link disabled:', e.message); hub = null; }
@@ -237,7 +273,7 @@ async function fireReminders() {
   try { due = reminders.takeDue(); } catch (e) { console.warn('[reminders] check failed:', e.message); }
   for (const r of due) {
     console.log('[reminders] due:', r.message);
-    await telegram.notify(`⏰ Reminder: ${r.message}`, { voice: true }).catch((e) => console.warn('[reminders] send failed:', e.message));
+    await tellFred(`⏰ Reminder: ${r.message}`, { voice: true }).catch((e) => console.warn('[reminders] send failed:', e.message));
   }
 }
 
@@ -251,7 +287,26 @@ function startTelegram() {
   });
 }
 startTelegram();
+
+// Send the phone app link to Telegram once per address (deploy writes data/phone-url.txt).
+function sendPhoneLinkOnce() {
+  if (!phoneApp) return;
+  const urlFile = path.join(CFG.dataDir, 'phone-url.txt');
+  const sentFile = path.join(CFG.dataDir, 'phone-url.sent');
+  let url = '';
+  try { url = fs.readFileSync(urlFile, 'utf8').trim(); } catch (_) { return; }
+  let sent = '';
+  try { sent = fs.readFileSync(sentFile, 'utf8').trim(); } catch (_) {}
+  if (!url || url === sent) return;
+  const link = `${url}/?k=${process.env.PHONE_APP_TOKEN}`;
+  const https = url.startsWith('https://');
+  telegram.notify(`📱 Your Hannibal app: ${link}\n\nOpen it on your phone (Tailscale on), then Share → Add to Home Screen.`
+    + (https ? '' : '\n\nTalking needs the https address; for now you can type.'))
+    .then((r) => { if (r && r.ok) fs.writeFileSync(sentFile, url); })
+    .catch(() => {});
+}
 const timers = [
+  setTimeout(sendPhoneLinkOnce, 20000),
   setTimeout(() => brief.tick(), 30000),
   setInterval(() => brief.tick(), 60000),
   setInterval(fireReminders, 30000),
@@ -263,6 +318,7 @@ function shutdown(sig) {
   for (const t of timers) { clearTimeout(t); clearInterval(t); }
   try { telegram.stop(); } catch (_) {}
   try { hub && hub.close(); } catch (_) {}
+  try { phoneApp && phoneApp.stop(); } catch (_) {}
   setTimeout(() => process.exit(0), 500);
 }
 process.on('SIGTERM', () => shutdown('SIGTERM'));
