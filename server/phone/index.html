@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#05070c">
+<link rel="manifest" href="/manifest.json">
+<link rel="icon" href="/icon.svg">
+<link rel="apple-touch-icon" href="/icon.svg">
+<title>Hannibal</title>
+<style>
+  :root { --bg:#05070c; --panel:#0c1220; --line:#1b2638; --text:#e8eef8; --dim:#8394ad; --accent:#35d0ff; --me:#173049; --ok:#2fd47a; --no:#ff5d6c; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--text); font:16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  body { display:flex; flex-direction:column; height:100dvh; padding-top:env(safe-area-inset-top); }
+  header { display:flex; align-items:center; gap:10px; padding:12px 16px; border-bottom:1px solid var(--line); }
+  header .dot { width:10px; height:10px; border-radius:50%; background:var(--dim); box-shadow:0 0 0 0 transparent; }
+  header .dot.on { background:var(--accent); box-shadow:0 0 12px var(--accent); }
+  header h1 { font-size:17px; letter-spacing:.14em; margin:0; font-weight:700; }
+  header .state { margin-left:auto; font-size:12px; color:var(--dim); }
+  header button { background:none; border:1px solid var(--line); color:var(--dim); border-radius:8px; padding:4px 8px; font-size:12px; }
+  #log { flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:10px; }
+  .msg { max-width:86%; padding:10px 13px; border-radius:16px; white-space:pre-wrap; word-wrap:break-word; }
+  .me { align-self:flex-end; background:var(--me); border-bottom-right-radius:4px; }
+  .him { align-self:flex-start; background:var(--panel); border:1px solid var(--line); border-bottom-left-radius:4px; }
+  .note { align-self:center; color:var(--dim); font-size:13px; text-align:center; }
+  .notify { align-self:stretch; background:#0e1a2a; border:1px solid #1f3b57; }
+  .confirm { align-self:stretch; background:#1a1508; border:1px solid #5a4614; }
+  .confirm .row { display:flex; gap:10px; margin-top:10px; }
+  .confirm button { flex:1; padding:10px; border-radius:10px; border:0; font-weight:700; font-size:16px; }
+  .yes { background:var(--ok); color:#04130a; } .no { background:#2a2f3a; color:var(--text); }
+  .thinking { color:var(--dim); font-style:italic; }
+  footer { display:flex; gap:8px; align-items:flex-end; padding:10px 12px calc(10px + env(safe-area-inset-bottom)); border-top:1px solid var(--line); background:var(--bg); }
+  textarea { flex:1; resize:none; max-height:120px; min-height:44px; padding:11px 14px; border-radius:22px; border:1px solid var(--line); background:var(--panel); color:var(--text); font:inherit; outline:none; }
+  #send { width:44px; height:44px; border-radius:50%; border:0; background:var(--accent); color:#03131c; font-size:20px; font-weight:700; }
+  #mic { width:64px; height:64px; border-radius:50%; border:2px solid var(--accent); background:transparent; color:var(--accent); flex:none; touch-action:none; user-select:none; -webkit-user-select:none; }
+  #mic svg { width:28px; height:28px; }
+  #mic.rec { background:var(--no); border-color:var(--no); color:#fff; transform:scale(1.08); }
+  .hint { position:fixed; left:0; right:0; bottom:calc(92px + env(safe-area-inset-bottom)); text-align:center; color:var(--dim); font-size:13px; pointer-events:none; }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="dot"></span><h1>HANNIBAL</h1>
+  <span class="state" id="state">connecting…</span>
+  <button id="voiceBtn" title="Read every answer aloud">🔈</button>
+</header>
+<div id="log"></div>
+<div class="hint" id="hint"></div>
+<footer>
+  <textarea id="text" rows="1" placeholder="Message Hannibal"></textarea>
+  <button id="send" aria-label="Send" hidden>↑</button>
+  <button id="mic" aria-label="Hold to talk"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-2.08A7 7 0 0 0 19 12h-2z"/></svg></button>
+</footer>
+<script>
+'use strict';
+const $ = (id) => document.getElementById(id);
+const log = $('log'), text = $('text'), send = $('send'), mic = $('mic'), hint = $('hint');
+let voiceAlways = localStorage.getItem('voiceAlways') === '1';
+const setVoiceBtn = () => { $('voiceBtn').textContent = voiceAlways ? '🔊' : '🔈'; };
+setVoiceBtn();
+$('voiceBtn').onclick = () => { voiceAlways = !voiceAlways; try { localStorage.setItem('voiceAlways', voiceAlways ? '1' : '0'); } catch (_) {} setVoiceBtn(); add('note', voiceAlways ? 'I\'ll read every answer aloud.' : 'I\'ll only speak when you talk to me.'); };
+
+function add(kind, body) {
+  const el = document.createElement('div');
+  el.className = 'msg ' + kind;
+  el.textContent = body;
+  log.appendChild(el);
+  log.scrollTop = log.scrollHeight;
+  return el;
+}
+
+// History survives a reload (this phone only).
+const HKEY = 'hannibal-history';
+function save() { try { const items = [...log.children].slice(-60).map((e) => [e.className.replace('msg ', ''), e.textContent]).filter(([k]) => !/confirm|thinking/.test(k)); localStorage.setItem(HKEY, JSON.stringify(items)); } catch (_) {} }
+try { for (const [k, b] of JSON.parse(localStorage.getItem(HKEY) || '[]')) add(k, b); } catch (_) {}
+
+// Audio: one element, unlocked on the first tap (iOS only plays after a gesture).
+const audio = new Audio();
+let unlocked = false;
+function silentWav() {
+  const n = 800, b = new ArrayBuffer(44 + n * 2), v = new DataView(b), w = (o, s) => [...s].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+  w(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); w(8, 'WAVE'); w(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, 8000, true); v.setUint32(28, 16000, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, 'data'); v.setUint32(40, n * 2, true);
+  return URL.createObjectURL(new Blob([b], { type: 'audio/wav' }));
+}
+function unlock() { if (unlocked) return; unlocked = true; audio.src = silentWav(); audio.play().catch(() => {}); }
+document.addEventListener('pointerdown', unlock, { once: true });
+async function speak(t) {
+  try {
+    const r = await fetch('/api/speak', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: t }) });
+    if (!r.ok) return;
+    const url = URL.createObjectURL(await r.blob());
+    audio.src = url; await audio.play();
+  } catch (_) {}
+}
+
+function busy(on) { $('state').textContent = on ? 'thinking…' : (online ? 'online' : 'offline'); }
+
+async function answer(r, spoken) {
+  const j = await r.json().catch(() => ({ reply: 'No answer from the server.' }));
+  return j;
+}
+
+async function say(t) {
+  t = t.trim(); if (!t) return;
+  add('me', t); save();
+  text.value = ''; resize();
+  const wait = add('him thinking', '…'); busy(true);
+  try {
+    const j = await answer(await fetch('/api/say', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: t }) }));
+    wait.remove(); add('him', j.reply || '…'); save();
+    if (voiceAlways && j.ok) speak(j.reply);
+  } catch (e) { wait.remove(); add('note', 'Could not reach Hannibal. Are you on Tailscale?'); }
+  busy(false);
+}
+
+// Typing
+function resize() { text.style.height = 'auto'; text.style.height = Math.min(120, text.scrollHeight) + 'px'; send.hidden = !text.value.trim(); mic.hidden = !!text.value.trim(); }
+text.addEventListener('input', resize);
+text.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !/iPhone|Android/i.test(navigator.userAgent)) { e.preventDefault(); say(text.value); } });
+send.onclick = () => say(text.value);
+
+// Hold to talk
+let rec = null, chunks = [], started = 0;
+const pickType = () => ['audio/webm;codecs=opus', 'audio/mp4', 'audio/webm', 'audio/ogg'].find((t) => window.MediaRecorder && MediaRecorder.isTypeSupported(t)) || '';
+async function startRec(e) {
+  e.preventDefault(); unlock();
+  if (!navigator.mediaDevices || !window.MediaRecorder) { add('note', 'This browser cannot record here. Use the https address, or type.'); return; }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const type = pickType();
+    rec = new MediaRecorder(stream, type ? { mimeType: type } : undefined);
+    chunks = []; started = Date.now();
+    rec.ondataavailable = (ev) => { if (ev.data && ev.data.size) chunks.push(ev.data); };
+    rec.onstop = async () => {
+      stream.getTracks().forEach((t) => t.stop());
+      if (Date.now() - started < 500) { hint.textContent = 'Hold the button while you talk.'; setTimeout(() => (hint.textContent = ''), 2000); return; }
+      const blob = new Blob(chunks, { type: rec.mimeType || type || 'audio/webm' });
+      const wait = add('him thinking', 'Listening…'); busy(true);
+      try {
+        const j = await answer(await fetch('/api/voice', { method: 'POST', headers: { 'Content-Type': blob.type }, body: blob }));
+        wait.remove();
+        if (j.heard) add('me', '🎙 ' + j.heard);
+        add('him', j.reply || '…'); save();
+        if (j.ok) speak(j.reply);
+      } catch (_) { wait.remove(); add('note', 'Could not reach Hannibal.'); }
+      busy(false);
+    };
+    rec.start(); mic.classList.add('rec'); hint.textContent = 'Listening… let go to send';
+  } catch (err) { add('note', 'No microphone access: ' + (err && err.message || err)); }
+}
+function stopRec(e) { if (e) e.preventDefault(); if (rec && rec.state === 'recording') rec.stop(); mic.classList.remove('rec'); hint.textContent = ''; }
+mic.addEventListener('pointerdown', startRec);
+mic.addEventListener('pointerup', stopRec);
+mic.addEventListener('pointercancel', stopRec);
+mic.addEventListener('pointerleave', stopRec);
+
+// Live events: confirmations, reminders, the morning brief.
+let online = false;
+const cards = new Map();
+function connect() {
+  const es = new EventSource('/api/events');
+  es.onopen = () => { online = true; $('dot').classList.add('on'); busy(false); };
+  es.onerror = () => { online = false; $('dot').classList.remove('on'); $('state').textContent = 'reconnecting…'; };
+  es.onmessage = (m) => {
+    let ev; try { ev = JSON.parse(m.data); } catch (_) { return; }
+    if (ev.type === 'hello' && ev.status && ev.status.mac != null) $('state').textContent = ev.status.mac ? 'online · Mac linked' : 'online · Mac asleep';
+    if (ev.type === 'notify') { add('notify', ev.text); save(); speak(ev.text); if (navigator.vibrate) navigator.vibrate(200); }
+    if (ev.type === 'confirm') {
+      const el = add('confirm', ev.summary + '\n\nShall I go ahead?');
+      const row = document.createElement('div'); row.className = 'row';
+      for (const [label, yes, cls] of [['Yes', true, 'yes'], ['No', false, 'no']]) {
+        const b = document.createElement('button'); b.textContent = label; b.className = cls;
+        b.onclick = () => { row.remove(); fetch('/api/confirm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: ev.id, yes }) }); };
+        row.appendChild(b);
+      }
+      el.appendChild(row); cards.set(ev.id, el);
+      if (navigator.vibrate) navigator.vibrate([100, 60, 100]);
+    }
+    if (ev.type === 'confirm-closed') {
+      const el = cards.get(ev.id); if (el) { const r = el.querySelector('.row'); if (r) r.remove(); cards.delete(ev.id); }
+      add('note', (ev.ok ? '✓ ' : '✗ ') + ev.note);
+    }
+  };
+}
+connect();
+if (!log.children.length) add('him', 'Hannibal here. Type, or hold the mic and talk.');
+</script>
+</body>
+</html>
