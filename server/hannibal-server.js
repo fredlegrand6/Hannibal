@@ -47,7 +47,9 @@ fs.mkdirSync(CFG.dataDir, { recursive: true });
 
 // ── a stand-in for Electron's ipcMain: handlers register here, the executor
 //    finds them through the tool tap exactly as it does in the desk app ──
-const { installToolTap, setShim } = require(path.join(SERVICES, 'agent', 'executor'));
+const { installToolTap, setShim, makeIpcInvoker } = require(path.join(SERVICES, 'agent', 'executor'));
+const catalog = require(path.join(SERVICES, 'agent', 'catalog'));
+const { createBodyHub } = require('./body-hub');
 const ipc = { handle() {} };
 const registry = installToolTap(ipc);
 
@@ -64,24 +66,49 @@ registerInfo(ipc, { python: CFG.python, searxngUrl: CFG.searxngUrl, metricsLocal
 registerWorld(ipc);   // views can't open here (no screen); the narrated read still works
 
 const facts = createFactStore({ filePath: path.join(CFG.dataDir, 'memory-facts.json') });
-registerFacts(ipc, facts);
 claudeBrain._setFactStore(facts);
+// The server's facts are the master copy: every change goes down to the Mac.
+let hub = null;
+const factsChanged = (r) => { if (r && r.ok && hub) hub.notify('facts', { facts: facts.all() }); return r; };
+ipc.handle('facts:remember', (_e, text, category) => factsChanged(facts.remember(text, category)));
+ipc.handle('facts:forget', (_e, query) => factsChanged(facts.forget(query)));
+ipc.handle('facts:list', (_e, category) => facts.list(category));
 
 const reminders = createReminderTools({ filePath: path.join(CFG.dataDir, 'reminders.json') });
 ipc.handle('reminders:add', (_e, message, at) => reminders.add(message, at));
-ipc.handle('reminders:cancel', (_e, query) => reminders.cancel(query));
-ipc.handle('reminders:upcoming', () => reminders.upcoming());
+// Reminders set at the desk live on the Mac: when it is linked, both lists count.
+ipc.handle('reminders:cancel', async (_e, query) => {
+  const here = reminders.cancel(query);
+  if (here.ok || !hub || !hub.linked()) return here;
+  try { const mac = await hub.invoke('reminders.cancel', { query }, 15000); if (mac && mac.ok) return mac; } catch (_) {}
+  return here;
+});
+ipc.handle('reminders:upcoming', async () => {
+  const here = reminders.upcoming();
+  if (!hub || !hub.linked()) return here;
+  try {
+    const mac = await hub.invoke('reminders.upcoming', {}, 15000);
+    if (mac && Array.isArray(mac.reminders)) return { ok: true, reminders: [...here.reminders, ...mac.reminders.map((r) => ({ ...r, set: 'at the desk' }))] };
+  } catch (_) {}
+  return here;
+});
 
 const memory = createQdrantMemory({ qdrantUrl: CFG.qdrantUrl, ollamaUrl: CFG.ollamaUrl });
 setShim('memory.query', async ({ text, limit = 3 } = {}) =>
   ({ ok: true, results: await memory.search(String(text || ''), Math.min(Number(limit) || 3, 10)) }));
 
-// Only offer Claude the tools whose handlers exist here.
-claudeTools.setAvailableChannels(Object.keys(registry));
+// Only offer Claude the tools whose handlers exist: the server's own, plus the
+// Mac's while it is linked.
+const LOCAL_CHANNELS = Object.keys(registry);
+const refreshTools = () => claudeTools.setAvailableChannels([...LOCAL_CHANNELS, ...(hub ? hub.channels() : [])]);
+refreshTools();
 
-const SERVER_CONTEXT = 'You are running on Fred\'s always-on server, not on his Mac: you can use his calendar, mail (read), '
-  + 'the web, news, reminders and your memory, but not Mac apps, the camera, the screen or WhatsApp. If he asks for one '
-  + 'of those, say it needs the Mac.';
+const serverContext = () => (hub && hub.linked()
+  ? 'You are running on Fred\'s always-on server. His Mac is awake and linked right now, so you can also use its tools '
+    + '(apps, files, camera, screen, WhatsApp, music). Anything that changes something is confirmed on his phone first.'
+  : 'You are running on Fred\'s always-on server. His Mac is asleep or off right now, so you can use his calendar, mail (read), '
+    + 'the web, news, reminders and your memory, but not Mac apps, the camera, the screen or WhatsApp. If he asks for one '
+    + 'of those, say it needs the Mac awake.');
 const PERSONA = "You are Hannibal, Fred's personal AI assistant. Be concise, direct, and natural, "
   + 'with dry wit. Notes about the current situation arrive as system messages during the conversation.';
 
@@ -107,8 +134,17 @@ async function voiceNote(text) {
   } finally { fs.unlink(mp3, () => {}); fs.unlink(ogg, () => {}); }
 }
 
+// A tool runs here if the server has it, otherwise on the linked Mac. The
+// confirmation gate has already asked Fred (on his phone) before invoke runs.
+const localInvoke = makeIpcInvoker(registry);
+function invoke(toolName, params) {
+  const tool = catalog.getTool(toolName);
+  const via = (tool && tool.via) || {};
+  if (via.module || registry[via.channel] || !hub || !hub.linked()) return localInvoke(toolName, params);
+  return hub.invoke(toolName, params || {});
+}
 const runTool = (name, input, { confirmer } = {}) => claudeTools.runTool(name, input, {
-  confirmer,
+  confirmer, invoke,
   emit: (ev) => { if (/^step:(start|finish|error|skipped|confirm)/.test(ev.type)) console.log('[tool]', ev.type, ev.tool || ''); },
 });
 
@@ -120,7 +156,7 @@ const telegram = createTelegramBridge({
   allowedIds: process.env.TELEGRAM_ALLOWED_USERS,
   persona: PERSONA,
   chat: (payload, onText, opts) => claudeBrain.chat(
-    { ...payload, context: [SERVER_CONTEXT, payload.context].filter(Boolean).join('\n\n') }, onText, opts),
+    { ...payload, context: [serverContext(), payload.context].filter(Boolean).join('\n\n') }, onText, opts),
   runTool,
   transcribe: makeElevenLabsTranscriber({ apiKey: process.env.ELEVENLABS_API_KEY, model: process.env.ELEVENLABS_STT_MODEL || 'scribe_v1' }),
   memory,
@@ -138,7 +174,7 @@ const brief = createBriefScheduler({
     try {
       const r = await claudeBrain.chat({
         system: PERSONA,
-        context: [SERVER_CONTEXT, PHONE_CONTEXT, 'This brief is sent to his phone as text and a voice note.'].join('\n\n'),
+        context: [serverContext(), PHONE_CONTEXT, 'This brief is sent to his phone as text and a voice note.'].join('\n\n'),
         user: job.prompt,
       }, null, { runTool: (name, input) => runTool(name, input, { confirmer: async () => false }) });  // read-only: any write is declined
       if (r && r.ok && r.text) {
@@ -149,6 +185,36 @@ const brief = createBriefScheduler({
     brief.done({ kind: job.kind, day: job.day, ok });
   },
 });
+
+// ── the Mac's link (when it is awake) ──
+if (process.env.BODY_LINK_TOKEN) {
+  try {
+    hub = createBodyHub({
+      host: process.env.BODY_LINK_HOST || '100.99.70.113',
+      port: Number(process.env.BODY_LINK_PORT || 8790),
+      token: process.env.BODY_LINK_TOKEN,
+      WebSocketServer: require('ws').WebSocketServer,
+      onLink: (b) => { refreshTools(); console.log(`[body] Mac tools available: ${b.channels.size} channels, ${claudeTools.toolDefinitions().length} tools in total`); },
+      onUnlink: () => refreshTools(),
+      methods: {
+        // The Mac's facts on (re)link: anything new is added here, then both use this list.
+        'facts.sync': ({ facts: macFacts } = {}) => {
+          let added = 0;
+          for (const f of Array.isArray(macFacts) ? macFacts : []) {
+            const r = facts.remember(f.text, f.category);
+            if (r.ok && !r.duplicate) added += 1;
+          }
+          if (added) console.log(`[body] ${added} new fact(s) from the desk`);
+          return { facts: facts.all() };
+        },
+        'facts.remember': ({ text, category } = {}) => ({ result: factsChanged(facts.remember(text, category)), facts: facts.all() }),
+        'facts.forget': ({ query } = {}) => ({ result: factsChanged(facts.forget(query)), facts: facts.all() }),
+        // The desk sends something to Fred's phone (a reminder that fired there).
+        'phone.notify': async ({ text, voice } = {}) => { await telegram.notify(String(text || ''), { voice: !!voice }); return { ok: true }; },
+      },
+    });
+  } catch (e) { console.warn('[body] link disabled:', e.message); hub = null; }
+} else console.log('[body] BODY_LINK_TOKEN not set: the Mac cannot link (server-only tools)');
 
 // ── reminders → phone ──
 async function fireReminders() {
@@ -181,6 +247,7 @@ function shutdown(sig) {
   console.log(`[server] ${sig}, stopping`);
   for (const t of timers) { clearTimeout(t); clearInterval(t); }
   try { telegram.stop(); } catch (_) {}
+  try { hub && hub.close(); } catch (_) {}
   setTimeout(() => process.exit(0), 500);
 }
 process.on('SIGTERM', () => shutdown('SIGTERM'));
