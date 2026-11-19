@@ -32,7 +32,8 @@ const DEFAULTS = {
   minSpeed: 6,
   maxSpeed: Number(process.env.HANNIBAL_FOLLOW_MAX_SPEED) || 30,
   smooth: 0.5,         // EMA on the face centre (1 = no smoothing)
-  lostAfterMs: 900,    // no face this long → stop moving
+  lostAfterMs: 900,    // no face this long → stop moving…
+  searchMs: 2500,      // …unless he left over an edge: keep turning that way this long
 };
 
 // Pure: faces in, gimbal commands out. One controller per run.
@@ -54,20 +55,41 @@ function createFollowController(opts = {}) {
     return out;
   }
 
+  // Was he last seen near an edge (and are we already turning that way)?
+  function nearEdge() {
+    if (fx == null) return false;
+    return fx < 0.15 || fx > 0.85 || fy < 0.15 || fy > 0.85;
+  }
+
   function halt() {
     const out = [];
     for (const k of ['pan', 'tilt']) if (moving[k]) { out.push({ dir: moving[k].dir, speed: 0 }); moving[k] = null; }
     return out;
   }
 
-  function step(faces, now = Date.now()) {
-    const f = (faces || []).slice().sort((a, b) => b.w * b.h - a.w * a.h)[0];
-    if (!f) {
-      if (now - lastSeen > c.lostAfterMs) { fx = fy = null; return halt(); }
+  const biggest = (list) => (list || []).slice().sort((a, b) => b.w * b.h - a.w * a.h)[0];
+
+  // Where Fred's head is: his face, or else the top of his body (standing up,
+  // the face leaves the picture first). null when neither is seen.
+  function head(faces, bodies) {
+    const f = biggest(faces);
+    if (f) return { cx: f.x + f.w / 2, cy: f.y + f.h / 2 };
+    const b = biggest(bodies);
+    if (b) return { cx: b.x + b.w / 2, cy: b.y + Math.min(0.12, b.h * 0.12) };
+    return null;
+  }
+
+  function step(faces, now = Date.now(), bodies = []) {
+    const h = head(faces, bodies);
+    if (!h) {
+      // Lost him. If he went out over an edge, keep turning that way for a
+      // moment (search); otherwise stop.
+      if (now - lastSeen > c.searchMs) { fx = fy = null; return halt(); }
+      if (now - lastSeen > c.lostAfterMs && !nearEdge()) { fx = fy = null; return halt(); }
       return [];
     }
     lastSeen = now;
-    const cx = f.x + f.w / 2, cy = f.y + f.h / 2;
+    const { cx, cy } = h;
     fx = fx == null ? cx : fx + c.smooth * (cx - fx);
     fy = fy == null ? cy : fy + c.smooth * (cy - fy);
     // Face right of the target → turn right. Face low in the picture → tilt down.
@@ -120,7 +142,7 @@ function createFaceFollow({
       let i;
       while ((i = buf.indexOf('\n')) >= 0) {
         const line = buf.slice(0, i); buf = buf.slice(i + 1);
-        try { send(ctl.step(JSON.parse(line).faces)); } catch (_) {}
+        try { const j = JSON.parse(line); send(ctl.step(j.faces, Date.now(), j.bodies)); } catch (_) {}
       }
     });
     child.stderr.on('data', (d) => log(String(d).trim()));

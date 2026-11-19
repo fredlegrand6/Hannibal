@@ -43,9 +43,9 @@ t('speed is capped', () => {
   assert.ok(c.step([face(1, 0.38)]).every((o) => o.speed <= 20));
 });
 
-t('face lost: keeps going briefly, then stops everything', () => {
+t('face lost mid-picture: keeps going briefly, then stops everything', () => {
   const c = createFollowController(opts);
-  c.step([face(0.9, 0.9)], 1000);
+  c.step([face(0.75, 0.7)], 1000);
   assert.deepStrictEqual(c.step([], 1300), []);
   const out = c.step([], 2000);
   assert.deepStrictEqual(out.map((o) => o.speed), [0, 0]);
@@ -63,6 +63,19 @@ t('halt zeroes whatever is moving', () => {
   c.step([face(0.9, 0.9)]);
   assert.deepStrictEqual(c.halt().map((o) => o.speed), [0, 0]);
   assert.deepStrictEqual(c.halt(), []);
+});
+
+t('standing up: no face but a body high in frame → tilt up toward the head', () => {
+  const c = createFollowController(opts);
+  const out = c.step([], 1000, [{ x: 0.35, y: 0.0, w: 0.3, h: 0.9 }]);
+  assert.deepStrictEqual(out.map((o) => o.dir), ['up']);
+});
+
+t('left over the top edge: keeps turning to search, then gives up', () => {
+  const c = createFollowController(opts);
+  c.step([face(0.5, 0.08)], 1000);           // at the top edge, tilting up
+  assert.deepStrictEqual(c.step([], 2200), [], 'still searching after 1.2s');
+  assert.deepStrictEqual(c.step([], 3600).map((o) => o.speed), [0]);
 });
 
 console.log(`\n${n} passed`);

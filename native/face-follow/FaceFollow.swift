@@ -1,7 +1,7 @@
 // face-follow — watches one camera and prints where people's faces are.
 // Apple Vision does the detection; no extra libraries. One JSON line per
 // processed frame on stdout:
-//   {"t":1732012345.12,"faces":[{"x":0.41,"y":0.22,"w":0.12,"h":0.18}]}
+//   {"t":1732012345.12,"faces":[{"x":0.41,"y":0.22,"w":0.12,"h":0.18}],"bodies":[...]}
 // x/y/w/h are 0..1 of the picture, origin TOP-LEFT. Usage:
 //   face-follow [camera-name-part] [fps]       (defaults: OBSBOT 6)
 import Foundation
@@ -32,12 +32,17 @@ final class Watcher: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
     last = now
     guard let px = CMSampleBufferGetImageBuffer(sb) else { return }
     let req = VNDetectFaceRectanglesRequest()
-    try? VNImageRequestHandler(cvPixelBuffer: px, options: [:]).perform([req])
-    let faces = (req.results ?? []).map { o -> String in
-      let b = o.boundingBox  // Vision: origin bottom-left
-      return String(format: "{\"x\":%.4f,\"y\":%.4f,\"w\":%.4f,\"h\":%.4f}", b.minX, 1 - b.maxY, b.width, b.height)
+    // Bodies too: when Fred stands up his face leaves the top of the picture
+    // first, but his body is still there to aim at.
+    let bodyReq = VNDetectHumanRectanglesRequest()
+    bodyReq.upperBodyOnly = false
+    try? VNImageRequestHandler(cvPixelBuffer: px, options: [:]).perform([req, bodyReq])
+    func box(_ b: CGRect) -> String {  // Vision: origin bottom-left → top-left
+      String(format: "{\"x\":%.4f,\"y\":%.4f,\"w\":%.4f,\"h\":%.4f}", b.minX, 1 - b.maxY, b.width, b.height)
     }
-    print(String(format: "{\"t\":%.2f,\"faces\":[%@]}", now, faces.joined(separator: ",")))
+    let faces = (req.results ?? []).map { box($0.boundingBox) }
+    let bodies = (bodyReq.results ?? []).map { box($0.boundingBox) }
+    print(String(format: "{\"t\":%.2f,\"faces\":[%@],\"bodies\":[%@]}", now, faces.joined(separator: ","), bodies.joined(separator: ",")))
   }
 }
 
