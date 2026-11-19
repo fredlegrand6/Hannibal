@@ -458,7 +458,14 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   let qdrantReady = false;
   if (cfg.qdrantUrl) QDRANT_URL = cfg.qdrantUrl;
   if (cfg.qdrantApiKey) QDRANT_HEADERS = { 'Content-Type': 'application/json', 'api-key': cfg.qdrantApiKey };
-  ensureQdrantCollection(cfg.ollamaUrl).then((ok) => { qdrantReady = ok; console.log('[memory] qdrant ready:', ok); });
+  // At login the network/Tailscale may not be up yet — keep trying until memory is reachable.
+  (function connectMemory(delay) {
+    ensureQdrantCollection(cfg.ollamaUrl).then((ok) => {
+      qdrantReady = ok;
+      console.log('[memory] qdrant ready:', ok);
+      if (!ok) setTimeout(() => connectMemory(Math.min(delay * 2, 300000)), delay);
+    });
+  })(10000);
 
   // Transcript taps for the command-center conversation panel. `emitUser` fires once
   // per heard/typed turn; `emitAssistant` streams the growing reply (done=false) and
