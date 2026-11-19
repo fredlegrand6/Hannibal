@@ -306,7 +306,9 @@ function sendPhoneLinkOnce() {
     .catch(() => {});
 }
 const timers = [
-  setTimeout(sendPhoneLinkOnce, 20000),
+  // Checked a few times: the deploy may switch the link to https a little
+  // after start-up; a changed link is sent again, an unchanged one is not.
+  ...[20, 60, 180].map((s) => setTimeout(sendPhoneLinkOnce, s * 1000)),
   setTimeout(() => brief.tick(), 30000),
   setInterval(() => brief.tick(), 60000),
   setInterval(fireReminders, 30000),
