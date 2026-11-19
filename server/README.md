@@ -7,6 +7,22 @@ mail (read), web search and fetch, world/news, server health, reminders, saved
 facts and the Qdrant memory. Mac-only tools (apps, camera, screen, WhatsApp,
 sending mail through Mail.app) are not offered here.
 
+## The Mac as Hannibal's body
+
+While the Mac is awake, the desk app links to the server over Tailscale
+(`ws://100.99.70.113:8790`, secret `BODY_LINK_TOKEN`, made by deploy.sh and kept
+in both `.env` files). Then:
+
+- from the phone, Hannibal can also use the Mac's tools (apps, files, camera,
+  screen, WhatsApp, music). Anything that changes something is still asked on
+  the phone first; only then is it sent to the Mac to run;
+- saved facts are one list: the server's copy is the master, the desk keeps a
+  synced copy and sends its changes up;
+- reminders that fire at the desk also go to the phone, and asking about
+  reminders covers both lists.
+
+When the Mac sleeps, the link drops and Hannibal says Mac things need it awake.
+
 ## Install or update
 
 On the Mac, in the project folder:

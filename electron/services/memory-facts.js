@@ -128,8 +128,22 @@ function createFactStore({ filePath, now = () => new Date().toISOString() } = {}
     return `\n\nWHAT YOU KNOW ABOUT FRED'S WORLD (saved facts — trust these, use them naturally, never recite the list):\n${lines.join('\n')}`;
   }
 
+  // Replace the whole list (the desk takes the server's copy, which is the master).
+  function replaceAll(list) {
+    const clean = (Array.isArray(list) ? list : []).filter((f) => f && f.text && f.id)
+      .map((f) => ({ id: String(f.id), text: String(f.text).slice(0, MAX_FACT_CHARS), category: CATEGORIES.includes(f.category) ? f.category : 'other',
+        ...(f.created ? { created: f.created } : {}), ...(f.updated ? { updated: f.updated } : {}) }));
+    return commit(() => {
+      facts = clean;
+      seq = facts.reduce((m, f) => Math.max(m, parseInt(String(f.id).replace(/\D/g, ''), 10) || 0), 0);
+      return { ok: true, total: facts.length };
+    });
+  }
+  // The full records (for syncing), not the trimmed list() view.
+  const all = () => facts.map((f) => ({ ...f }));
+
   load();
-  return { remember, forget, list, renderForPrompt, reload: load, get size() { return facts.length; }, file };
+  return { remember, forget, list, renderForPrompt, replaceAll, all, reload: load, get size() { return facts.length; }, file };
 }
 
 let _default = null;

@@ -47,13 +47,40 @@ app.on('second-instance', () => {
   if (win) { if (win.isMinimized()) win.restore(); win.show(); win.focus(); }
 });
 
+// Link to the always-on server (server/hannibal-server.js), when it runs Telegram.
+let bodyLink = null;
+const linked = () => !!(bodyLink && bodyLink.ready);
+
 registerProactive(ipcMain, {
   getWindow: () => win,
-  // Briefs and reminders also reach Fred's phone (Telegram), wherever he is.
+  // Briefs and reminders also reach Fred's phone, wherever he is. With the
+  // always-on server, it sends its own morning brief; desk reminders go via it.
   onBrief: (text) => { if (telegram) telegram.notify(`☀️ Morning brief\n\n${text}`, { voice: true }).catch(() => {}); },
-  onReminder: (message) => { if (telegram) telegram.notify(`⏰ Reminder: ${message}`).catch(() => {}); },
+  onReminder: (message) => {
+    const text = `⏰ Reminder: ${message}`;
+    if (telegram) telegram.notify(text).catch(() => {});
+    else if (linked()) bodyLink.request('phone.notify', { text, voice: true }).catch((e) => console.warn('[body] reminder to phone failed:', e.message));
+  },
 });   // morning brief + reminders.add/cancel/upcoming
-registerFacts(ipcMain);
+
+// Saved facts: while linked, the server's copy is the master. A change made at
+// the desk is applied here at once and sent up; the server's list comes back.
+const { getDefaultFactStore } = require('./services/memory-facts');
+const deskFacts = getDefaultFactStore();
+function applyServerFacts(list) {
+  if (!Array.isArray(list)) return;
+  const r = deskFacts.replaceAll(list);
+  if (r && r.ok) console.log(`[body] facts in sync with the server (${r.total})`);
+}
+function factsUp(method, params) {
+  if (!linked()) return;
+  bodyLink.request(method, params).then((r) => applyServerFacts(r && r.facts)).catch((e) => console.warn(`[body] ${method} failed:`, e.message));
+}
+registerFacts(ipcMain, {
+  remember: (text, category) => { const r = deskFacts.remember(text, category); if (r.ok) factsUp('facts.remember', { text, category }); return r; },
+  forget: (query) => { const r = deskFacts.forget(query); if (r.ok) factsUp('facts.forget', { query }); return r; },
+  list: (category) => deskFacts.list(category),
+});
 // One Qdrant memory for the desk (memory:store / memory:search) and Telegram,
 // so the same keep-or-skip, dedupe and recall rules apply everywhere.
 let _memory = null;
@@ -1067,6 +1094,40 @@ async function runAgentSelfTest() {
 
 // ── TELEGRAM — the same brain, from Fred's phone (services/telegram.js) ──
 let telegram = null;
+// The Mac as Hannibal's BODY: while awake it links to the always-on server, so
+// from the phone Hannibal can use this Mac's tools (the server asks Fred on his
+// phone before anything that changes something), and facts stay shared.
+function startBodyLink() {
+  const token = (process.env.BODY_LINK_TOKEN || '').trim();
+  if (!/^(1|true|on|yes)$/i.test(process.env.HANNIBAL_SERVER_TELEGRAM || '') || !token) return;
+  const { BrainClient } = require('./services/brain/client');
+  const macInvoker = makeIpcInvoker(installToolTap._registry || {});
+  let wasLinked = false;
+  bodyLink = new BrainClient({
+    url: process.env.HANNIBAL_BODY_URL || 'ws://100.99.70.113:8790',
+    token, bodyId: 'mac', reconnect: true,
+    timeouts: { default: 20000 },
+  });
+  bodyLink
+    .setHandler('body.invoke', async ({ tool, params }) => {
+      console.log('[body] server runs on the Mac:', tool);
+      return macInvoker(tool, params || {});
+    })
+    .on('ready', async () => {
+      wasLinked = true;
+      console.log('[body] ✓ linked to the always-on server');
+      try {
+        await bodyLink.request('body.register', { channels: Object.keys(installToolTap._registry || {}) });
+        const r = await bodyLink.request('facts.sync', { facts: deskFacts.all() });
+        applyServerFacts(r && r.facts);
+      } catch (e) { console.warn('[body] setup after link failed:', e.message); }
+    })
+    .on('event', (name, data) => { if (name === 'facts') applyServerFacts(data && data.facts); })
+    .on('close', () => { if (wasLinked) console.warn('[body] link to the server dropped, reconnecting'); wasLinked = false; })
+    .on('error', () => {});   // routine connect errors while offline; the reconnect loop handles them
+  bodyLink.connect();
+}
+
 function startTelegram() {
   // When the always-on server (server/hannibal-server.js on GEX131) runs the
   // bot, the Mac must not: Telegram allows only one listener per bot.
@@ -1122,6 +1183,7 @@ app.whenReady().then(async () => {
   startBrain();   // links this Mac as a BODY to the GEX131 brain when HANNIBAL_BRAIN=1
   ensureWhisper();
   startTelegram();  // Hannibal on Fred's phone, when TELEGRAM_BOT_TOKEN is set
+  startBodyLink();  // …or, with the always-on server, link this Mac to it as Hannibal's body
   // Microphone: get macOS permission BEFORE starting the wake-word and VAD
   // helpers. They inherit this app's permission; started without it, opening
   // the mic fails ("Input/output error") or delivers silence.

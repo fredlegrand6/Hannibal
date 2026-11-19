@@ -81,5 +81,68 @@ async function test(name, fn) {
     assert.ok(/SIGTERM, stopping/.test(out), out);
   });
 
+  // ── the Mac link ──
+  const { WebSocketServer } = require('ws');
+  const { createBodyHub } = require('./body-hub');
+  const { BrainClient } = require(path.join(S, 'brain', 'client'));
+  const TOKEN = 'test-token-0123456789abcdef';
+  const port = 18790 + Math.floor(Math.random() * 500);
+  let linkedWith = null; let unlinked = 0;
+  const serverFacts = [{ id: 'f1', text: 'Jay is Fred\'s son', category: 'person' }];
+  const hub = createBodyHub({
+    host: '127.0.0.1', port, token: TOKEN, WebSocketServer, log: () => {},
+    onLink: (b) => { linkedWith = b; }, onUnlink: () => { unlinked += 1; },
+    methods: { 'facts.sync': ({ facts }) => ({ facts: [...serverFacts, ...facts] }) },
+  });
+  await new Promise((r) => hub._wss.once('listening', r));
+  const quietClient = (token) => { const c = new BrainClient({ url: `ws://127.0.0.1:${port}`, token, bodyId: 'mac', reconnect: false }); c.on('error', () => {}); return c; };
+
+  await test('a Mac with the wrong key is refused', async () => {
+    const c = quietClient('wrong-token-xxxxxxxxxxxxxxxx');
+    c.connect();
+    await assert.rejects(c.waitReady(3000));
+    assert.strictEqual(hub.linked(), false);
+  });
+
+  let mac;
+  await test('the Mac links, registers its tools and syncs facts', async () => {
+    mac = quietClient(TOKEN);
+    mac.setHandler('body.invoke', async ({ tool, params }) => ({ ok: true, ran: tool, params }));
+    mac.connect();
+    await mac.waitReady(3000);
+    await mac.request('body.register', { channels: ['mac-control', 'voice:capture'] });
+    assert.ok(hub.linked());
+    assert.deepStrictEqual(hub.channels().sort(), ['mac-control', 'voice:capture']);
+    assert.ok(linkedWith);
+    const r = await mac.request('facts.sync', { facts: [{ id: 'f9', text: 'Gaian is 12', category: 'person' }] });
+    assert.strictEqual(r.facts.length, 2);
+  });
+
+  await test('the server runs a tool on the Mac and gets the result back', async () => {
+    const out = await hub.invoke('app.open', { name: 'Spotify' });
+    assert.deepStrictEqual(out, { ok: true, ran: 'app.open', params: { name: 'Spotify' } });
+  });
+
+  await test('events reach the Mac (the new facts list)', async () => {
+    const got = new Promise((resolve) => mac.on('event', (name, data) => resolve({ name, data })));
+    hub.notify('facts', { facts: serverFacts });
+    const ev = await got;
+    assert.strictEqual(ev.name, 'facts');
+    assert.strictEqual(ev.data.facts[0].text, 'Jay is Fred\'s son');
+  });
+
+  await test('when the Mac goes offline, Mac tools fail cleanly', async () => {
+    mac.close();
+    for (let i = 0; i < 50 && hub.linked(); i++) await new Promise((r) => setTimeout(r, 20));
+    assert.strictEqual(hub.linked(), false);
+    assert.strictEqual(unlinked, 1);
+    await assert.rejects(hub.invoke('app.open', { name: 'x' }), /offline/);
+  });
+  hub.close();
+
+  await test('a short or missing link key is rejected at start', () => {
+    assert.throws(() => createBodyHub({ host: '127.0.0.1', port: port + 1, token: 'short', WebSocketServer }), /BODY_LINK_TOKEN/);
+  });
+
   console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ''}`);
 })();
