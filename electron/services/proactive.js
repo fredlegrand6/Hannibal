@@ -89,6 +89,29 @@ function createReminderTools({ filePath = path.join(DATA, 'reminders.json'), not
   return { add, cancel, upcoming, takeDue };
 }
 
+// Cancel across two lists (the server's own + the desk's, read through the
+// link) without touching either until it is clear which ONE is meant: one
+// match is cancelled where it lives; several (across both) are handed back.
+async function cancelAcross({ local, remote = [], cancelRemote, query }) {
+  const q = String(query || '').toLowerCase().trim();
+  if (!q) return local.cancel(query);
+  const hit = (list) => list.filter((r) => String(r.id).toLowerCase() === q || String(r.message || '').toLowerCase().includes(q));
+  const here = hit(local.upcoming().reminders);
+  const there = hit(remote);
+  const all = [...here, ...there];
+  const exact = all.filter((r) => String(r.id).toLowerCase() === q);
+  const pick = exact.length === 1 ? exact : all;
+  if (!pick.length) return { ok: false, error: `no active reminder matches "${query}"` };
+  if (pick.length > 1) {
+    return { ok: false, error: `"${query}" matches ${pick.length} reminders — be more specific`,
+      matches: pick.map((r) => ({ id: r.id, message: r.message, when: r.when, ...(there.includes(r) ? { set: 'at the desk' } : {}) })) };
+  }
+  const one = pick[0];
+  if (here.includes(one)) return local.cancel(one.id);
+  try { return await cancelRemote(one.id); }
+  catch (e) { return { ok: false, error: `could not reach the Mac to cancel it: ${e.message}` }; }
+}
+
 // ── morning brief ───────────────────────────────────────────────────────────
 const BRIEF_PROMPT = [
   '[Proactive — Fred did not ask; you are starting the conversation. Morning brief.]',
@@ -170,4 +193,4 @@ function registerProactive(ipcMain, { getWindow, onBrief, onReminder, statePath,
   return { reminders, brief, stop: () => { clearTimeout(first); clearInterval(timer); } };
 }
 
-module.exports = { createReminderTools, createBriefScheduler, registerProactive, BRIEF_PROMPT };
+module.exports = { createReminderTools, createBriefScheduler, registerProactive, cancelAcross, BRIEF_PROMPT };

@@ -67,10 +67,20 @@ registerProactive(ipcMain, {
 // the desk is applied here at once and sent up; the server's list comes back.
 const { getDefaultFactStore } = require('./services/memory-facts');
 const deskFacts = getDefaultFactStore();
+// The list desk and server last agreed on, so a reconnect can tell what was
+// added or deleted on either side in the meantime (and not undo a deletion).
+const SYNCED_FACTS = path.join(path.dirname(deskFacts.file), 'memory-facts.synced.json');
+function lastSyncedFacts() {
+  try { const j = JSON.parse(fs.readFileSync(SYNCED_FACTS, 'utf8')); return Array.isArray(j.facts) ? j.facts : null; }
+  catch (_) { return null; }
+}
 function applyServerFacts(list) {
   if (!Array.isArray(list)) return;
   const r = deskFacts.replaceAll(list);
-  if (r && r.ok) console.log(`[body] facts in sync with the server (${r.total})`);
+  if (r && r.ok) {
+    try { fs.writeFileSync(SYNCED_FACTS, JSON.stringify({ facts: list.map((f) => ({ id: f.id, text: f.text })) })); } catch (_) {}
+    console.log(`[body] facts in sync with the server (${r.total})`);
+  }
 }
 function factsUp(method, params) {
   if (!linked()) return;
@@ -1118,7 +1128,7 @@ function startBodyLink() {
       console.log('[body] ✓ linked to the always-on server');
       try {
         await bodyLink.request('body.register', { channels: Object.keys(installToolTap._registry || {}) });
-        const r = await bodyLink.request('facts.sync', { facts: deskFacts.all() });
+        const r = await bodyLink.request('facts.sync', { facts: deskFacts.all(), lastSynced: lastSyncedFacts() });
         applyServerFacts(r && r.facts);
       } catch (e) { console.warn('[body] setup after link failed:', e.message); }
     })
