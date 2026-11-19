@@ -47,8 +47,17 @@ const MAX_RESULT_CHARS = 12000;   // keep huge reads (files, pages) from floodin
 const toApiName = (name) => name.replace(/\./g, '__');
 const fromApiName = (name) => String(name || '').replace(/__/g, '.');
 
+// Where only some handlers exist (the always-on server has no Mac), only the
+// tools whose channel is really there are offered. null = no restriction.
+let availableChannels = null;
+function setAvailableChannels(channels) {
+  availableChannels = channels ? new Set(channels) : null;
+  _defs = null;
+}
+
 function exposed(tool) {
   if (!tool || tool.planner_safe === false) return false;
+  if (availableChannels && !(tool.via && tool.via.module) && !availableChannels.has(tool.via && tool.via.channel)) return false;
   if (EXCLUDED.has(tool.name)) return false;
   if (tool.via && tool.via.module && !MAIN_SIDE_SHIMS.has(tool.name)) return false;
   return true;
@@ -193,7 +202,7 @@ async function runTool(apiName, input, opts = {}) {
 
 const enabled = () => !/^(0|false|off|no)$/i.test(process.env.HANNIBAL_CLAUDE_TOOLS || '');
 
-module.exports = { toolDefinitions, runTool, toApiName, fromApiName, exposed, enabled, stringify, toolResultContent, mediaType };
+module.exports = { toolDefinitions, runTool, setAvailableChannels, toApiName, fromApiName, exposed, enabled, stringify, toolResultContent, mediaType };
 
 // `node electron/services/claude-tools.js` lists what Claude can use (no app needed).
 if (require.main === module) {

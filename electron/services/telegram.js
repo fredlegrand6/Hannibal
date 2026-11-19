@@ -329,4 +329,21 @@ function makeWhisperTranscriber({ whisperUrl, language = 'auto', fetchImpl = fet
   };
 }
 
-module.exports = { createTelegramBridge, makeWhisperTranscriber, splitMessage, parseIds, PHONE_CONTEXT };
+// Voice notes → text with ElevenLabs Scribe (for the server, which has no
+// whisper-server). Uses the same ELEVENLABS_API_KEY as Hannibal's voice.
+function makeElevenLabsTranscriber({ apiKey, model = 'scribe_v1', fetchImpl = fetch }) {
+  return async (audio) => {
+    if (!apiKey) throw new Error('ELEVENLABS_API_KEY is not set');
+    const form = new FormData();
+    form.append('model_id', model);
+    form.append('file', new Blob([audio], { type: 'audio/ogg' }), 'voice.ogg');
+    const r = await fetchImpl('https://api.elevenlabs.io/v1/speech-to-text', {
+      method: 'POST', headers: { 'xi-api-key': apiKey }, body: form, signal: AbortSignal.timeout(60000),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error((j && j.detail && (j.detail.message || j.detail)) || `speech-to-text HTTP ${r.status}`);
+    return String((j && j.text) || '').trim();
+  };
+}
+
+module.exports = { createTelegramBridge, makeWhisperTranscriber, makeElevenLabsTranscriber, splitMessage, parseIds, PHONE_CONTEXT };
