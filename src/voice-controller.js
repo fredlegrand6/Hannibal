@@ -38,7 +38,6 @@ let QDRANT_URL = 'http://100.99.70.113:6333';
 // Qdrant on GEX131 requires an API key (QDRANT_API_KEY in .env, passed via config).
 let QDRANT_HEADERS = { 'Content-Type': 'application/json' };
 const QDRANT_COLLECTION = 'hannibal_memory';
-const EMBED_MODEL = 'nomic-embed-text';
 
 async function ensureQdrantCollection(ollamaUrl) {
   try {
@@ -59,61 +58,23 @@ async function ensureQdrantCollection(ollamaUrl) {
   }
 }
 
-async function embed(text, ollamaUrl) {
+// Recall and store go through main (electron/services/qdrant-memory.js), which
+// owns the rules: small talk and noise are not kept, near-duplicates are
+// skipped, and recall only returns hits that are really relevant.
+async function queryMemory(text, _ollamaUrl, limit = 3) {
   try {
-    const r = await fetch(`${ollamaUrl}/api/embeddings`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: EMBED_MODEL, prompt: text }),
-      signal: AbortSignal.timeout(10000),
-    });
-    const j = await r.json();
-    return j.embedding || null;
-  } catch (e) {
-    console.warn('[memory] embed failed:', e.message);
-    return null;
-  }
-}
-
-async function queryMemory(text, ollamaUrl, limit = 3) {
-  const vec = await embed(text, ollamaUrl);
-  if (!vec) return [];
-  try {
-    const r = await fetch(`${QDRANT_URL}/collections/${QDRANT_COLLECTION}/points/search`, {
-      method: 'POST',
-      headers: QDRANT_HEADERS,
-      body: JSON.stringify({ vector: vec, limit, with_payload: true, score_threshold: 0.35 }),
-      signal: AbortSignal.timeout(5000),
-    });
-    const j = await r.json();
-    return (j.result || []).map((p) => ({
-      text: p.payload?.text || p.payload?.content || '',
-      score: p.score,
-      ts: p.payload?.timestamp || '',
-    })).filter((m) => m.text);
+    const hits = await window.hannibal.memorySearch(text, limit);
+    return Array.isArray(hits) ? hits : [];
   } catch (e) {
     console.warn('[memory] query failed:', e.message);
     return [];
   }
 }
 
-async function storeMemory(text, ollamaUrl, metadata = {}) {
-  const vec = await embed(text, ollamaUrl);
-  if (!vec) return;
-  const id = crypto.randomUUID();
+async function storeMemory(text, _ollamaUrl, metadata = {}) {
   try {
-    await fetch(`${QDRANT_URL}/collections/${QDRANT_COLLECTION}/points`, {
-      method: 'PUT',
-      headers: QDRANT_HEADERS,
-      body: JSON.stringify({
-        points: [{
-          id, vector: vec,
-          payload: { text, source: 'hannibal', timestamp: new Date().toISOString(), ...metadata },
-        }],
-      }),
-      signal: AbortSignal.timeout(5000),
-    });
-    console.log('[memory] stored:', text.slice(0, 60));
+    const r = await window.hannibal.memoryStore(text, metadata);
+    if (r && r.ok) console.log('[memory] stored:', text.slice(0, 60));
   } catch (e) {
     console.warn('[memory] store failed:', e.message);
   }
@@ -2232,7 +2193,7 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     if (qdrantReady) {
       const memories = await queryMemory(transcript, cfg.ollamaUrl);
       if (memories.length) {
-        memoryContext = '\n\nRELEVANT MEMORIES:\n' + memories.map((m) => `- ${m.text}`).join('\n');
+        memoryContext = '\n\nRELEVANT MEMORIES (past conversations, may be out of date):\n' + memories.map((m) => `- ${m.ts ? `(${m.ts.slice(0, 10)}) ` : ''}${m.text}`).join('\n');
         console.log(`[memory] injected ${memories.length} memories (top score ${memories[0].score?.toFixed(2)})`);
       }
     }

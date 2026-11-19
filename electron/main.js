@@ -33,7 +33,7 @@ const claudeTools = require('./services/claude-tools');
 const { registerFacts } = require('./services/memory-facts');
 const { registerProactive } = require('./services/proactive');
 const { createTelegramBridge, makeWhisperTranscriber } = require('./services/telegram');
-const { createQdrantMemory } = require('./services/qdrant-memory');
+const { createQdrantMemory, registerMemoryIpc } = require('./services/qdrant-memory');
 installToolTap(ipcMain);
 
 // Only ONE Hannibal at a time. Two copies fight over the mic, the wake word and
@@ -52,7 +52,15 @@ registerProactive(ipcMain, {
   onBrief: (text) => { if (telegram) telegram.notify(`☀️ Morning brief\n\n${text}`, { voice: true }).catch(() => {}); },
   onReminder: (message) => { if (telegram) telegram.notify(`⏰ Reminder: ${message}`).catch(() => {}); },
 });   // morning brief + reminders.add/cancel/upcoming
-registerFacts(ipcMain);   // 'facts:remember' / 'facts:forget' / 'facts:list' — saved facts Claude always knows
+registerFacts(ipcMain);
+// One Qdrant memory for the desk (memory:store / memory:search) and Telegram,
+// so the same keep-or-skip, dedupe and recall rules apply everywhere.
+let _memory = null;
+function sharedMemory() {
+  if (!_memory) _memory = createQdrantMemory({ qdrantUrl: CONFIG.qdrantUrl, ollamaUrl: CONFIG.ollamaUrl });
+  return _memory;
+}
+registerMemoryIpc(ipcMain, { store: (t, m) => sharedMemory().store(t, m), search: (t, l) => sharedMemory().search(t, l) });   // 'facts:remember' / 'facts:forget' / 'facts:list' — saved facts Claude always knows
 // 'llm:chat' → tokens stream back on 'llm:token'. Claude can also use Hannibal's
 // actions: each tool call runs through the SAME executor + voice confirmation gate
 // as the agent loop (claude-tools.js). Turn off with HANNIBAL_CLAUDE_TOOLS=0.
@@ -1290,7 +1298,7 @@ function startTelegram() {
       emit: (ev) => { if (/^step:(start|finish|error|skipped|confirm)/.test(ev.type)) console.log('[telegram-tool]', ev.type, ev.tool || ''); },
     }),
     transcribe: makeWhisperTranscriber({ whisperUrl: CONFIG.whisperUrl, language: process.env.TELEGRAM_VOICE_LANG || 'auto' }),
-    memory: createQdrantMemory({ qdrantUrl: CONFIG.qdrantUrl, ollamaUrl: CONFIG.ollamaUrl }),
+    memory: sharedMemory(),
     speak: voiceNote,
     voiceAlways: process.env.TELEGRAM_VOICE_ALWAYS,
     onReset: () => claudeBrain.resetHistory(),
