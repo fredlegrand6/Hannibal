@@ -74,6 +74,16 @@ let ccIngestServer = null;
 let awareness = null;   // Stage 7 engine, created in whenReady
 let presence = null;    // autonomous presence loop, created in whenReady
 
+// ── PATH: started from the Dock or at login, macOS gives the app a bare PATH
+// (/usr/bin:/bin…), so child processes can't find Homebrew tools — the
+// whisper-server then can't find ffmpeg and every utterance is dropped.
+// start.sh exported this; do it here so every way of starting behaves the same.
+{
+  const extra = ['/opt/homebrew/bin', '/usr/local/bin'];
+  const parts = String(process.env.PATH || '/usr/bin:/bin:/usr/sbin:/sbin').split(':');
+  process.env.PATH = [...extra.filter((d) => !parts.includes(d)), ...parts].join(':');
+}
+
 // ── load .env (simple KEY=VALUE parser, no dependency) ──
 (function loadEnv() {
   try {
@@ -1265,7 +1275,16 @@ function startTelegram() {
     memory: createQdrantMemory({ qdrantUrl: CONFIG.qdrantUrl, ollamaUrl: CONFIG.ollamaUrl }),
     onReset: () => claudeBrain.resetHistory(),
   });
-  telegram.start().catch((e) => { console.warn('[telegram] could not start:', e.message); telegram = null; });
+  // At login the network (and Tailscale/VPN) is often not up yet: keep retrying.
+  const tg = telegram;
+  let delay = 5000;
+  const tryStart = () => tg.start().catch((e) => {
+    if (telegram !== tg) return;
+    console.warn(`[telegram] could not start: ${e.message} — retrying in ${delay / 1000}s`);
+    setTimeout(tryStart, delay);
+    delay = Math.min(delay * 2, 300000);
+  });
+  tryStart();
 }
 
 app.whenReady().then(async () => {
