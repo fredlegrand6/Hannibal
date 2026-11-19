@@ -35,6 +35,7 @@ const { registerProactive } = require('./services/proactive');
 const { createTelegramBridge, makeWhisperTranscriber } = require('./services/telegram');
 const { createQdrantMemory, registerMemoryIpc } = require('./services/qdrant-memory');
 const { registerInfo } = require('./services/info-handlers');
+const { createCameraPicker } = require('./services/camera-device');
 installToolTap(ipcMain);
 
 // Only ONE Hannibal at a time. Two copies fight over the mic, the wake word and
@@ -163,7 +164,7 @@ const CONFIG = {
   ollamaModelFast: process.env.OLLAMA_MODEL_FAST  || 'llama3.2:3b',  // quick chat (fallback: qwen2.5:7b)
   ollamaModelHeavy: process.env.OLLAMA_MODEL_HEAVY || process.env.OLLAMA_MODEL || 'llama3.3:70b', // reasoning/code
   ollamaModelVision: process.env.OLLAMA_MODEL_VISION || 'qwen2.5vl:7b', // screen + camera understanding
-  cameraIndex: process.env.HANNIBAL_CAMERA_INDEX || '0', // avfoundation video device (see `ffmpeg -f avfoundation -list_devices true -i ""`)
+  cameraIndex: process.env.HANNIBAL_CAMERA_INDEX || '0', // fallback only: the camera is picked by name (HANNIBAL_CAMERA, default OBSBOT), see services/camera-device.js
   ffmpeg:     process.env.HANNIBAL_FFMPEG || '/opt/homebrew/bin/ffmpeg',
   // Qwen2.5-VL vision-token count scales with resolution, so latency tracks image
   // size hard: a raw retina screenshot (3456px) takes ~78s to encode, 1024px ~35s,
@@ -818,10 +819,20 @@ function pickDisplayIndex(displays, kind) {
   return null; // 'screen' → all displays
 }
 
-// Grab ONE downscaled frame from the OBSBOT (avfoundation, CONFIG.cameraIndex).
+// Grab ONE downscaled frame from the OBSBOT (avfoundation, picked by name).
 // Extracted so both voice:capture (kind 'camera') and camera.look reuse the
 // SAME device selection — there is no second camera path.
+let cameraPicker = null;
 async function captureCameraFrame() {
+  if (!cameraPicker) cameraPicker = createCameraPicker({ ffmpeg: CONFIG.ffmpeg, fallbackIndex: CONFIG.cameraIndex });
+  const first = await grabFrame(await cameraPicker.resolve());
+  if (first.ok) return first;
+  // Cameras come and go (an iPhone nearby shifts the list): re-check once.
+  const again = await cameraPicker.resolve({ fresh: true });
+  return grabFrame(again);
+}
+
+async function grabFrame(cameraInput) {
   const raw = '/tmp/hannibal-cam-raw.jpg';
   const out = '/tmp/hannibal-cam.jpg';
   // avfoundation defaults to 29.97fps, which this camera does NOT advertise (it
@@ -832,7 +843,7 @@ async function captureCameraFrame() {
   // focus settle, so skip ~0.6s (output-side -ss) and keep the frame after that.
   const warmup = String(process.env.HANNIBAL_CAMERA_WARMUP_S || '0.6');
   const args = ['-y', '-f', 'avfoundation', '-framerate', '30',
-                '-video_size', '1280x720', '-i', CONFIG.cameraIndex,
+                '-video_size', '1280x720', '-i', cameraInput,
                 ...(Number(warmup) > 0 ? ['-ss', warmup] : []),
                 '-frames:v', '1', '-update', '1', raw];
   try {
