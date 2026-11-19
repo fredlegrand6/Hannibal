@@ -6,6 +6,8 @@
 //   • type a message                → Hannibal answers in text;
 //   • send a voice note             → transcribed by the local whisper-server;
 //   • send a photo (with a caption) → Claude looks at it.
+// A voice note gets a voice note back, in Hannibal's own (ElevenLabs) voice.
+// Reminders and the morning brief arrive here too (notify).
 //
 // Safety:
 //   • Only the Telegram accounts in TELEGRAM_ALLOWED_USERS are answered.
@@ -23,7 +25,8 @@
 // ─────────────────────────────────────────────────────────────────────────
 'use strict';
 
-const MAX_MSG = 4000;                 // Telegram's limit is 4096
+const MAX_MSG = 4000;
+const MAX_SPOKEN = 1500;            // longer replies are spoken only up to here (text has it all)                 // Telegram's limit is 4096
 const CONFIRM_TIMEOUT_MS = 120000;
 
 const PHONE_CONTEXT =
@@ -59,6 +62,8 @@ const NO = /^(no|n|nee|non|nope|stop|cancel|don'?t)[\s.!]*$/i;
 //   runTool(apiName, input, { confirmer }) -> result   (claude-tools.runTool)
 //   transcribe(oggBuffer) -> string                     (voice notes)
 //   memory { recall(text) -> string, store(text, meta) } (Qdrant, optional)
+//   speak(text) -> OGG/Opus Buffer  (voice-note replies in Hannibal's voice, optional)
+//   voiceAlways  (true → every reply also as a voice note; /voice toggles it)
 //   fetchImpl, log, pollTimeoutS
 function createTelegramBridge(opts = {}) {
   const token = opts.token;
@@ -75,6 +80,7 @@ function createTelegramBridge(opts = {}) {
   const pendingConfirms = new Map();   // chatId -> { resolve, timer, messageId }
   const warnedStrangers = new Set();
   let confirmSeq = 0;
+  let voiceAlways = /^(1|on|true|yes|always)$/i.test(String(opts.voiceAlways || ''));
 
   async function call(method, body) {
     const r = await fetchImpl(`${api}/${method}`, {
@@ -89,6 +95,42 @@ function createTelegramBridge(opts = {}) {
     let last = null;
     for (const part of splitMessage(text)) last = await call('sendMessage', { chat_id: chatId, text: part, ...extra });
     return last;
+  }
+
+  // Voice note (OGG/Opus) as a multipart upload.
+  async function sendVoice(chatId, ogg) {
+    const form = new FormData();
+    form.append('chat_id', String(chatId));
+    form.append('voice', new Blob([ogg], { type: 'audio/ogg' }), 'hannibal.ogg');
+    const r = await fetchImpl(`${api}/sendVoice`, { method: 'POST', body: form });
+    const j = await r.json().catch(() => ({}));
+    if (!j.ok) throw new Error(`sendVoice: ${j.description || r.status}`);
+    return j.result;
+  }
+  // Speak a reply as a voice note too (Hannibal's own voice). Never fails the turn.
+  async function sendSpoken(chatId, text) {
+    if (!opts.speak || !text) return false;
+    try {
+      call('sendChatAction', { chat_id: chatId, action: 'record_voice' }).catch(() => {});
+      const ogg = await opts.speak(String(text).slice(0, MAX_SPOKEN));
+      if (!ogg || !ogg.length) return false;
+      await sendVoice(chatId, ogg);
+      return true;
+    } catch (e) { log('voice reply failed:', e.message); return false; }
+  }
+
+  // Hannibal starts the conversation (reminders, morning brief) — to every allowed account.
+  async function notify(text, { voice = false } = {}) {
+    if (!running || !text) return { ok: false, sent: 0 };
+    let sent = 0;
+    for (const id of allowed) {
+      try {
+        await send(id, text);
+        if (voice || voiceAlways) await sendSpoken(id, text);
+        sent++;
+      } catch (e) { log(`notify ${id} failed:`, e.message); }
+    }
+    return { ok: sent > 0, sent };
   }
 
   async function download(fileId) {
@@ -136,9 +178,17 @@ function createTelegramBridge(opts = {}) {
       return;
     }
     if (text === '/reset') { await send(chatId, 'Fine — fresh start.'); opts.onReset && opts.onReset(); return; }
+    if (/^\/voice\b/.test(text)) {
+      const arg = text.split(/\s+/)[1] || '';
+      voiceAlways = arg ? /^(on|always|1)$/i.test(arg) : !voiceAlways;
+      await send(chatId, voiceAlways ? '🔊 I\'ll answer with a voice note every time. (/voice off to stop)'
+        : '🔈 Voice notes only when you send me one. (/voice on for always)');
+      return;
+    }
 
     call('sendChatAction', { chat_id: chatId, action: 'typing' }).catch(() => {});
     const voice = msg.voice || msg.audio;
+    const spokenTo = !!voice;
     if (voice) {
       if (!opts.transcribe) { await send(chatId, "I can't listen to voice notes right now — type it instead?"); return; }
       try {
@@ -176,6 +226,7 @@ function createTelegramBridge(opts = {}) {
       );
       if (r && r.ok && r.text) {
         await send(chatId, r.text);
+        if (spokenTo || voiceAlways) await sendSpoken(chatId, r.text);
         if (opts.memory) {
           opts.memory.store(`Fred said (Telegram): ${text}\nHannibal replied: ${r.text.slice(0, 500)}`, { type: 'conversation', channel: 'telegram' }).catch(() => {});
         }
@@ -261,7 +312,8 @@ function createTelegramBridge(opts = {}) {
     for (const [, p] of pendingConfirms) p.resolve(false);
   }
 
-  return { start, stop, pollOnce, handleUpdate, idle: () => queue, makeConfirmer, _pending: pendingConfirms };
+  return { start, stop, notify, pollOnce, handleUpdate, idle: () => queue, makeConfirmer, _pending: pendingConfirms,
+    _setRunning: (v) => { running = v; } };
 }
 
 // Voice note → the local whisper-server (it converts any audio with ffmpeg,
