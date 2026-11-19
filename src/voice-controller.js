@@ -398,7 +398,11 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   // reminder, timer) is taking the mic. It suppresses the always-listen re-arm so
   // the mic isn't reopened mid-remark; the single restOrRearm() at the end reopens.
   let autonomousSpeaking = false;
+  // Name gate: when Hannibal last spoke, and when the wake word last fired.
+  let lastSpokeAt = 0;
+  let wokeAt = 0;
   const setPhase = (p) => {
+    if (phase === 'speaking' && p !== 'speaking') lastSpokeAt = Date.now();
     phase = p;
     if (p !== 'listening') restfulListen = false;
     // Resting brain visual: 'vision' while screen-watching, else a steady
@@ -691,6 +695,26 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     }
     if (!transcript) { restOrRearm(); return; }   // empty STT (silence/noise) → back to the open mic
     transcript = fixTranscript(transcript);
+    // "Hannibal" is the wake word: in always-listen mode, outside a conversation,
+    // only answer when he hears his name (src/name-gate.js).
+    if (continuousListen && window.NameGate) {
+      const gate = window.NameGate.decide(transcript, {
+        lastSpokeAt, wokeAt,
+        pending: !!(pendingConfirmation || teachState || confirmInFlight),
+        followUpMs: Number(cfg.nameFollowUpMs) || 20000,
+        enabled: cfg.nameGate !== false,
+      });
+      if (!gate.answer) { console.log('[voice] not for me (no "Hannibal"):', JSON.stringify(transcript)); restOrRearm(); return; }
+      if (gate.why === 'name' && gate.nameOnly) {
+        // Just "Hannibal?" → answer like a wake word and listen for the request.
+        wokeAt = Date.now();
+        emitModel('system');
+        try { await speakLine('Yes, Fred?'); } catch (_) {}
+        restOrRearm();
+        return;
+      }
+      transcript = gate.text;
+    }
     lastUserSpeakTs = Date.now();   // arbiter: Fred just spoke → hold camera chit-chat briefly (he's engaged)
     console.log('[voice] heard' + (continuousListen ? ' (always-listen, no wake word)' : '') + ':', JSON.stringify(transcript));
     emitUser(transcript);
@@ -2810,6 +2834,7 @@ RULES:
 
   // ── triggers ──────────────────────────────────────────────────────────────
   window.hannibal.onWake(async () => {
+    wokeAt = Date.now();
     if (confirmInFlight) return;   // a confirmation is pending — wake must not start a competing capture
     // Wake fired while still speaking → Fred is cutting in. Attribute the
     // interrupt to whatever task was talking. This is the primary signal for
