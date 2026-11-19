@@ -127,6 +127,8 @@ const faceFollow = createFaceFollow({
   // through the same speak gate as camera remarks (mute/sleep/in-conversation).
   onArrive: ({ awayMs }) => {
     if (process.env.HANNIBAL_GREET === '0') return;
+    // Respect a mute/sleep Fred set earlier (saved by presence, even while its loop is off).
+    try { const st = presence && presence.status(); if (st && (st.muted || st.sleeping)) { console.log('[follow] greeting withheld (presence muted/asleep)'); return; } } catch (_) {}
     const text = greetingFor({ awayMs });
     try { win && win.webContents.send('presence:remark', { text, interest: 1, referent: 'Fred arriving', ts: Date.now() }); } catch (_) {}
   },
