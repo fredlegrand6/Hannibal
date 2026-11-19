@@ -296,7 +296,7 @@ function makeLook(captureCameraFrame) {
 // ── registration: exposes the 'camera:control' IPC channel (auto-captured by
 // the executor's tool tap, exactly like 'mac-control'). Signature mirrors
 // mac-control: (event, action, params).
-function registerCameraControl(ipcMain, { captureCameraFrame } = {}) {
+function registerCameraControl(ipcMain, { captureCameraFrame, follow = null } = {}) {
   // The COORDINATOR is the single owner of the gimbal (serialization + state
   // machine + verified re-assert + follow watchdog). Every camera:control action
   // — from the voice path AND the autonomous presence loop, which both reach this
@@ -305,7 +305,7 @@ function registerCameraControl(ipcMain, { captureCameraFrame } = {}) {
   const { createCameraCoordinator } = require('./camera-coordinator');
   const coordinator = createCameraCoordinator({
     primitives: { aim, zoom, track, followFred, preset, reset, status },
-    makeLook, captureCameraFrame,
+    makeLook, captureCameraFrame, follow,
   });
   const dispatch = {
     aim:    (p) => coordinator.aim(p),
