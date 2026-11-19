@@ -36,7 +36,7 @@ const { createTelegramBridge, makeWhisperTranscriber } = require('./services/tel
 const { createQdrantMemory, registerMemoryIpc } = require('./services/qdrant-memory');
 const { registerInfo } = require('./services/info-handlers');
 const { createCameraPicker } = require('./services/camera-device');
-const { createFaceFollow } = require('./services/face-follow');
+const { createFaceFollow, greetingFor } = require('./services/face-follow');
 installToolTap(ipcMain);
 
 // Only ONE Hannibal at a time. Two copies fight over the mic, the wake word and
@@ -121,7 +121,16 @@ registerWorld(ipcMain);    // 'world:crypto' (after registerControls so EYES can
 // The coordinator (single owner of the gimbal) is returned so we can stop its
 // follow-watchdog on quit. See camera-coordinator.js.
 // Hannibal turns the OBSBOT himself to keep Fred in frame (services/face-follow.js).
-const faceFollow = createFaceFollow({ oscMessage: cameraOsc.oscMessage, port: cameraCfg.port, host: cameraCfg.host });
+const faceFollow = createFaceFollow({
+  oscMessage: cameraOsc.oscMessage, port: cameraCfg.port, host: cameraCfg.host,
+  // Fred walked in after 10+ min away (HANNIBAL_GREET_AWAY_MIN): say hello. Goes
+  // through the same speak gate as camera remarks (mute/sleep/in-conversation).
+  onArrive: ({ awayMs }) => {
+    if (process.env.HANNIBAL_GREET === '0') return;
+    const text = greetingFor({ awayMs });
+    try { win && win.webContents.send('presence:remark', { text, interest: 1, referent: 'Fred arriving', ts: Date.now() }); } catch (_) {}
+  },
+});
 const cameraCoordinator = registerCameraControl(ipcMain, { captureCameraFrame: (...a) => captureCameraFrame(...a), follow: faceFollow }); // 'camera:control'
 
 let win;
