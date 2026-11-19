@@ -25,7 +25,7 @@ const { registerWorld } = require('./services/world');
 // Camera steering (pan/tilt/zoom/track) for the OBSBOT Tiny 3 over OSC → OBSBOT
 // Center. The 'hands' beside vision.capture's 'eyes'. Reuses captureCameraFrame
 // (defined below) for the camera.look composite — no second camera path.
-const { registerCameraControl } = require('./services/camera-control');
+const { registerCameraControl, CFG: cameraCfg, _internal: cameraOsc } = require('./services/camera-control');
 // Chat brain: Claude API via the official SDK (streamed, prompt-cached). The
 // renderer falls back to Ollama on GEX131 whenever this returns ok:false.
 const claudeBrain = require('./services/claude-brain');
@@ -36,6 +36,7 @@ const { createTelegramBridge, makeWhisperTranscriber } = require('./services/tel
 const { createQdrantMemory, registerMemoryIpc } = require('./services/qdrant-memory');
 const { registerInfo } = require('./services/info-handlers');
 const { createCameraPicker } = require('./services/camera-device');
+const { createFaceFollow } = require('./services/face-follow');
 installToolTap(ipcMain);
 
 // Only ONE Hannibal at a time. Two copies fight over the mic, the wake word and
@@ -119,7 +120,9 @@ registerControls(ipcMain); // 'browser-action' + 'mac-control' IPC handlers
 registerWorld(ipcMain);    // 'world:crypto' (after registerControls so EYES can reuse 'browser-action' open)
 // The coordinator (single owner of the gimbal) is returned so we can stop its
 // follow-watchdog on quit. See camera-coordinator.js.
-const cameraCoordinator = registerCameraControl(ipcMain, { captureCameraFrame: (...a) => captureCameraFrame(...a) }); // 'camera:control'
+// Hannibal turns the OBSBOT himself to keep Fred in frame (services/face-follow.js).
+const faceFollow = createFaceFollow({ oscMessage: cameraOsc.oscMessage, port: cameraCfg.port, host: cameraCfg.host });
+const cameraCoordinator = registerCameraControl(ipcMain, { captureCameraFrame: (...a) => captureCameraFrame(...a), follow: faceFollow }); // 'camera:control'
 
 let win;
 let wakeProc = null;
@@ -1205,6 +1208,7 @@ app.whenReady().then(async () => {
   ensureWhisper();
   startTelegram();  // Hannibal on Fred's phone, when TELEGRAM_BOT_TOKEN is set
   startBodyLink();  // …or, with the always-on server, link this Mac to it as Hannibal's body
+  if (process.env.HANNIBAL_CAMERA_FOLLOW !== '0') faceFollow.start();  // turn the OBSBOT to keep Fred in frame
   // Microphone: get macOS permission BEFORE starting the wake-word and VAD
   // helpers. They inherit this app's permission; started without it, opening
   // the mic fails ("Input/output error") or delivers silence.

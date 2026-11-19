@@ -34,7 +34,7 @@ const HANDSOFF_REASON =
 // primitives = { aim, zoom, track, followFred, preset, reset, status } (OSC layer);
 // makeLook / captureCameraFrame accepted for signature-compat but unused while
 // hands-off (no excursions). `status` is the only OSC call we still make (read-only).
-function createCameraCoordinator({ primitives = {}, log = (m) => console.log(m) } = {}) {
+function createCameraCoordinator({ primitives = {}, follow = null, log = (m) => console.log(m) } = {}) {
   const { status } = primitives;
 
   const refuse = (action) => {
@@ -55,8 +55,16 @@ function createCameraCoordinator({ primitives = {}, log = (m) => console.log(m) 
 
     // "follow me" / track: nothing to do — tracking is owned by OBSBOT hardware and
     // is already on. Report success so callers/UX read it as "yep, already on you".
-    track:  async () => ({ ok: true, handsOff: true, hardwareControlled: true,
-      note: 'Tracking is handled by the OBSBOT camera itself; nothing to send.' }),
+    // Since 2026-11-19 the camera's own tracking would not stay on, so Hannibal
+    // follows Fred himself (face-follow.js). "track off" stops it, anything else
+    // starts it. Without a follower this stays the old no-op.
+    track:  async ({ mode } = {}) => {
+      if (!follow) return { ok: true, handsOff: true, hardwareControlled: true,
+        note: 'Tracking is handled by the OBSBOT camera itself; nothing to send.' };
+      if (mode === 'off') { follow.stop(); return { ok: true, following: false, note: 'Stopped following Fred.' }; }
+      const r = await follow.start();
+      return { ...r, following: !!r.ok, note: r.ok ? 'Following Fred with the camera.' : r.error };
+    },
 
     // Read-only status still works (best-effort OSC read-back, degraded by default).
     status: async () => {
@@ -64,7 +72,7 @@ function createCameraCoordinator({ primitives = {}, log = (m) => console.log(m) 
       return { ...r, coordinatorState: STATES.HANDS_OFF, handsOff: true };
     },
 
-    stop() { /* no watchdog in hands-off mode */ },
+    stop() { if (follow) follow.stop(); },
   };
 }
 
