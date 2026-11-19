@@ -1,0 +1,188 @@
+// ─────────────────────────────────────────────────────────────────────────
+// HANNIBAL SERVER — Hannibal without the Mac, always on (GEX131, Docker).
+//
+// The same pieces the desk app uses, minus everything that needs a Mac:
+//   • Telegram: Fred's phone channel (one listener per bot, so the Mac's own
+//     Telegram is switched off with HANNIBAL_SERVER_TELEGRAM=1 in its .env);
+//   • Claude brain with saved facts (data/memory-facts.json) and the Qdrant
+//     memory (same picky rules as the desk);
+//   • tools that work from here: calendar, mail (read), web search/fetch,
+//     world/news, server health, reminders, facts, memory. Mac-only tools (apps,
+//     camera, screen, WhatsApp, sending mail through Mail.app) are not offered;
+//   • the morning brief (HANNIBAL_BRIEF_TIME, default 08:00) and reminders,
+//     pushed to the phone as text + a voice note;
+//   • voice notes in: ElevenLabs speech-to-text. Voice out: ElevenLabs, as on the desk.
+//
+// Run:  node server/hannibal-server.js   (reads ../.env; see server/README.md)
+// ─────────────────────────────────────────────────────────────────────────
+'use strict';
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { spawn } = require('child_process');
+
+const ROOT = path.join(__dirname, '..');
+const SERVICES = path.join(ROOT, 'electron', 'services');
+
+// ── .env (same KEY=VALUE format as the desk) ──
+(function loadEnv() {
+  try {
+    for (const line of fs.readFileSync(process.env.HANNIBAL_ENV || path.join(ROOT, '.env'), 'utf8').split('\n')) {
+      const m = line.match(/^\s*([\w.]+)\s*=\s*(.*)\s*$/);
+      if (m && !(m[1] in process.env)) process.env[m[1]] = m[2].replace(/^"(.*)"$/, '$1');
+    }
+  } catch (_) { /* env from Docker only */ }
+})();
+
+const CFG = {
+  python: process.env.HANNIBAL_PY || 'python3',
+  ffmpeg: process.env.HANNIBAL_FFMPEG || 'ffmpeg',
+  ollamaUrl: process.env.OLLAMA_URL || 'http://127.0.0.1:11434',
+  qdrantUrl: (process.env.QDRANT_URL || 'http://127.0.0.1:6333').replace(/\/+$/, ''),
+  searxngUrl: process.env.SEARXNG_URL || 'http://127.0.0.1:8888',
+  dataDir: process.env.HANNIBAL_DATA || path.join(ROOT, 'data'),
+};
+fs.mkdirSync(CFG.dataDir, { recursive: true });
+
+// ── a stand-in for Electron's ipcMain: handlers register here, the executor
+//    finds them through the tool tap exactly as it does in the desk app ──
+const { installToolTap, setShim } = require(path.join(SERVICES, 'agent', 'executor'));
+const ipc = { handle() {} };
+const registry = installToolTap(ipc);
+
+const { registerInfo } = require(path.join(SERVICES, 'info-handlers'));
+const { createFactStore, registerFacts } = require(path.join(SERVICES, 'memory-facts'));
+const { createReminderTools, createBriefScheduler } = require(path.join(SERVICES, 'proactive'));
+const { createQdrantMemory } = require(path.join(SERVICES, 'qdrant-memory'));
+const { createTelegramBridge, makeElevenLabsTranscriber, PHONE_CONTEXT } = require(path.join(SERVICES, 'telegram'));
+const { registerWorld } = require(path.join(SERVICES, 'world'));
+const claudeBrain = require(path.join(SERVICES, 'claude-brain'));
+const claudeTools = require(path.join(SERVICES, 'claude-tools'));
+
+registerInfo(ipc, { python: CFG.python, searxngUrl: CFG.searxngUrl, metricsLocal: true });
+registerWorld(ipc);   // views can't open here (no screen); the narrated read still works
+
+const facts = createFactStore({ filePath: path.join(CFG.dataDir, 'memory-facts.json') });
+registerFacts(ipc, facts);
+claudeBrain._setFactStore(facts);
+
+const reminders = createReminderTools({ filePath: path.join(CFG.dataDir, 'reminders.json') });
+ipc.handle('reminders:add', (_e, message, at) => reminders.add(message, at));
+ipc.handle('reminders:cancel', (_e, query) => reminders.cancel(query));
+ipc.handle('reminders:upcoming', () => reminders.upcoming());
+
+const memory = createQdrantMemory({ qdrantUrl: CFG.qdrantUrl, ollamaUrl: CFG.ollamaUrl });
+setShim('memory.query', async ({ text, limit = 3 } = {}) =>
+  ({ ok: true, results: await memory.search(String(text || ''), Math.min(Number(limit) || 3, 10)) }));
+
+// Only offer Claude the tools whose handlers exist here.
+claudeTools.setAvailableChannels(Object.keys(registry));
+
+const SERVER_CONTEXT = 'You are running on Fred\'s always-on server, not on his Mac: you can use his calendar, mail (read), '
+  + 'the web, news, reminders and your memory, but not Mac apps, the camera, the screen or WhatsApp. If he asks for one '
+  + 'of those, say it needs the Mac.';
+const PERSONA = "You are Hannibal, Fred's personal AI assistant. Be concise, direct, and natural, "
+  + 'with dry wit. Notes about the current situation arrive as system messages during the conversation.';
+
+// ── voice out: ElevenLabs MP3 → OGG/Opus for a Telegram voice note ──
+function run(cmd, args, stdinText) {
+  return new Promise((resolve, reject) => {
+    const p = spawn(cmd, args, { env: process.env });
+    let err = '';
+    p.stderr.on('data', (d) => { err += d; });
+    p.on('error', reject);
+    p.on('close', (code) => (code === 0 ? resolve() : reject(new Error(err.trim() || `${path.basename(cmd)} exit ${code}`))));
+    if (stdinText != null) { p.stdin.write(stdinText); p.stdin.end(); }
+  });
+}
+async function voiceNote(text) {
+  const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const mp3 = path.join(os.tmpdir(), `hannibal-vn-${stamp}.mp3`);
+  const ogg = path.join(os.tmpdir(), `hannibal-vn-${stamp}.ogg`);
+  try {
+    await run(CFG.python, [path.join(SERVICES, 'nova-tts.py'), mp3], String(text || ''));
+    await run(CFG.ffmpeg, ['-nostdin', '-y', '-loglevel', 'error', '-i', mp3, '-c:a', 'libopus', '-b:a', '48k', '-ac', '1', ogg], null);
+    return fs.readFileSync(ogg);
+  } finally { fs.unlink(mp3, () => {}); fs.unlink(ogg, () => {}); }
+}
+
+const runTool = (name, input, { confirmer } = {}) => claudeTools.runTool(name, input, {
+  confirmer,
+  emit: (ev) => { if (/^step:(start|finish|error|skipped|confirm)/.test(ev.type)) console.log('[tool]', ev.type, ev.tool || ''); },
+});
+
+const token = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
+if (!token) { console.error('[server] TELEGRAM_BOT_TOKEN missing in .env, nothing to do'); process.exit(1); }
+
+const telegram = createTelegramBridge({
+  token,
+  allowedIds: process.env.TELEGRAM_ALLOWED_USERS,
+  persona: PERSONA,
+  chat: (payload, onText, opts) => claudeBrain.chat(
+    { ...payload, context: [SERVER_CONTEXT, payload.context].filter(Boolean).join('\n\n') }, onText, opts),
+  runTool,
+  transcribe: makeElevenLabsTranscriber({ apiKey: process.env.ELEVENLABS_API_KEY, model: process.env.ELEVENLABS_STT_MODEL || 'scribe_v1' }),
+  memory,
+  speak: voiceNote,
+  voiceAlways: process.env.TELEGRAM_VOICE_ALWAYS,
+  onReset: () => claudeBrain.resetHistory(),
+});
+
+// ── morning brief: Claude reads calendar/mail/reminders, Fred gets it on the phone ──
+const brief = createBriefScheduler({
+  statePath: path.join(CFG.dataDir, 'proactive.json'),
+  send: async (job) => {
+    console.log('[brief] composing the morning brief');
+    let ok = false;
+    try {
+      const r = await claudeBrain.chat({
+        system: PERSONA,
+        context: [SERVER_CONTEXT, PHONE_CONTEXT, 'This brief is sent to his phone as text and a voice note.'].join('\n\n'),
+        user: job.prompt,
+      }, null, { runTool: (name, input) => runTool(name, input, { confirmer: async () => false }) });  // read-only: any write is declined
+      if (r && r.ok && r.text) {
+        await telegram.notify(`☀️ Morning brief\n\n${r.text}`, { voice: true });
+        ok = true;
+      } else console.warn('[brief] no brief:', (r && r.error) || 'empty');
+    } catch (e) { console.warn('[brief] failed:', e.message); }
+    brief.done({ kind: job.kind, day: job.day, ok });
+  },
+});
+
+// ── reminders → phone ──
+async function fireReminders() {
+  let due = [];
+  try { due = reminders.takeDue(); } catch (e) { console.warn('[reminders] check failed:', e.message); }
+  for (const r of due) {
+    console.log('[reminders] due:', r.message);
+    await telegram.notify(`⏰ Reminder: ${r.message}`, { voice: true }).catch((e) => console.warn('[reminders] send failed:', e.message));
+  }
+}
+
+// ── start, retrying while the network or Telegram is not reachable ──
+let delay = 5000;
+function startTelegram() {
+  telegram.start().then(() => console.log('[server] Telegram connected')).catch((e) => {
+    console.warn(`[telegram] could not start: ${e.message}, retrying in ${delay / 1000}s`);
+    setTimeout(startTelegram, delay);
+    delay = Math.min(delay * 2, 300000);
+  });
+}
+startTelegram();
+const timers = [
+  setTimeout(() => brief.tick(), 30000),
+  setInterval(() => brief.tick(), 60000),
+  setInterval(fireReminders, 30000),
+];
+console.log(`[server] Hannibal server up: ${claudeTools.toolDefinitions().length} tools, ${facts.size} facts, TZ ${Intl.DateTimeFormat().resolvedOptions().timeZone}`);
+
+function shutdown(sig) {
+  console.log(`[server] ${sig}, stopping`);
+  for (const t of timers) { clearTimeout(t); clearInterval(t); }
+  try { telegram.stop(); } catch (_) {}
+  setTimeout(() => process.exit(0), 500);
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('unhandledRejection', (e) => console.warn('[server] unhandled:', e && e.message ? e.message : e));

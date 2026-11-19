@@ -118,6 +118,8 @@ async function shimTranslate({ text, language } = {}) {
   return { ok: true, text: (await r.json()).message?.content?.trim() || '' };
 }
 const RENDERER_SHIMS = { 'memory.query': shimMemoryQuery, 'translate.text': shimTranslate };
+// Let the app swap in a better runner (main uses qdrant-memory.js for memory.query).
+function setShim(name, fn) { if (typeof fn === 'function') RENDERER_SHIMS[name] = fn; }
 
 // ── invoker: catalog tool name -> the real handler call ──────────────────────
 function marshalControl(tool, params) {
@@ -616,5 +618,5 @@ async function execute(plan, opts = {}) {
 
 module.exports = {
   installToolTap, makeIpcInvoker, execute, defaultClassify, defaultReplan,
-  resolveParams, marshalControl, summarizeAction, CFG,
+  resolveParams, marshalControl, summarizeAction, CFG, setShim,
 };

@@ -74,7 +74,19 @@ function createReminderTools({ filePath = path.join(DATA, 'reminders.json'), not
       .map((r) => ({ id: r.id, message: r.message, when: fmt(r.triggerTs) })) };
   }
 
-  return { add, cancel, upcoming };
+  // Reminders that are due now, marked fired so each goes out once.
+  // (The desk fires its own in the renderer; the always-on server uses this.)
+  function takeDue() {
+    const list = read();
+    const t = now();
+    const due = list.filter((r) => !r.fired && Number(r.triggerTs) <= t);
+    if (!due.length) return [];
+    for (const r of due) { r.fired = true; r.firedTs = t; }
+    write(list);
+    return due.map((r) => ({ id: r.id, message: r.message, triggerTs: r.triggerTs }));
+  }
+
+  return { add, cancel, upcoming, takeDue };
 }
 
 // ── morning brief ───────────────────────────────────────────────────────────
