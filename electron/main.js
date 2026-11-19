@@ -185,6 +185,9 @@ const CONFIG = {
   // VAD alone decides utterance boundaries — no "Hey Hannibal" gate needed. Set
   // HANNIBAL_ALWAYS_LISTEN=0|false|off|no to restore the classic wake-word flow.
   alwaysListen: !/^(0|false|off|no)$/i.test(process.env.HANNIBAL_ALWAYS_LISTEN || ''),
+  // Answer only when called "Hannibal" (outside a conversation). HANNIBAL_NAME_GATE=0 → answer everything.
+  nameGate: !/^(0|false|off|no)$/i.test(process.env.HANNIBAL_NAME_GATE || ''),
+  nameFollowUpMs: Number(process.env.HANNIBAL_FOLLOW_UP_S || 20) * 1000,
 };
 
 function createWindow() {
@@ -375,6 +378,8 @@ ipcMain.handle('voice:config', () => ({
   ollamaModelHeavy: CONFIG.ollamaModelHeavy,
   ollamaModelVision: CONFIG.ollamaModelVision,
   alwaysListen: CONFIG.alwaysListen,
+  nameGate: CONFIG.nameGate,
+  nameFollowUpMs: CONFIG.nameFollowUpMs,
   qdrantUrl: CONFIG.qdrantUrl,
   qdrantApiKey: process.env.QDRANT_API_KEY || '',   // Qdrant on GEX131 requires it (api-key header)
   // Chat brain: Claude first (the key stays in main), Ollama on GEX131 as fallback.
