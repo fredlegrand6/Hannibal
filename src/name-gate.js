@@ -16,7 +16,9 @@
   'use strict';
 
   // Whisper's usual spellings of "Hannibal" (and the near-misses it makes).
-  const NAME = /\b(?:hey|hi|ok|okay|yo)?[\s,]*(?:hannibal|hanibal|hannible|hanniball|hannibel|anibal|annibal|hannabal|hannibul|hannable)\b[\s,.!?:]*/i;
+  // At the very start of an utterance it also hears "Hannibal" as
+  // "They handle ..." / "The handle ..." (seen live 2026-11-20).
+  const NAME = /(?:^[\s,.!?:-]*(?:(?:hey|hi|ok|okay|yo)[\s,]+)?(?:they|the)\s+handle\b[\s,.!?:]*|\b(?:hey|hi|ok|okay|yo)?[\s,]*(?:hannibal|hanibal|hannible|hanniball|hannibel|anibal|annibal|hannabal|hannibul|hannable|honnibal|hanni\s?ball?|hand[iy]\s?ball?|hanna\s?b[ae]ll?)\b[\s,.!?:]*)/i;
 
   function mentionsName(text) { return NAME.test(String(text || '')); }
 

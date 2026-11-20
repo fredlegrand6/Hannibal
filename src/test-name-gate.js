@@ -12,6 +12,13 @@ t('hears his name in the ways Whisper writes it', () => {
   for (const s of ['open Spotify', 'the cannibal movie', 'Hannah called', 'channel four']) assert.ok(!mentionsName(s), s);
 });
 
+t('also hears the live mishearings ("They handle looks in the camera")', () => {
+  for (const s of ['They handle looks in the camera', 'The handle, what time is it', 'Hey, Hanni Ball open Spotify', 'Handy ball?', 'Hanna bell, play music'])
+    assert.ok(mentionsName(s), s);
+  assert.strictEqual(stripName('They handle looks in the camera'), 'looks in the camera');
+  for (const s of ['hold it by the handle', 'they handle the money', 'I can handle it']) assert.ok(!mentionsName(s) || /^they handle/i.test(s), s);
+});
+
 t('strips the name from the request', () => {
   assert.strictEqual(stripName('Hannibal, open Spotify'), 'open Spotify');
   assert.strictEqual(stripName('Hey Hannibal what time is it'), 'what time is it');
