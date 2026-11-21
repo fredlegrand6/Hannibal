@@ -182,8 +182,10 @@ async function chatTurn({ system, context, user, images }, onText, opts, me) {
   // first, if that stretch is not in it yet) tells him what came before.
   if (journal && lastTurnAt && Date.now() - lastTurnAt > RESUME_MS() && history.length) {
     await Promise.race([closeEpisode(), new Promise((r) => setTimeout(r, 20000))]);
-    history = [];
-    console.log('[claude] new conversation after a long break (the diary carries the last one)');
+    if (journal.pendingCount === 0) {
+      history = [];
+      console.log('[claude] new conversation after a long break (the diary carries the last one)');
+    } else console.log('[claude] diary not written yet, so the last conversation stays in context');
   }
   const frames = (Array.isArray(images) ? images : [])
     .filter((b) => typeof b === 'string' && claudeTools.mediaType(b)).slice(0, MAX_IMAGES);
@@ -321,4 +323,4 @@ function registerClaudeBrain(ipcMain, opts = {}) {
 }
 
 module.exports = { registerClaudeBrain, chat, interrupt, enabled, model, toolsEnabled: () => !!runToolImpl && claudeTools.enabled(),
-  resetHistory: () => { history = []; }, setJournal, summarizeForJournal, closeEpisode, _setClient: (c) => { client = c; }, _setFactStore: (f) => { factStore = () => f; } };
+  resetHistory: () => { history = []; saveLive(); }, setJournal, summarizeForJournal, closeEpisode, _setClient: (c) => { client = c; }, _setFactStore: (f) => { factStore = () => f; } };
