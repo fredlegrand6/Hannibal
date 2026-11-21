@@ -238,6 +238,33 @@ ipcMain.handle('web:fetch', async (_e, url) => {
     return { ok: false, error: e.message };
   }
 });
+
+// ── MAIL WORK (Zoho): triage, reply, write, mark read — electron/services/zoho-mail.py.
+// Sending only happens after Fred's yes at the confirmation gate (catalog confirm:true).
+function zoho(args, input) {
+  return new Promise((resolve) => {
+    if (!process.env.ZOHO_APP_PW) return resolve({ ok: false, error: 'Zoho app password not set in .env' });
+    const p = spawn(opts.python, [path.join(__dirname, 'zoho-mail.py'), ...args], { env: process.env });
+    let so = '', se = '';
+    const kill = setTimeout(() => { try { p.kill(); } catch (_) {} }, 60000);
+    p.stdout.on('data', (d) => { so += d; });
+    p.stderr.on('data', (d) => { se += d; });
+    p.on('error', (e) => { clearTimeout(kill); resolve({ ok: false, error: e.message }); });
+    p.on('close', (code) => {
+      clearTimeout(kill);
+      try {
+        const j = JSON.parse(so.trim().split('\n').pop() || '{}');
+        resolve(j.error ? { ok: false, error: j.error } : j);
+      } catch (_) { resolve({ ok: false, error: se.trim().slice(0, 300) || `zoho-mail exit ${code}` }); }
+    });
+    p.stdin.on('error', () => {});
+    p.stdin.end(input ? JSON.stringify(input) : '');
+  });
+}
+ipcMain.handle('mail:triage', (_e, days, limit) => zoho(['triage', String(Math.min(Math.max(Number(days) || 3, 1), 30)), String(Math.min(Math.max(Number(limit) || 20, 1), 40))]));
+ipcMain.handle('mail:reply', (_e, uid, to, body) => zoho(['reply'], { uid, to, body }));
+ipcMain.handle('mail:write', (_e, to, subject, body) => zoho(['write'], { to, subject, body }));
+ipcMain.handle('mail:seen', (_e, uid) => zoho(['seen', String(uid || '')]));
 }
 
 module.exports = { registerInfo };

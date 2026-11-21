@@ -11,7 +11,16 @@ contextBridge.exposeInMainWorld('hannibal', {
   // streaming silero VAD — real speech/not-speech (knows voice from music)
   onVad: (cb) => ipcRenderer.on('voice:vad', (_e, ev) => cb(ev)),     // { type:'ready'|'start'|'end'|'error' }
   vadControl: (cmd) => ipcRenderer.send('voice:vad-control', cmd),    // 'PAUSE'|'RESUME'|'THRESH x'|'SILENCE ms'
-  tts: (text) => ipcRenderer.invoke('voice:tts', text),     // -> Uint8Array (MP3 bytes)
+  tts: (text) => ipcRenderer.invoke('voice:tts', text),
+  // Voice helper (Apple echo cancelling): play his voice, cut it, and grab clean mic clips.
+  vioStatus: () => ipcRenderer.invoke('vio:status'),
+  vioPlay: (bytes) => ipcRenderer.invoke('vio:play', bytes),
+  vioStop: () => ipcRenderer.invoke('vio:stop'),
+  vioWarm: () => ipcRenderer.invoke('vio:warm'),
+  vioRelease: () => ipcRenderer.invoke('vio:release'),
+  vioClip: (ms) => ipcRenderer.invoke('vio:clip', ms),
+  onVioLevel: (cb) => ipcRenderer.on('vio:level', (_e, m) => cb(m)),
+  onVioReady: (cb) => ipcRenderer.on('vio:ready', (_e, m) => cb(m)),     // -> Uint8Array (MP3 bytes)
   // Claude chat brain (runs in main; the API key never reaches the renderer).
   // payload: { system, context, user } · onToken(text) fires as the reply streams.
   // -> { ok, text, model, usage } | { ok:false, error }  (caller falls back to Ollama)
@@ -22,6 +31,7 @@ contextBridge.exposeInMainWorld('hannibal', {
     return ipcRenderer.invoke('llm:chat', { ...payload, id })
       .finally(() => ipcRenderer.removeListener('llm:token', onTok));
   },
+  claudeInterrupt: () => ipcRenderer.invoke('llm:interrupt'),  // barge-in: stop the reply in flight
   claudeReset: () => ipcRenderer.invoke('llm:reset'),       // forget the running conversation
   config: () => ipcRenderer.invoke('voice:config'),         // -> { whisperUrl, ollamaUrl, ollamaModel, ... }
   capture: (kind) => ipcRenderer.invoke('voice:capture', kind), // 'screen'|'camera' -> { ok, b64 }

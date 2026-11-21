@@ -35,6 +35,7 @@ const { registerProactive } = require('./services/proactive');
 const { createTelegramBridge, makeWhisperTranscriber } = require('./services/telegram');
 const { createQdrantMemory, registerMemoryIpc } = require('./services/qdrant-memory');
 const { registerInfo } = require('./services/info-handlers');
+const { createVoiceIO } = require('./services/voice-io');   // his voice + ears on Apple's echo cancelling
 const { createCameraPicker } = require('./services/camera-device');
 const { createFaceFollow, greetingFor } = require('./services/face-follow');
 installToolTap(ipcMain);
@@ -169,7 +170,7 @@ const CONFIG = {
   pythonTTS:  process.env.HANNIBAL_PY      || '/opt/homebrew/bin/python3',     // has `requests`
   pythonWake: process.env.HANNIBAL_PY_WAKE || '/opt/homebrew/bin/python3.12',  // has picovoice
   node:       process.env.HANNIBAL_NODE    || '/opt/homebrew/bin/node',
-  whisperScript: process.env.WHISPER_SCRIPT || '/Users/Shared/HoloAssistant/ui/whisper-server.js',
+  whisperScript: process.env.WHISPER_SCRIPT || path.join(__dirname, 'services', 'stt-server.js'), // Hannibal's own fast ears (whisper.cpp kept loaded on the GPU)
   whisperUrl: process.env.WHISPER_URL || 'http://127.0.0.1:8765',
   ollamaUrl:  process.env.OLLAMA_URL  || 'http://127.0.0.1:11434',
   // Multi-model router: most turns ("how are you") go to a small, instant model;
@@ -305,20 +306,22 @@ ipcMain.on('voice:vad-control', (_e, cmd) => {
   try { vadProc && vadProc.stdin.writable && vadProc.stdin.write(String(cmd) + '\n'); } catch (_) {}
 });
 
-// ── WHISPER: start V1's server (builtin-http, absolute model path) if not up ──
+// ── WHISPER: start Hannibal's speech-to-text server (electron/services/stt-server.js)
+// if not up. It keeps whisper.cpp loaded on the GPU and picks the best model on
+// disk (large-v3-turbo when present). An OLD HoloAssistant server still holding
+// the port is replaced, so the new ears are always the ones used.
 async function ensureWhisper() {
-  const up = await ping(CONFIG.whisperUrl + '/health');
-  if (up) { console.log('[whisper] already running'); return; }
-  // Pass through the multilingual model path so the shared whisper-server
-  // (default = ggml-small.en.bin for legacy callers) runs the Dutch/French-
-  // capable model when launched by Hannibal. Env-overridable.
-  const whisperEnv = {
-    ...process.env,
-    WHISPER_MODEL: process.env.WHISPER_MODEL || '/Users/Shared/HoloAssistant/models/whisper/ggml-small.bin',
-  };
+  const health = await fetch(CONFIG.whisperUrl + '/health', { signal: AbortSignal.timeout(1500) })
+    .then((r) => (r.ok ? r.json().catch(() => ({})) : null)).catch(() => null);
+  if (health && health.engine === 'hannibal-stt') { console.log('[whisper] already running (' + health.model + ')'); return; }
+  if (health) {
+    console.log('[whisper] old speech server on the port — replacing it');
+    try { require('child_process').execSync("pkill -f 'HoloAssistant/ui/whisper-server.js'"); } catch (_) {}
+    await new Promise((r) => setTimeout(r, 800));
+  }
   whisperProc = spawn(CONFIG.node, [CONFIG.whisperScript], {
-    cwd: path.dirname(CONFIG.whisperScript),   // so __dirname helpers resolve
-    env: whisperEnv,
+    cwd: path.dirname(CONFIG.whisperScript),
+    env: process.env,
   });
   whisperProc.stdout.on('data', (d) => console.log('[whisper]', d.toString().trim()));
   whisperProc.stderr.on('data', (d) => console.log('[whisper]', d.toString().trim()));
@@ -358,10 +361,20 @@ async function voiceNote(text) {
   } finally { fs.unlink(mp3, () => {}); fs.unlink(ogg, () => {}); }
 }
 
+const { speakToMp3 } = require('./services/fast-tts');
 ipcMain.handle('voice:tts', async (_e, text) => {
   // Unique per call — two sentences requested in the same millisecond must not share a file.
   const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   let file = `/tmp/hannibal-tts-${stamp}.mp3`;
+  const t0 = Date.now();
+  // Fast path: ElevenLabs straight from Node (electron/services/fast-tts.js).
+  if (process.env.HANNIBAL_FAST_TTS !== '0' && process.env.ELEVENLABS_API_KEY) {
+    try {
+      const buf = await speakToMp3(text);
+      console.log(`[tts] ElevenLabs (fast, ${Date.now() - t0} ms): ${String(text || '').length} chars → ${buf.length} bytes of audio`);
+      return buf;
+    } catch (e) { console.warn('[tts] fast voice failed, trying the old path:', e.message); }
+  }
   try {
     await runTts(CONFIG.pythonTTS, [CONFIG.ttsScript, file], String(text || ''));   // ElevenLabs
   } catch (e) {
@@ -383,6 +396,7 @@ registerInfo(ipcMain, { python: CONFIG.pythonTTS, searxngUrl: CONFIG.searxngUrl 
 
 ipcMain.handle('voice:config', () => ({
   whisperUrl: CONFIG.whisperUrl,
+  sttLanguage: process.env.HANNIBAL_STT_LANG || 'auto',
   ollamaUrl: CONFIG.ollamaUrl,
   ollamaModel: CONFIG.ollamaModel,
   ollamaModelFast: CONFIG.ollamaModelFast,
@@ -391,6 +405,8 @@ ipcMain.handle('voice:config', () => ({
   alwaysListen: CONFIG.alwaysListen,
   nameGate: CONFIG.nameGate,
   nameFollowUpMs: CONFIG.nameFollowUpMs,
+  bargeIn: process.env.HANNIBAL_BARGE_IN !== '0',   // talk over him to cut him off
+  bargeMinBar: Number(process.env.HANNIBAL_BARGE_BAR) || 0,   // mic level that counts as Fred talking (default 0.006)
   qdrantUrl: CONFIG.qdrantUrl,
   qdrantApiKey: process.env.QDRANT_API_KEY || '',   // Qdrant on GEX131 requires it (api-key header)
   // Chat brain: Claude first (the key stays in main), Ollama on GEX131 as fallback.
@@ -1205,7 +1221,12 @@ function startTelegram() {
   tryStart();
 }
 
+// Hannibal's mouth + ears on Apple voice processing, so Fred can talk over him.
+const voiceIO = createVoiceIO({ send: (ch, data) => { try { win && win.webContents.send(ch, data); } catch (_) {} } });
+voiceIO.register(ipcMain);
+
 app.whenReady().then(async () => {
+  voiceIO.start().catch((e) => console.warn('[voice-io] start failed', e.message));
   ensureAliasesFile();
   ensureBehaviorLogFile();
   ensurePrefsFile();
@@ -1284,6 +1305,7 @@ app.whenReady().then(async () => {
 app.on('before-quit', () => { app.isQuiting = true; });
 app.on('will-quit', () => {
   if (wakeProc) wakeProc.kill();
+  try { voiceIO.quit(); } catch (_) {}
   if (whisperProc) whisperProc.kill();
   if (telegram) telegram.stop();
   if (vadProc) { try { vadProc.kill(); } catch (_) {} }

@@ -149,7 +149,7 @@ function harness({ answer = true, invokeImpl } = {}) {
     { stop_reason: 'tool_use', content: [{ type: 'text', text: 'Let me check your inbox' }, { type: 'tool_use', id: 'tu_1', name: 'mail__inbox', input: {} }] },
     { stop_reason: 'end_turn', content: [{ type: 'text', text: 'You have 3 unread mails.' }] },
   ];
-  brain._setClient({ beta: { messages: { stream: (req) => {
+  const fakeClient = { beta: { messages: { stream: (req) => {
     requests.push(JSON.parse(JSON.stringify(req)));
     const msg = { model: 'fake', usage: {}, ...script[requests.length - 1] };
     const handlers = {};
@@ -157,7 +157,8 @@ function harness({ answer = true, invokeImpl } = {}) {
       on: (ev, fn) => { handlers[ev] = fn; },
       finalMessage: async () => { for (const b of msg.content) if (b.type === 'text' && handlers.text) handlers.text(b.text); return msg; },
     };
-  } } } });
+  } } } };
+  brain._setClient(fakeClient);
   const toolRuns = [];
   const fakeIpc = { handle: () => {} };
   brain.registerClaudeBrain(fakeIpc, { runTool: async (name, input) => { toolRuns.push(name); return { tool: claudeTools.fromApiName(name), status: 'ok', is_error: false, content: '{"unread":3}' }; } });
@@ -222,6 +223,33 @@ function harness({ answer = true, invokeImpl } = {}) {
     assert(requests.length - start <= 3, `made ${requests.length - start} calls`);
     assert(toolRuns.length <= 2, `ran ${toolRuns.length} tools`);
     delete process.env.HANNIBAL_CLAUDE_MAX_TOOL_ROUNDS;
+  });
+
+  await test('barge-in: interrupt stops the reply and keeps a cut-off note in history', async () => {
+    brain.resetHistory();
+    let aborted = false;
+    brain._setClient({ beta: { messages: { stream: (req) => {
+      requests.push(JSON.parse(JSON.stringify(req)));
+      const handlers = {}; let rejectFn;
+      return {
+        on: (ev, fn) => { handlers[ev] = fn; },
+        abort: () => { aborted = true; rejectFn(new Error('Request was aborted.')); },
+        finalMessage: () => new Promise((_, rej) => { rejectFn = rej; handlers.text && handlers.text('Your next meeting is at '); }),
+      };
+    } } } });
+    let said = '';
+    const p = brain.chat({ system: 'S', user: 'what is on today?' }, (t) => { said += t; });
+    await new Promise((r) => setTimeout(r, 20));
+    assert.strictEqual(brain.interrupt(), true);
+    const r = await p;
+    assert(aborted && r.ok && r.interrupted, JSON.stringify(r));
+    assert(/meeting is at/.test(said));
+    assert.strictEqual(brain.interrupt(), false, 'nothing running any more');
+    script.push({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'Sure.' }] });
+    brain._setClient(fakeClient);
+    await brain.chat({ system: 'S', user: 'tomorrow then' }, quiet);
+    const replay = requests[requests.length - 1].messages;
+    assert(replay.some((m) => m.role === 'assistant' && /cut me off/.test(m.content)), 'history knows he was cut off');
   });
 
   console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ''}`);

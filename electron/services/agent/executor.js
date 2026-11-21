@@ -234,6 +234,15 @@ function summarizeAction(step, params) {
       const bodyPrev = p.body ? ` — “${flat(p.body).slice(0, 160)}${flat(p.body).length > 160 ? '…' : ''}”` : '';
       return `Open a pre-filled email to ${p.to}${p.subject ? ` about ${q(p.subject)}` : ''}${bodyPrev} — go ahead?`;
     }
+    // Real sends from Zoho: Fred sees/hears the WHOLE draft and who gets it.
+    case 'mail.reply': {
+      const body = String(p.body || '').trim();
+      return `Send this reply to ${p.to}: “${body.length > 1200 ? body.slice(0, 1200) + '…' : body}” — send it?`;
+    }
+    case 'mail.write': {
+      const body = String(p.body || '').trim();
+      return `Send an email to ${p.to} about “${p.subject || ''}”: “${body.length > 1200 ? body.slice(0, 1200) + '…' : body}” — send it?`;
+    }
     case 'file.trash':    return `Move ${p.path} to the Trash — go ahead?`;
     case 'mac.emptyTrash':return `Empty the Trash permanently — go ahead?`;
     case 'mac.sleep':     return `Put the machine to sleep — go ahead?`;

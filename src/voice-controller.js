@@ -399,10 +399,19 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   // the mic isn't reopened mid-remark; the single restOrRearm() at the end reopens.
   let autonomousSpeaking = false;
   // Name gate: when Hannibal last spoke, and when the wake word last fired.
+  let turnEndedAt = 0;
+  let tap = null, turnMark = 0, tapFloor = 0;   // tapFloor: never pre-roll back past this (his own voice, the last turn)
+  // Barge-in (src/barge-in.js): Fred talks over Hannibal → he stops.
+  let bargeTimer = null, bargeBusy = 0, bargeCount = 0, turnSeq = 0, curSrc = null;
+  let bargeSession = null, vioFeed = null;
+  // Voice helper (native/voice-io, Apple echo cancelling): when it is ready he
+  // speaks through it, and barge-in listens on its clean mic.
+  let vio = false;
+  const spokenRecent = [];   // his last few sentences, to tell his own echo from Fred
   let lastSpokeAt = 0;
   let wokeAt = 0;
   const setPhase = (p) => {
-    if (phase === 'speaking' && p !== 'speaking') lastSpokeAt = Date.now();
+    if (phase === 'speaking' && p !== 'speaking') { lastSpokeAt = Date.now(); if (tap) tapFloor = tap.mark(); }
     phase = p;
     if (p !== 'listening') restfulListen = false;
     // Resting brain visual: 'vision' while screen-watching, else a steady
@@ -415,6 +424,12 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     // a listening turn (a RESUME also re-arms the sidecar so ongoing speech re-fires START).
     if (p === 'speaking') vadControl('PAUSE');
     else if (p === 'listening') vadControl('RESUME');
+    if (p === 'speaking') startBargeWatch(); else stopBargeWatch();
+    // Start Apple's echo cancelling while he thinks, so his first word isn't delayed.
+    if (p === 'thinking' && vio) { try { window.hannibal.vioWarm(); } catch (_) {} }
+    // He's done talking: hand the mic back right away (while Apple's echo
+    // cancelling runs, his normal ears hear nothing).
+    if ((p === 'listening' || p === 'idle') && vio) { try { window.hannibal.vioRelease(); } catch (_) {} }
     onPhase && onPhase(p);
   };
 
@@ -448,6 +463,15 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
 
   // ── LISTEN ──────────────────────────────────────────────────────────────
   let micStream = null, recorder = null, chunks = [], silenceTimer = null, aborted = false;
+  // One mic stream stays open between turns (src/audio-tap.js): no gap while the
+  // mic reopens, and each turn starts a little BEFORE it opened (pre-roll), so
+  // "Hannibal, ..." arrives whole. Falls back to the plain recorder if needed.
+  const micLive = () => !!(micStream && micStream.getTracks().some((t) => t.readyState === 'live'));
+  function releaseMic() {
+    if (tap) { tap.close(); tap = null; }
+    if (micStream) micStream.getTracks().forEach((t) => t.stop());
+    micStream = null;
+  }
   // Confirmation-gate lock. While a "send it?" confirmation is pending, the gate
   // owns the mic exclusively and the entire normal voice loop (wake, listen,
   // STT→chat→memory, typed submit) is suspended — so the spoken yes/no reaches
@@ -496,8 +520,10 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   }
   calibrateNoiseFloor(); // fire-and-forget; finishes well before the first wake/listen
 
-  async function startListening({ conversation = false } = {}) {
+  async function startListening({ conversation = false, fromMark = 0, interrupt = false } = {}) {
     if (confirmInFlight) return;                                 // gate owns the mic
+    // Space / a click on the core while he talks = stop talking and listen.
+    if (interrupt && (speaking || phase === 'speaking')) { console.warn('[barge] stopped by key/click'); bargeStop(); setPhase('idle'); conversation = true; }
     if (speaking) return;                                        // never open the mic over Hannibal's own voice
     if (phase === 'listening' || phase === 'thinking') return; // already busy
     aborted = false;
@@ -506,14 +532,22 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     // speak until real speech begins. Only meaningful in always-listen mode.
     restfulListen = continuousListen;
     try {
-      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (!micLive()) {
+        releaseMic();
+        micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        tap = window.AudioTap ? window.AudioTap.attach(audioCtx, micStream) : null;
+        tapFloor = 0;   // a new tap counts samples from zero again
+      }
     } catch (e) {
       console.warn('[voice] mic denied/unavailable', e);
       setPhase('idle');
       return;
     }
+    turnMark = tap ? tap.mark() : 0;
+    // Barge-in: Fred is already talking — start the turn where he started.
+    if (fromMark && tap) { turnMark = fromMark; tapFloor = Math.max(0, fromMark - 1); }
 
-    const src = audioCtx.createMediaStreamSource(micStream);
+    const src = tap ? tap.source : audioCtx.createMediaStreamSource(micStream);
     const analyser = audioCtx.createAnalyser();
     analyser.fftSize = 512;
     src.connect(analyser);
@@ -646,14 +680,19 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   async function finishListening() {
     if (silenceTimer) { clearInterval(silenceTimer); silenceTimer = null; }
     vadTurnActive = false;   // stop honoring silero events until the next turn
-    if (micStream) micStream.getTracks().forEach((t) => t.stop());
+    // Keep the mic open between turns in always-listen mode (no gap); otherwise let it go.
+    const useTap = !!(tap && tap.alive());
+    const tapWav = useTap && !aborted && !confirmInFlight ? tap.wav(turnMark, 0.8, tapFloor) : null;
+    if (tap) tapFloor = tap.mark();
+    if (!continuousListen) releaseMic();
     // If a confirmation gate took over mid-capture, drop this audio entirely:
     // no transcription, no chat, no memory, and don't touch the gate's phase.
     if (confirmInFlight) { aborted = false; return; }
     // An autonomous line grabbed the mic (presence/care/reminder) — leave the
     // phase alone; that path will re-arm when it's done speaking.
     if (aborted) { aborted = false; if (autonomousSpeaking) return; restOrRearm(); return; }
-    const blob = new Blob(chunks, { type: 'audio/webm' });
+    turnEndedAt = performance.now();   // for the "[timing]" log: you stop talking → his first word
+    const blob = tapWav ? new Blob([tapWav], { type: 'audio/wav' }) : new Blob(chunks, { type: 'audio/webm' });
     if (!blob.size) { restOrRearm(); return; }
     await transcribeAndRespond(blob);
   }
@@ -680,13 +719,16 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   // language Fred is speaking. The whisper-server validates ?language= against
   // its allow-list; unknown values fall back to en. Maps detected names to
   // ISO codes (the heuristic emits 'dutch'/'french'/'english').
-  const LANG_CODE = { dutch: 'nl', french: 'fr', english: 'en' };
-  async function transcribeAndRespond(blob) {
+  const LANG_CODE = { dutch: 'nl', french: 'fr', english: 'en', spanish: 'es' };
+  const sttCode = () => (cfg.sttLanguage === 'follow' ? (LANG_CODE[currentLanguage] || 'en') : (cfg.sttLanguage || 'auto'));
+  async function transcribeAndRespond(blob, heardText = null) {
     if (confirmInFlight) return;   // gate is active — this audio is not for chat
     setPhase('thinking');
-    let transcript = '';
-    const code = LANG_CODE[currentLanguage] || 'en';
-    try {
+    let transcript = heardText || '';
+    // The big Whisper model detects the language itself ('auto'), so switching to
+    // Dutch or French just works; HANNIBAL_STT_LANG=en|nl|fr pins one.
+    const code = cfg.sttLanguage === 'follow' ? (LANG_CODE[currentLanguage] || 'en') : (cfg.sttLanguage || 'auto');
+    if (blob) try {
       const r = await fetch(`${cfg.whisperUrl}/transcribe?language=${code}`, { method: 'POST', body: blob });
       const j = await r.json();
       transcript = ((j && j.transcript) || '').trim();
@@ -1183,7 +1225,8 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     if (!silent) emitAssistant(text, true);
     lastResponse = String(text || '');
     setPhase('speaking');
-    try { await speakOne(text); } catch (e) { console.warn('[voice] speak failed', e); }
+    // Pass the turn number so a barge-in while this line is still loading drops it.
+    try { await speakOne(text, null, turnSeq); } catch (e) { console.warn('[voice] speak failed', e); }
     brain.setAmplitude(0);
   }
 
@@ -2025,6 +2068,109 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     startListening({ conversation: true });
   }
 
+  if (window.hannibal && window.hannibal.vioStatus) {
+    const setVio = (on, why) => { if (on !== vio) console.warn(`[voice] echo-cancelling voice helper ${on ? 'ON — he speaks through it, talk over him any time' : 'off'}${why ? ` (${why})` : ''}`); vio = on; };
+    window.hannibal.vioStatus().then((st) => setVio(!!(st && st.ready))).catch(() => {});
+    window.hannibal.onVioReady((m) => setVio(!(m && m.ready === false)));
+    window.hannibal.onVioLevel((m) => {
+      if (phase !== 'speaking') return;
+      brain.setAmplitude(Math.min(1, (m.out || 0) * 3));
+      if (vioFeed) vioFeed(m.mic || 0);
+    });
+  }
+
+  // ── BARGE-IN ─────────────────────────────────────────────────────────────
+  // While he speaks, the open mic (audio tap) is watched. A sustained jump in
+  // level is sent to Whisper; he stops only when it is Fred (his name, a stop
+  // word, or real words that are not his own echo). HANNIBAL_BARGE_IN=0 = off.
+  function stopBargeWatch() {
+    if (bargeTimer) { clearInterval(bargeTimer); bargeTimer = null; }
+    vioFeed = null; bargeSession = null;
+  }
+  function startBargeWatch() {
+    if (bargeSession || cfg.bargeIn === false || !window.BargeIn || confirmInFlight) return;
+    const B = window.BargeIn;
+    const useVio = vio;
+    if (!useVio && !(tap && tap.alive())) { console.warn('[barge] not watching: the open mic is off'); return; }
+    const sr = useVio ? 16000 : tap.ring.sampleRate;
+    const w = B.createWatcher(useVio
+      ? { minBar: Number(cfg.bargeMinBar) || 0.01, maxMs: 6000 }       // clean mic: wait for Fred to finish
+      : { minBar: Number(cfg.bargeMinBar) || 0.006 });
+    const session = {};
+    bargeSession = session;
+    let frames = 0, onsetAt = 0, onsetMark = 0, peak = 0, lastReport = performance.now();
+    const onFrame = async (level) => {
+      if (bargeSession !== session) return;
+      if (phase !== 'speaking' || confirmInFlight) { stopBargeWatch(); return; }
+      peak = Math.max(peak, level);
+      if (performance.now() - lastReport > 3000) {   // tuning trace (renderer only forwards warnings)
+        console.warn(`[barge] watching${useVio ? ' (echo-cancelled)' : ''}: mic peak ${peak.toFixed(4)}, bar ${w.bar.toFixed(4)}`);
+        peak = 0; lastReport = performance.now();
+      }
+      if (++frames <= 8) { w.learn(level); return; }      // first 0.4 s: learn the room + his echo
+      const ev = w.push(level);
+      if (ev === 'onset') {
+        onsetAt = performance.now();
+        if (!useVio) onsetMark = Math.max(0, tap.mark() - Math.floor(sr * 0.6));
+        console.warn(`[barge] sound over his voice (level ${level.toFixed(3)}, bar ${w.bar.toFixed(3)})`);
+        return;
+      }
+      if (ev !== 'done' && ev !== 'long') return;
+      // Check this clip in the background and keep watching: a false alarm must
+      // never make Fred's real "stop" wait.
+      const stillTalking = !useVio && ev === 'long';
+      const clipMark = onsetMark;
+      const clipMs = performance.now() - onsetAt + 600 + 250;
+      const tapClip = useVio ? null : tap.wav(clipMark, 0, 0);
+      w.reset();
+      if (bargeBusy >= 2) return;
+      bargeBusy++;
+      let heard = '';
+      try {
+        const clip = useVio ? await window.hannibal.vioClip(clipMs) : tapClip;
+        if (clip && clip.length > 44) {
+          // Short clips: Whisper's language guess goes wild, so use the conversation's language.
+          const lang = cfg.sttLanguage && cfg.sttLanguage !== 'auto' && cfg.sttLanguage !== 'follow' ? cfg.sttLanguage : (LANG_CODE[currentLanguage] || 'en');
+          const r = await fetch(`${cfg.whisperUrl}/transcribe?language=${lang}`, { method: 'POST', body: new Blob([clip], { type: 'audio/wav' }) });
+          heard = (((await r.json()) || {}).transcript || '').trim();
+        }
+      } catch (e) { console.warn('[barge] whisper failed', e && e.message); }
+      finally { bargeBusy--; }
+      if (bargeSession !== session) return;            // already stopped (another check won, or he finished)
+      const d = B.decide(heard, spokenRecent, { mentionsName: window.NameGate && window.NameGate.mentionsName });
+      console.warn(`[barge] heard ${JSON.stringify(heard)} → ${d.barge ? 'STOP' : 'keep talking'} (${d.why})`);
+      if (!d.barge || phase !== 'speaking' || confirmInFlight) return;
+      bargeStop();
+      if (d.stopOnly) { setPhase('idle'); startListening({ conversation: true }); }          // "stop" → quiet, ears open
+      else if (stillTalking) startListening({ conversation: true, fromMark: clipMark });      // he's mid-sentence: hear him out
+      else {
+        // Drop any of his own echo before "Hannibal, ...".
+        const m = window.NameGate && d.why === 'name' ? heard.match(window.NameGate.NAME) : null;
+        const ask = m ? heard.slice(m.index) : heard;
+        transcribeAndRespond(null, fixTranscript(ask)).catch((e) => console.warn('[barge] turn failed', e));
+      }
+    };
+    if (useVio) vioFeed = onFrame;
+    else {
+      const frame = Math.floor(sr * 0.05);
+      bargeTimer = setInterval(() => { if (tap && tap.alive()) onFrame(B.rms(tap.ring.read(tap.mark() - frame))); else stopBargeWatch(); }, 50);
+    }
+  }
+  // Stop talking now: drop the queue, cut the sound, stop Claude's reply.
+  function bargeStop() {
+    stopBargeWatch();
+    bargeCount++;
+    turnSeq++;                                  // anything the old reply still streams is dropped
+    speakQueue.length = 0;
+    streamEnded = true;
+    speaking = false;
+    try { window.hannibal.claudeInterrupt && window.hannibal.claudeInterrupt(); } catch (_) {}
+    if (curSrc) { try { curSrc.stop(); } catch (_) {} }
+    if (vio) { try { window.hannibal.vioStop(); } catch (_) {} }
+    brain.setAmplitude(0);
+    if (lastTaskType) recordInterruption(lastTaskType);   // he learns to keep that kind of answer shorter
+  }
+
   // ── LLM (Ollama, streamed) + SPEAK queue ─────────────────────────────────
   const speakQueue = [];
   let speaking = false;
@@ -2034,7 +2180,11 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   function enqueueSpeak(sentence) {
     const s = sentence.trim();
     if (!s) return;
-    speakQueue.push(s);
+    // Ask for the audio NOW, while earlier sentences are still playing, so there
+    // is no silent gap between sentences (the player awaits these in order).
+    const audio = window.hannibal.tts(s);
+    audio.catch(() => {});
+    speakQueue.push({ text: s, audio });
     if (!speaking) playerRun = runPlayer();
   }
 
@@ -2042,12 +2192,13 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     speaking = true;
     setPhase('speaking');
     if (audioCtx.state === 'suspended') await audioCtx.resume();
+    const seq = turnSeq;                       // a barge-in bumps this: stop at once
     // play while there's work, or while the LLM may still produce more
-    while (speakQueue.length || !streamEnded) {
+    while ((speakQueue.length || !streamEnded) && seq === turnSeq) {
       if (!speakQueue.length) { await sleep(40); continue; }
-      const sentence = speakQueue.shift();
+      const item = speakQueue.shift();
       playingOne = true;
-      try { await speakOne(sentence); }
+      try { await speakOne(item.text, item.audio, seq); }
       catch (e) { console.warn('[voice] tts/play failed', e); }
       finally { playingOne = false; }
     }
@@ -2055,10 +2206,20 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     brain.setAmplitude(0);
   }
 
-  async function speakOne(text) {
-    const bytes = await window.hannibal.tts(text);         // Uint8Array (MP3)
+  async function speakOne(text, prefetched, seq = null) {
+    spokenRecent.push(String(text || '')); if (spokenRecent.length > 3) spokenRecent.shift();
+    const bytes = await (prefetched || window.hannibal.tts(text));   // Uint8Array (MP3)
     const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
     const audioBuf = await audioCtx.decodeAudioData(ab);
+    if (seq !== null && seq !== turnSeq) return;   // Fred cut in while this sentence was loading
+    if (vio) {
+      if (turnEndedAt) { console.warn(`[timing] you stopped talking → his first word: ${Math.round(performance.now() - turnEndedAt)} ms`); turnEndedAt = 0; }
+      const r = await window.hannibal.vioPlay(bytes);
+      brain.setAmplitude(0);
+      if (r && (r.ok || r.stopped)) return;
+      console.warn('[voice] voice helper could not play — using the page:', r && r.error);
+    }
+    if (turnEndedAt) { console.warn(`[timing] you stopped talking → his first word: ${Math.round(performance.now() - turnEndedAt)} ms`); turnEndedAt = 0; }
     await playWithAmplitude(audioBuf);
   }
 
@@ -2081,7 +2242,8 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
         brain.setAmplitude(Math.min(1, rms * 3)); // scale speech RMS into 0..1
         raf = requestAnimationFrame(loop);
       };
-      src.onended = () => { cancelAnimationFrame(raf); brain.setAmplitude(0); resolve(); };
+      src.onended = () => { cancelAnimationFrame(raf); brain.setAmplitude(0); if (curSrc === src) curSrc = null; resolve(); };
+      curSrc = src;
       src.start();
       loop();
     });
@@ -2102,6 +2264,9 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     streamEnded = false;
     speaking = false;
     playerRun = null;
+    const myTurn = ++turnSeq;
+    // After a barge-in this reply is old: whatever it still produces is not spoken.
+    const say = (sentence) => { if (myTurn === turnSeq) enqueueSpeak(sentence); };
 
     // Strip action tags from spoken speech. Catches:
     //  (1) properly-bracketed tags `[TYPE: …]` — original behavior
@@ -2123,7 +2288,7 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     const flushSentences = () => {
       const re = /[^.!?]*[.!?]+/g;
       let consumed = 0, m;
-      while ((m = re.exec(buffer)) !== null) { enqueueSpeak(m[0]); consumed = re.lastIndex; }
+      while ((m = re.exec(buffer)) !== null) { say(m[0]); consumed = re.lastIndex; }
       buffer = buffer.slice(consumed);
     };
 
@@ -2188,13 +2353,14 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
       const spoken = stripActionTags(full);
       const re = /[^.!?]*[.!?]+/g;
       let consumed = 0, m;
-      while ((m = re.exec(spoken)) !== null) { enqueueSpeak(m[0]); consumed = re.lastIndex; }
+      while ((m = re.exec(spoken)) !== null) { say(m[0]); consumed = re.lastIndex; }
       const tail = spoken.slice(consumed).trim();
-      if (tail) enqueueSpeak(tail);
+      if (tail) say(tail);
     } else if (buffer.trim()) {
-      enqueueSpeak(buffer);                    // last partial sentence
+      say(buffer);                    // last partial sentence
     }
     if (gotToken) emitAssistant(stripTags ? stripActionTags(full) : full, true);
+    if (myTurn !== turnSeq) return full;     // cut off by Fred: the new turn owns the player now
     streamEnded = true;
     if (playerRun) await playerRun;            // wait for speech to finish
     return full;
@@ -2202,6 +2368,7 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
 
   async function respond(transcript) {
     const actionTurn = claudeActionTurn;
+    const barges = bargeCount;
     claudeActionTurn = false;
     setPhase('thinking');
     // Multi-model router: simple conversation goes to the fast model; only
@@ -2242,6 +2409,7 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
       } : null,
     });
     if (reply === null) return;                // the action fallback handled the turn
+    if (bargeCount !== barges) return;         // Fred cut in: his new turn is already running
 
     // Store the exchange — fire-and-forget so it never delays the next turn.
     if (qdrantReady && reply && reply.trim()) {
@@ -2840,8 +3008,16 @@ RULES:
     // interrupt to whatever task was talking. This is the primary signal for
     // "response was too long" — at 3 hits per task type, the override flips
     // that task's default length to 'short'.
-    if (phase === 'speaking' && lastTaskType) recordInterruption(lastTaskType);
     unlock();
+    // The wake word while he talks = stop talking and listen (his own voice
+    // never says it, so this one is reliable even over the speakers).
+    if (phase === 'speaking' || speaking) {
+      console.warn('[barge] stopped by the wake word');
+      bargeStop();
+      setPhase('idle');
+      startListening({ conversation: true });
+      return;
+    }
     // Context-aware greeting on wake-from-idle. Suppress on quick re-wakes
     // (within 5 min) so a back-to-back "hey hannibal" doesn't make Hannibal
     // re-greet on every utterance. Greeting is short (1-2 seconds of TTS)
@@ -4012,15 +4188,21 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // system prompt always reflects the language Fred just spoke in. ElevenLabs
 // Daniel + eleven_multilingual_v2 handles Dutch/French pronunciation natively,
 // so no voice/model swap is needed downstream — only the LLM needs the hint.
+// Spanish too (Ibiza): same voice, eleven_multilingual_v2 speaks it natively.
 const DUTCH_WORDS = /\b(het|een|niet|wat|hoe|kan|wil|moet|voor|maar|ook|nog|wel|naar|bij|deze|geen|zijn|hebben|worden|goed|graag|alsjeblieft|vandaag|morgen)\b/i;
 const FRENCH_WORDS = /\b(le|la|les|une|est|pas|pour|que|comment|avec|dans|mais|aussi|faire|cette|sont|peut|tout|bien|merci|aujourd|demain|bonjour)\b/i;
+const SPANISH_WORDS = /(?:\b(?:el|los|las|una|es|está|estoy|están|para|pero|también|hoy|mañana|dónde|donde|cuándo|cuando|cómo|qué|tengo|quiero|puedes|hacer|muy|hola|gracias|favor|buenos|buenas|necesito|ahora|aquí|vamos|del)\b|[ñ¿¡])/i;
 function detectLanguage(text) {
   const t = String(text || '');
   // Global flags via matchAll-style: use a g-version of the same character class.
   const d = (t.match(new RegExp(DUTCH_WORDS.source, 'gi')) || []).length;
   const f = (t.match(new RegExp(FRENCH_WORDS.source, 'gi')) || []).length;
-  if (d > f && d > 0) return 'dutch';
-  if (f > d && f > 0) return 'french';
+  const s = (t.match(new RegExp(SPANISH_WORDS.source, 'gi')) || []).length;
+  const top = Math.max(d, f, s);
+  if (top === 0) return 'english';
+  if (s === top && s > d && s > f) return 'spanish';
+  if (d > f && d >= s) return 'dutch';
+  if (f > d && f >= s) return 'french';
   return 'english';
 }
 

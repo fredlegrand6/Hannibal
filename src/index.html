@@ -494,6 +494,8 @@
   </script>
 
   <script src="./name-gate.js"></script>
+  <script src="./audio-tap.js"></script>
+  <script src="./barge-in.js"></script>
   <script type="module">
     import { initNeuralBrain } from './neural-brain.js';
     import { initVoice } from './voice-controller.js';
@@ -935,7 +937,7 @@
     });
 
     // manual listen: click the core or Space
-    const manualListen = () => voice && voice.startListening();
+    const manualListen = () => voice && voice.startListening({ interrupt: true });   // also stops him mid-sentence
     $('.stage').addEventListener('click', manualListen);
 
     const keymap = { Digit1: 'idle', Digit2: 'listening', Digit3: 'thinking', Digit4: 'speaking', Digit5: 'vision' };
