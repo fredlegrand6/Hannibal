@@ -217,7 +217,10 @@ async function chatTurn({ system, context, user, images }, onText, opts, me) {
   const happened = pendingNotes.length
     ? `Done outside this chat since your last reply (this really happened, count it as your own work):\n${pendingNotes.map((n) => `- ${n}`).join('\n')}`
     : '';
-  pendingNotes = [];
+  // Kept pending until this turn is in the history (a failed, refused or cut-off
+  // turn must not lose the only record of what was done).
+  const carried = pendingNotes.slice();
+  const dropCarried = () => { pendingNotes = pendingNotes.filter((n) => !carried.includes(n)); };
   turn.push({ role: 'system', content: [nowLine, happened, String(context || '').trim()].filter(Boolean).join('\n') });
 
   const useTools = !!runTool && claudeTools.enabled();
@@ -295,6 +298,7 @@ async function chatTurn({ system, context, user, images }, onText, opts, me) {
 
     // Images are only needed for the turn they were shown in; keep history light.
     history.push(...working.map(lightenImages));
+    dropCarried();
     if (history.length > HISTORY_MAX) {
       history = history.slice(-HISTORY_KEEP);
       // must start on a plain user turn (never on a tool result or assistant turn)

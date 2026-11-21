@@ -162,23 +162,20 @@ const SCAN = `on scanForText(parent, target, depth, maxDepth)
   end tell
 end scanForText`;
 
-async function sendWhatsApp({ contact, number, message } = {}, { run = osa, find = findContacts, chatList = null } = {}) {
+async function sendWhatsApp({ contact, number, message } = {}, { run = osa, find = findContacts } = {}) {
   const msg = String(message || '').trim();
   if (!msg) return { ok: false, error: 'no message to send' };
   let name = String(contact || '').trim(), num = normalizeNumber(number);
   if (!num) {
     if (!name) return { ok: false, error: 'who should it go to?' };
     const found = await find(name, { run });
-    const who = found.ok ? resolveRecipient(found.people, name) : found;
+    if (!found.ok) return found;
+    const who = resolveRecipient(found.people, name);
     if (!who.ok) {
-      // Several people match: Fred has to pick. Nobody found: try the chat
-      // list by name, which only sends when a chat really carries that name.
-      if (who.matches || !chatList) return who;
-      const r = await chatList(name, msg);
-      console.log(`[whatsapp] to ${name} via the chat list: ${r.ok ? r.data : r.error}`);
-      if (r.ok) return { ok: true, verified: true, to: name, via: 'chat list' };
-      if (/no chat row matched/i.test(r.error)) return { ok: false, verified: false, error: `${who.error}, and there is no WhatsApp chat called "${name}" either: nothing was sent` };
-      return { ok: false, verified: false, error: `could not confirm it was sent (${r.error}): check WhatsApp before saying it did or didn't go out` };
+      // Never guess by name in WhatsApp's chat list (it can pick the wrong
+      // person). Say why, so Fred can give the number or fix the access.
+      if (found.whatsappUnreadable && !who.matches) who.error += ", and macOS did not let me read WhatsApp's own contacts: allow Hannibal access to other apps' data in System Settings, or give me the number. Nothing was sent";
+      return who;
     }
     name = who.name; num = normalizeNumber(who.number);
   }

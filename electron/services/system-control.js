@@ -351,18 +351,10 @@ function registerControls(ipcMain) {
   // ── WHATSAPP (via Contacts + whatsapp:// link, checked after sending) ──
   const wa = require('./whatsapp');
   ipcMain.handle('contacts:find', (_e, query) => wa.findContacts(query));
-  // When nobody is found by name → number, fall back to opening the chat by its
-  // name in WhatsApp's own chat list (the older sender; it only sends when a
-  // chat row really carries that name, and checks the bubble afterwards).
-  let macControlFn = null;
-  const viaChatList = async (contact, message) => {
-    const r = await macControlFn(null, 'whatsapp-send', JSON.stringify({ contact, message, strict: true }));
-    return r && r.success ? { ok: true, data: r.data } : { ok: false, error: (r && (r.error || r.data)) || 'no result' };
-  };
-  ipcMain.handle('whatsapp:send', (_e, contact, message, number) => wa.sendWhatsApp({ contact, message, number }, { chatList: viaChatList }));
+  ipcMain.handle('whatsapp:send', (_e, contact, message, number) => wa.sendWhatsApp({ contact, message, number }));
 
   // ── MAC SYSTEM CONTROL ──
-  ipcMain.handle('mac-control', macControlFn = (event, action, params) => {
+  ipcMain.handle('mac-control', (event, action, params) => {
     console.log('Mac control:', action, params);
 
     const run = (script) => new Promise((resolve) => {
@@ -860,10 +852,6 @@ tell application "System Events"
       set rowEl to my findRow(window 1, "${firstName}", 0, 18)
     end if
     set rowMatched to "no"
-    if rowEl is missing value and ${p.strict ? 'true' : 'false'} then
-      key code 53
-      return "ERROR: no chat row matched '${name}'"
-    end if
     if rowEl is missing value then
       key code 36
       delay 1.8

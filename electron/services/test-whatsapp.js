@@ -55,18 +55,10 @@ const t = async (name, fn) => { await fn(); n++; console.log('  ok ', name); };
     const none = await wa_.findContacts('Mandy', { run: async () => ({ ok: false, error: 'not allowed -1743' }), whatsapp: async () => wa });
     assert.ok(none.ok && none.people.length === 2, 'WhatsApp still answers when Contacts is blocked');
   });
-  await t('nobody found by name: the chat list is tried, strictly, and the answer is honest', async () => {
-    const nobody = async () => ({ ok: true, people: [], whatsappUnreadable: true });
-    const calls = [];
-    let r = await wa_.sendWhatsApp({ contact: 'Mandy', message: 'test' }, { find: nobody, chatList: async (c, m) => { calls.push([c, m]); return { ok: true, data: 'Sent to Mandy' }; } });
-    assert.ok(r.ok && r.verified && r.via === 'chat list' && calls[0][0] === 'Mandy', JSON.stringify(r));
-    r = await wa_.sendWhatsApp({ contact: 'Mandy', message: 'test' }, { find: nobody, chatList: async () => ({ ok: false, error: "WhatsApp send not confirmed — ERROR: no chat row matched 'Mandy'" }) });
-    assert.ok(!r.ok && /nothing was sent/.test(r.error));
-    r = await wa_.sendWhatsApp({ contact: 'Mandy', message: 'test' }, { find: nobody, chatList: async () => ({ ok: false, error: 'rowMatched=yes verify=NO_TYPE' }) });
-    assert.ok(!r.ok && /could not confirm/.test(r.error) && !/nothing was sent/.test(r.error), 'unsure is not "not sent"');
-    let used = false;
-    r = await wa_.sendWhatsApp({ contact: 'Jay', message: 'x' }, { find: async () => ({ ok: true, people: [{ name: 'Jay A', number: '1' }, { name: 'Jay B', number: '2' }] }), chatList: async () => { used = true; return { ok: true }; } });
-    assert.ok(!r.ok && r.matches && !used, 'two Jays: Fred picks, no fallback guess');
+  await t('nobody found: nothing is sent on a guess, and the reason is honest', async () => {
+    let ran = false;
+    const r = await wa_.sendWhatsApp({ contact: 'Mandy', message: 'test' }, { run: async () => { ran = true; return { ok: true, out: 'SENT' }; }, find: async () => ({ ok: true, people: [], whatsappUnreadable: true }) });
+    assert.ok(!r.ok && !ran && /did not let me read WhatsApp/.test(r.error) && /Nothing was sent/.test(r.error), JSON.stringify(r));
     const unread = await wa_.findContacts('Mandy', { run: async () => ({ ok: true, out: '' }), whatsapp: async () => null });
     assert.ok(unread.ok && unread.whatsappUnreadable, 'says when WhatsApp could not be read');
   });
@@ -74,6 +66,22 @@ const t = async (name, fn) => { await fn(); n++; console.log('  ok ', name); };
     const brain = require('./claude-brain');
     assert.ok(brain.noteEvent('sent a WhatsApp to Mandy: "test", done'));
     assert.ok(!brain.noteEvent('   '));
+  });
+  await t('a failed turn keeps the note for the next one', async () => {
+    const brain = require('./claude-brain');
+    process.env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || 'test';
+    const seen = []; let fail = true;
+    brain._setClient({ beta: { messages: { stream: (req) => { seen.push(JSON.stringify(req.messages)); return { on() {}, abort() {}, finalMessage: async () => { if (fail) { fail = false; throw new Error('overloaded'); } return { content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn', usage: {} }; } }; } } } });
+    brain.resetHistory();
+    brain.noteEvent('sent a WhatsApp to Mandy: "test", done');
+    const quiet = console.log; console.log = () => {};
+    try {
+      await brain.chat({ system: 's', user: 'one' }, () => {});
+      await brain.chat({ system: 's', user: 'two' }, () => {});
+      await brain.chat({ system: 's', user: 'three' }, () => {});
+    } finally { console.log = quiet; }
+    assert.ok(/Done outside this chat/.test(seen[0]) && /Done outside this chat/.test(seen[seen.length - 2]), 'retried after the failure');
+    assert.strictEqual((seen[seen.length - 1].match(/Done outside this chat/g) || []).length, 1, 'kept in history once, not repeated');
   });
   await t('Claude gets contacts.find and whatsapp.send; the question names the number', () => {
     const ct = require('./claude-tools');
