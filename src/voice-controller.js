@@ -427,6 +427,9 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     if (p === 'speaking') startBargeWatch(); else stopBargeWatch();
     // Start Apple's echo cancelling while he thinks, so his first word isn't delayed.
     if (p === 'thinking' && vio) { try { window.hannibal.vioWarm(); } catch (_) {} }
+    // He's done talking: hand the mic back right away (while Apple's echo
+    // cancelling runs, his normal ears hear nothing).
+    if ((p === 'listening' || p === 'idle') && vio) { try { window.hannibal.vioRelease(); } catch (_) {} }
     onPhase && onPhase(p);
   };
 

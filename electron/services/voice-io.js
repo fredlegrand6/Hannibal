@@ -98,6 +98,7 @@ function createVoiceIO({ send = () => {} } = {}) {
 
   function stop() { cmd({ cmd: 'stop' }); }
   function warm() { if (ready) cmd({ cmd: 'warm' }); }
+  function release() { if (ready) cmd({ cmd: 'release' }); }
   function quit() { wanted = false; cmd({ cmd: 'quit' }); setTimeout(() => { try { child && child.kill(); } catch (_) {} }, 500); }
 
   function register(ipcMain) {
@@ -105,10 +106,11 @@ function createVoiceIO({ send = () => {} } = {}) {
     ipcMain.handle('vio:play', async (_e, bytes) => { const j = await play(bytes); return { ok: !j.error, stopped: !!j.stopped, error: j.error }; });
     ipcMain.handle('vio:stop', () => { stop(); return { ok: true }; });
     ipcMain.handle('vio:warm', () => { warm(); return { ok: true }; });
+    ipcMain.handle('vio:release', () => { release(); return { ok: true }; });
     ipcMain.handle('vio:clip', async (_e, ms) => clip(ms));
   }
 
-  return { start, stop, warm, play, clip, quit, register, get ready() { return ready; } };
+  return { start, stop, warm, release, play, clip, quit, register, get ready() { return ready; } };
 }
 
 module.exports = { createVoiceIO, build };

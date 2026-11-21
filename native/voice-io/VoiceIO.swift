@@ -7,8 +7,10 @@
 //
 // Voice processing takes the mic over for the whole Mac while it runs (his normal
 // ears went deaf when it stayed on), so the engine runs ONLY while he speaks:
-// it starts on "warm" (he is thinking) or the first "play", and is torn down
-// IDLE_S after the last sentence finishes.
+// it starts on "warm" (he is thinking) or the first "play", and stops on "release"
+// (the app says he is done) or IDLE_S after the last sentence as a safety net.
+// Tested on Fred's Mac: another mic recorder hears silence while it runs and
+// normal sound again right after it closes.
 //
 // stdin (one JSON per line):
 //   {"cmd":"warm"}                                 → start the engine now (he's about to talk)
@@ -27,7 +29,7 @@ func emit(_ d: [String: Any]) {
   guard let j = try? JSONSerialization.data(withJSONObject: d), let s = String(data: j, encoding: .utf8) else { return }
   lock.lock(); print(s); lock.unlock()
 }
-let IDLE_S = 1.5
+let IDLE_S = 4.0   // safety net; normally the app sends "release" the moment he is done
 
 // ── ears: echo-cancelled mic → 16 kHz mono ring (last 30 s) ──
 let ringRate = 16000.0
@@ -220,6 +222,13 @@ DispatchQueue.global().async {
         session?.player.stop()
         lastActive = Date()
         for p in ids { emit(["ev": "done", "id": p, "stopped": true]) }
+      case "release":
+        // He is done talking: give the mic back to the rest of the Mac at once
+        // (while voice processing runs, every other mic user hears silence).
+        let ids = pending; pending.removeAll()
+        for p in ids { emit(["ev": "done", "id": p, "stopped": true]) }
+        warmUntil = .distantPast
+        closeSession()
       case "clip":
         let ms = (j["ms"] as? Int) ?? Int((j["ms"] as? Double) ?? 2500)
         if let p = writeClip(ms: ms) { emit(["ev": "clip", "id": id, "path": p]) }
