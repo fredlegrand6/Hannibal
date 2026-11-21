@@ -189,17 +189,23 @@ const TOOLS = [
     note: 'Reads local Calendar.app, not Nextcloud. Prefer calendar.events.' },
 
   // ═══════════════════════ MESSAGING ═══════════════════════
+  { name: 'contacts.find', domain: 'messaging',
+    description: "Look someone up in Fred's Contacts: names and phone numbers. Use it before whatsapp.send to get the exact person and number.",
+    params: [{ name: 'query', type: 'string', required: true, desc: 'a name or part of one, e.g. "Jay"' }],
+    side_effect: SIDE_EFFECT.READ, executor: EXECUTOR.MAIN,
+    via: { channel: 'contacts:find' },
+    returns: '{ ok, people:[{ name, number, phones:[{ label, number }] }] }' },
   { name: 'whatsapp.send', domain: 'messaging',
-    description: 'Send a WhatsApp message to a contact via UI scripting.',
+    description: "Send a WhatsApp message from Fred's Mac. Look the person up with contacts.find first and pass their full name and number. Fred always confirms first. If a name matches several people, ask Fred which one; never guess.",
     params: [
-      { name: 'contact', type: 'string', required: true },
-      { name: 'message', type: 'string', required: true },
-    ], side_effect: SIDE_EFFECT.WRITE, confirm: true, planner_safe: false, executor: EXECUTOR.MAIN,
-    via: { channel: 'mac-control', action: 'whatsapp-send' },
-    note: 'KNOWN-WEAK: AppleScript-driving the WhatsApp Catalyst app is brittle — its '
-      + 'a11y tree shifts with chat state (empty chat → no findable composer), localized rows. '
-      + 'planner_safe:false until rebuilt on WhatsApp Web via Playwright (stable DOM composer). '
-      + 'Still callable directly; it now verifies the send and reports honest success/failure.' },
+      { name: 'contact', type: 'string', required: true, desc: 'full name as contacts.find gave it' },
+      { name: 'message', type: 'string', required: true, desc: 'the exact text to send, in Fred\'s voice' },
+      { name: 'number', type: 'string', required: false, desc: 'the number from contacts.find, e.g. "+31612345678"' },
+    ], side_effect: SIDE_EFFECT.WRITE, confirm: true, permission: { ceiling: 'never' }, executor: EXECUTOR.MAIN,
+    via: { channel: 'whatsapp:send' },
+    returns: '{ ok, verified, to, number }',
+    note: 'Opens whatsapp://send?phone=…&text=… (exactly that chat), presses Return, then checks the message shows as sent. '
+      + 'Replaces the old search-box UI scripting, which could open the wrong chat.' },
   { name: 'whatsapp.search', domain: 'messaging',
     description: 'Open WhatsApp and search for a contact (does not send anything).',
     params: [{ name: 'contact', type: 'string', required: true }],
