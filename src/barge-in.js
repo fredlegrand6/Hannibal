@@ -46,17 +46,20 @@
   // level stays above the bar for onsetMs, then 'done' after quietMs of quiet or
   // maxMs of talking. The bar sits well above the room and his own echo.
   function createWatcher({ frameMs = 50, onsetMs = 250, quietMs = 400, maxMs = 2000, minBar = 0.02, factor = 3 } = {}) {
-    let floor = 0, floorN = 0, loud = 0, quiet = 0, active = false, talkMs = 0;
+    let floor = 0, floorN = 0, loud = 0, dip = 0, quiet = 0, active = false, talkMs = 0;
     const bar = () => Math.max(minBar, floor * factor);
     return {
       get active() { return active; },
       get bar() { return bar(); },
       // Learn the level while nobody is talking over him (his echo + the room).
       learn(level) { floorN++; floor += (level - floor) / Math.min(floorN, 40); },
-      reset() { loud = 0; quiet = 0; active = false; talkMs = 0; },
+      reset() { loud = 0; dip = 0; quiet = 0; active = false; talkMs = 0; },
       push(level) {
         if (!active) {
-          if (level > bar()) loud += frameMs; else { loud = 0; this.learn(level); }
+          // Speech has short gaps (and a mic tick can come up empty): a dip under
+          // 150 ms keeps the run going; a longer one starts over.
+          if (level > bar()) { loud += frameMs; dip = 0; }
+          else { dip += frameMs; if (dip > 150) { loud = 0; this.learn(level); } }
           if (loud >= onsetMs) { active = true; talkMs = loud; quiet = 0; return 'onset'; }
           return null;
         }

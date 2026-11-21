@@ -36,6 +36,8 @@ let ringRate = 16000.0
 var ring = [Int16](repeating: 0, count: Int(ringRate * 30))
 var ringTotal = 0
 var micLevel: Float = 0
+var micFresh = false      // a mic buffer arrived since the last level tick
+var lastMic: Float = 0, staleTicks = 0
 func onMic(_ buf: AVAudioPCMBuffer) {
   guard let ch = buf.floatChannelData?[0] else { return }
   let n = Int(buf.frameLength)
@@ -45,7 +47,7 @@ func onMic(_ buf: AVAudioPCMBuffer) {
   let ratio = buf.format.sampleRate / ringRate
   let outN = Int(Double(n) / ratio)
   lock.lock()
-  micLevel = max(micLevel, rms)
+  micLevel = max(micLevel, rms); micFresh = true
   for i in 0..<outN {
     let a = Int(Double(i) * ratio), b = min(n, Int(Double(i + 1) * ratio))
     var s: Float = 0; for j in a..<max(a + 1, b) { s += ch[min(j, n - 1)] }
@@ -149,7 +151,7 @@ func ensureSession() -> Session? {
   do {
     let s = try Session()
     session = s
-    lock.lock(); micLevel = 0; lock.unlock()
+    lock.lock(); micLevel = 0; micFresh = false; lastMic = 0; staleTicks = 0; lock.unlock()
     emit(["ev": "engine", "on": true])
     return s
   } catch {
@@ -166,7 +168,13 @@ func closeSession() {
 // levels every 50 ms while the engine runs; tear it down when he has been quiet IDLE_S
 Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { _ in
   guard let s = session else { return }
-  lock.lock(); let m = micLevel; micLevel = 0; lock.unlock()
+  // The mic delivers buffers of ~100 ms, the ticks are 50 ms: a tick with no new
+  // buffer repeats the last level instead of reporting silence (that made every
+  // other tick 0 and the barge watcher never saw 250 ms of Fred in a row).
+  lock.lock()
+  if micFresh { lastMic = micLevel; staleTicks = 0 } else { staleTicks += 1; if staleTicks > 4 { lastMic = 0 } }
+  let m = lastMic; micLevel = 0; micFresh = false
+  lock.unlock()
   emit(["ev": "level", "mic": Double(m), "out": Double(s.outLevel())])
   if pending.isEmpty && !s.player.isPlaying && Date().timeIntervalSince(lastActive) > IDLE_S && Date() > warmUntil { closeSession() }
 }

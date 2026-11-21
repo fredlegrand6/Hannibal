@@ -2098,14 +2098,14 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
       : { minBar: Number(cfg.bargeMinBar) || 0.006 });
     const session = {};
     bargeSession = session;
-    let frames = 0, onsetAt = 0, onsetMark = 0, peak = 0, lastReport = performance.now();
+    let frames = 0, onsetAt = 0, onsetMark = 0, peak = 0, over = 0, ticks = 0, lastReport = performance.now();
     const onFrame = async (level) => {
       if (bargeSession !== session) return;
       if (phase !== 'speaking' || confirmInFlight) { stopBargeWatch(); return; }
-      peak = Math.max(peak, level);
+      peak = Math.max(peak, level); ticks++; if (level > w.bar) over++;
       if (performance.now() - lastReport > 3000) {   // tuning trace (renderer only forwards warnings)
-        console.warn(`[barge] watching${useVio ? ' (echo-cancelled)' : ''}: mic peak ${peak.toFixed(4)}, bar ${w.bar.toFixed(4)}`);
-        peak = 0; lastReport = performance.now();
+        console.warn(`[barge] watching${useVio ? ' (echo-cancelled)' : ''}: mic peak ${peak.toFixed(4)}, bar ${w.bar.toFixed(4)}, ${over}/${ticks} ticks over`);
+        peak = 0; over = 0; ticks = 0; lastReport = performance.now();
       }
       if (++frames <= 8) { w.learn(level); return; }      // first 0.4 s: learn the room + his echo
       const ev = w.push(level);
