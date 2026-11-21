@@ -729,7 +729,7 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     // Dutch or French just works; HANNIBAL_STT_LANG=en|nl|fr pins one.
     const code = cfg.sttLanguage === 'follow' ? (LANG_CODE[currentLanguage] || 'en') : (cfg.sttLanguage || 'auto');
     if (blob) try {
-      const r = await fetch(`${cfg.whisperUrl}/transcribe?language=${code}`, { method: 'POST', body: blob });
+      const r = await fetch(`${cfg.whisperUrl}/transcribe?language=${code}&hint=${LANG_CODE[currentLanguage] || 'en'}`, { method: 'POST', body: blob });
       const j = await r.json();
       transcript = ((j && j.transcript) || '').trim();
     } catch (e) {

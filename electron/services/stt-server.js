@@ -32,6 +32,21 @@ const FFMPEG = process.env.FFMPEG || '/opt/homebrew/bin/ffmpeg';
 const MODEL_DIR = '/Users/Shared/HoloAssistant/models/whisper';
 const PROMPT = process.env.HANNIBAL_STT_PROMPT || 'Hannibal';
 const ALLOWED_LANGS = new Set(['auto', 'en', 'nl', 'fr', 'de', 'es', 'it', 'pt']);
+// The languages Fred speaks. On 'auto', Whisper may only pick one of these: a
+// guess outside them (Icelandic, Chinese, Korean... from an accent or a noisy
+// room) is redone in the most likely of these. HANNIBAL_STT_LANGS=en,nl,fr,es
+const FRED_LANGS = () => String(process.env.HANNIBAL_STT_LANGS || 'en,nl,fr,es')
+  .split(',').map((x) => x.trim().toLowerCase()).filter((x) => ALLOWED_LANGS.has(x) && x !== 'auto');
+
+// Which of Fred's languages to use, from Whisper's language guess. null = its own guess is fine.
+function pickLanguage(detected, probs, allowed, hint) {
+  const d = String(detected || '').toLowerCase();
+  if (allowed.includes(d)) return null;
+  let best = null; let bestP = -1;
+  for (const l of allowed) { const p = Number((probs || {})[l]); if (p > bestP) { bestP = p; best = l; } }
+  if (best && bestP > 0) return best;
+  return allowed.includes(hint) ? hint : (allowed[0] || 'en');
+}
 
 function log(...a) { try { console.log('[stt]', ...a); } catch (_) {} }
 
@@ -120,22 +135,38 @@ function speakerOk(wav) {
   return r.status !== 1;
 }
 
-async function transcribe(audio, language) {
-  const t0 = Date.now();
-  const wav = await toWav16k(audio);
-  if (wav.length < 16000 + 22400) return { text: '', ms: Date.now() - t0 };     // < ~0.5 s of audio
-  if (!speakerOk(wav)) { log('speaker rejected (not Fred)'); return { text: '', ms: Date.now() - t0 }; }
-  if (!(await waitEngine())) throw new Error('speech engine not ready');
+async function inference(wav, language, verbose) {
   const form = new FormData();
   form.append('file', new Blob([wav], { type: 'audio/wav' }), 'audio.wav');
   form.append('language', language);
   form.append('prompt', PROMPT);
   form.append('temperature', '0.0');
-  form.append('response_format', 'json');
+  form.append('response_format', verbose ? 'verbose_json' : 'json');
   const r = await fetch(`http://127.0.0.1:${ENGINE_PORT}/inference`, { method: 'POST', body: form, signal: AbortSignal.timeout(30000) });
   const j = await r.json().catch(() => ({}));
   if (!r.ok || j.error) throw new Error(j.error || `engine HTTP ${r.status}`);
-  return { text: cleanTranscript(j.text), ms: Date.now() - t0 };
+  return j;
+}
+
+async function transcribe(audio, language, hint) {
+  const t0 = Date.now();
+  const wav = await toWav16k(audio);
+  if (wav.length < 16000 + 22400) return { text: '', ms: Date.now() - t0 };     // < ~0.5 s of audio
+  if (!speakerOk(wav)) { log('speaker rejected (not Fred)'); return { text: '', ms: Date.now() - t0 }; }
+  if (!(await waitEngine())) throw new Error('speech engine not ready');
+  if (language !== 'auto') {
+    const j = await inference(wav, language, false);
+    return { text: cleanTranscript(j.text), ms: Date.now() - t0, language };
+  }
+  const allowed = FRED_LANGS();
+  let j = await inference(wav, 'auto', true);
+  const detected = j.detected_language || j.language;
+  const redo = allowed.length ? pickLanguage(detected, j.language_probabilities, allowed, hint) : null;
+  if (redo) {
+    log(`heard as "${detected}", not one of Fred's languages: redoing in ${redo}`);
+    j = await inference(wav, redo, false);
+  }
+  return { text: cleanTranscript(j.text), ms: Date.now() - t0, language: redo || detected || 'auto' };
 }
 
 function createServer() {
@@ -150,12 +181,13 @@ function createServer() {
     if (req.method !== 'POST' || url.pathname !== '/transcribe') { res.writeHead(404); res.end('Not found'); return; }
     let language = (url.searchParams.get('language') || 'en').toLowerCase().trim();
     if (!ALLOWED_LANGS.has(language)) language = 'en';
+    const hint = (url.searchParams.get('hint') || '').toLowerCase().trim();
     const chunks = [];
     req.on('data', (c) => chunks.push(c));
     req.on('end', async () => {
       try {
-        const { text, ms } = await transcribe(Buffer.concat(chunks), language);
-        log(`✅ Transcript (${ms} ms, ${language}): "${text}"`);
+        const { text, ms, language: used } = await transcribe(Buffer.concat(chunks), language, hint);
+        log(`✅ Transcript (${ms} ms, ${used || language}): "${text}"`);
         send(200, { success: true, transcript: text });
       } catch (e) {
         log('❌', e.message);
@@ -173,4 +205,4 @@ if (require.main === module) {
   process.stdout.on('error', () => {}); process.stderr.on('error', () => {});
 }
 
-module.exports = { pickModel, cleanTranscript };
+module.exports = { pickModel, cleanTranscript, pickLanguage };
