@@ -117,5 +117,71 @@ function fakeIcloud({ status = 207 } = {}) {
     } finally { global.fetch = realFetch; }
   });
 
+  await t('move rewrites only the times (keeps alarm, notes, timezone block) and keeps the length', () => {
+    const { moveEvent } = require('./info-handlers');
+    const ics = ['BEGIN:VCALENDAR', 'BEGIN:VTIMEZONE', 'TZID:Europe/Madrid', 'BEGIN:STANDARD', 'DTSTART:19701025T030000', 'END:STANDARD', 'END:VTIMEZONE',
+      'BEGIN:VEVENT', 'UID:abc', 'DTSTAMP:20261101T000000Z', 'DTSTART;TZID=Europe/Madrid:20261122T110000', 'DTEND;TZID=Europe/Madrid:20261122T113000',
+      'SEQUENCE:2', 'SUMMARY:Call with Jay', 'DESCRIPTION:bring the deck', 'BEGIN:VALARM', 'TRIGGER:-PT15M', 'ACTION:DISPLAY', 'END:VALARM',
+      'END:VEVENT', 'END:VCALENDAR', ''].join('\r\n');
+    const r = moveEvent(ics, { start: '2026-11-23T15:00', now: new Date(2026, 10, 21).getTime() });
+    assert.ok(r.ok, JSON.stringify(r));
+    assert.match(r.when, /Monday 23 November.*15:00 \(30 min\)/);
+    const lines = r.ics.split('\r\n');
+    assert.strictEqual(lines.filter((l) => l.startsWith('DTSTART')).length, 2, 'the timezone block keeps its own DTSTART');
+    assert.ok(lines.includes('DTSTART:19701025T030000'));
+    assert.ok(lines.some((l) => /^DTSTART:20261123T\d{6}Z$/.test(l)));
+    assert.ok(lines.includes('SEQUENCE:3') && lines.includes('DESCRIPTION:bring the deck') && lines.includes('TRIGGER:-PT15M'));
+    assert.ok(!lines.some((l) => l.includes('TZID=Europe/Madrid:2026112')));
+    assert.ok(!moveEvent(ics, { start: '2020-01-01T10:00' }).ok, 'no moving into the past');
+  });
+
+  await t('delete and move find the event by id, check the title, refuse repeating events', async () => {
+    const handlers = {};
+    const ipc = { handle: (ch, fn) => { handlers[ch] = fn; } };
+    const account = { get: async () => ({ kind: 'icloud', auth: 'Basic x', read: [{ url: 'https://c/werk/', name: 'Werk', writable: true }], write: { url: 'https://c/werk/', name: 'Werk' } }), forget: () => {} };
+    const obj = (uid, title, extra = '') => `<response><href>/werk/${uid}.ics</href><propstat><prop><getetag>"e-${uid}"</getetag><C:calendar-data xmlns:C="urn:ietf:params:xml:ns:caldav">BEGIN:VCALENDAR&#13;
+BEGIN:VEVENT&#13;
+UID:${uid}&#13;
+DTSTART:20991122T100000Z&#13;
+DTEND:20991122T110000Z&#13;
+SUMMARY:${title}&#13;
+${extra}END:VEVENT&#13;
+END:VCALENDAR&#13;
+</C:calendar-data></prop></propstat></response>`;
+    const store = { jay: obj('jay', 'Call with Jay'), gym: obj('gym', 'Gym', 'RRULE:FREQ=WEEKLY&#13;\n') };
+    const seen = [];
+    const realFetch = global.fetch;
+    global.fetch = async (url, o) => {
+      seen.push({ url, method: o.method, headers: o.headers, body: o.body });
+      if (o.method === 'REPORT') { const uid = (o.body.match(/i;octet">([^<]+)</) || [])[1]; return { ok: false, status: 207, text: async () => ms(store[uid] || '') }; }
+      return { ok: true, status: 204, text: async () => '' };
+    };
+    try {
+      require('./info-handlers').registerInfo(ipc, { calendarAccount: account, python: 'python3' });
+      let r = await handlers['calendar:delete']({}, 'jay', 'Gym');
+      assert.ok(!r.ok && /belongs to "Call with Jay"/.test(r.error), 'wrong title: nothing deleted');
+      r = await handlers['calendar:delete']({}, 'gym', 'Gym');
+      assert.ok(!r.ok && /repeats/.test(r.error));
+      r = await handlers['calendar:delete']({}, 'nope', 'X');
+      assert.ok(!r.ok && /not in the calendar/.test(r.error));
+      assert.ok(!seen.some((x) => x.method === 'DELETE'));
+      r = await handlers['calendar:delete']({}, 'jay', 'call with jay');
+      assert.ok(r.ok, JSON.stringify(r));
+      const del = seen.find((x) => x.method === 'DELETE');
+      assert.strictEqual(del.url, 'https://c/werk/jay.ics'); assert.strictEqual(del.headers['If-Match'], '"e-jay"');
+      r = await handlers['calendar:move']({}, 'jay', '2099-11-23T15:00', undefined, 'Call with Jay');
+      assert.ok(r.ok, JSON.stringify(r));
+      const put = seen.find((x) => x.method === 'PUT');
+      assert.match(put.body, /DTSTART:2099112\dT\d{6}Z\r\nDTEND:/); assert.match(put.body, /SEQUENCE:1/);
+      assert.match(r.when, /\(60 min\)/);
+    } finally { global.fetch = realFetch; }
+  });
+
+  await t('the questions Fred hears', () => {
+    const { summarizeAction } = require('./agent/executor');
+    assert.match(summarizeAction({ tool: 'calendar.delete' }, { id: 'x', title: 'Call with Jay', when: 'tomorrow 11:00' }), /Delete “Call with Jay” \(tomorrow 11:00\) from your calendar — delete it\?/);
+    assert.match(summarizeAction({ tool: 'calendar.move' }, { id: 'x', title: 'Call with Jay', start: '2026-11-23T15:00' }), /Move “Call with Jay” to Monday 23 November.*15:00 — move it\?/);
+  });
+
   console.log(`caldav: ${n} passed`);
 })().catch((e) => { console.error(e); process.exit(1); });

@@ -3149,10 +3149,10 @@ RULES:
   // is a yes. Silence, a hedge ("uh", "wait"), a half-word, an off-topic phrase,
   // an explicit no, a mic failure, a handler error — every one resolves to NO. A
   // gate that treats ambiguity as approval feels safe while it isn't.
-  const CONFIRM_YES = /^(y|yes|yeah|yep|yup|yes please|ya|ja|jawel|oui|si|sí|sure|ok|okay|do it|send it|send|send that|book it|go|go ahead|confirm|confirmed|approve|approved|affirmative|doe maar|graag)$/i;
+  const CONFIRM_YES = /^(y|yes|yeah|yep|yup|yes please|ya|ja|jawel|oui|si|sí|sure|ok|okay|do it|send it|send|send that|book it|delete it|move it|go|go ahead|confirm|confirmed|approve|approved|affirmative|doe maar|graag)$/i;
   // "Yes, book it, Hannibal" / "okay go ahead please": a clean yes plus only
   // filler that adds no doubt. Anything else after it (", but…", "wait") is not a yes.
-  const YES_WORDS = /^(yes please|yes|yeah|yep|yup|ya|ja|jawel|oui|si|sí|sure|ok|okay|do it|send it|send that|send|book it|go ahead|go|confirm|confirmed|approve|approved|affirmative|doe maar|graag|please|thanks|thank you|hannibal|that's fine|that is fine|fine|perfect|great|good|dank je|merci)(?=\s|$)/i;
+  const YES_WORDS = /^(yes please|yes|yeah|yep|yup|ya|ja|jawel|oui|si|sí|sure|ok|okay|do it|send it|send that|send|book it|delete it|move it|go ahead|go|confirm|confirmed|approve|approved|affirmative|doe maar|graag|please|thanks|thank you|hannibal|that's fine|that is fine|fine|perfect|great|good|dank je|merci)(?=\s|$)/i;
   const YES_FILLER = /^(please|thanks|thank you|hannibal|book it|do it|go ahead|send it|that's fine|that is fine|fine|perfect|great|good|sure|yes|yeah|ok|okay|graag|dank je|merci)$/i;
   const CONFIRM_NO  = /^(n|no|nope|nah|don'?t|do not|stop|cancel|wait|hold on|hold up|never ?mind|negative|nee|non|skip|not now|leave it|abort)$/i;
 
