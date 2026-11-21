@@ -57,6 +57,15 @@ function fakeIcloud({ status = 207 } = {}) {
     assert.strictEqual(a.write.name, 'Home');
   });
 
+  await t('a read-only shared calendar is read but never takes bookings by default', () => {
+    const ro = '<current-user-privilege-set><privilege><read/></privilege></current-user-privilege-set>';
+    const rw = '<current-user-privilege-set><privilege><read/></privilege><privilege><write/></privilege></current-user-privilege-set>';
+    const xml = HOME_LIST.replace('<displayname>Home</displayname>', `<displayname>Home</displayname>${ro}`)
+      .replace('<displayname>Work &amp; Revalis</displayname>', `<displayname>Work &amp; Revalis</displayname>${rw}`);
+    const c = parseCalendars(xml, 'https://p42-caldav.icloud.com/123/calendars/');
+    assert.deepStrictEqual(c.map((x) => [x.name, x.writable]), [['Home', false], ['Work & Revalis', true]]);
+  });
+
   await t('wrong password says so plainly', async () => {
     const a = await createCalendarAccount({ env: { ICLOUD_EMAIL: 'x@y.z', ICLOUD_APP_PW: 'bad' }, fetchImpl: fakeIcloud({ status: 401 }).impl }).get();
     assert.match(a.error, /Apple refused the login/);
@@ -80,20 +89,21 @@ function fakeIcloud({ status = 207 } = {}) {
     };
     const soon = new Date(Date.now() + 3 * 3600 * 1000);
     const z = (d) => d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
-    const ev = (title) => `<cal:calendar-data><![CDATA[BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nDTSTART:${z(soon)}\r\nSUMMARY:${title}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n]]></cal:calendar-data>`;
+    const ev = (title, uid = title) => `<cal:calendar-data><![CDATA[BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:${uid}\r\nDTSTART:${z(soon)}\r\nSUMMARY:${title}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n]]></cal:calendar-data>`;
     const seen = [];
     const realFetch = global.fetch;
     global.fetch = async (url, o) => {
       seen.push({ url, method: o.method, body: o.body });
       if (o.method === 'PUT') return { ok: true, status: 201, text: async () => '' };
-      const body = url.includes('home') ? ev('Dinner with Gaian') + ev('Shared invite') : ev('Shared invite');
+      const body = url.includes('home') ? ev('Dinner with Gaian') + ev('Shared invite') + ev('Appointment', 'a-home') : ev('Shared invite') + ev('Appointment', 'a-work');
       return { ok: false, status: 207, text: async () => ms(`<response><href>/e.ics</href><propstat><prop xmlns:cal="urn:ietf:params:xml:ns:caldav">${body}</prop></propstat></response>`) };
     };
     try {
       require('./info-handlers').registerInfo(ipc, { calendarAccount: account, python: 'python3' });
       const r = await handlers['calendar:events']({}, 2);
       assert.strictEqual(r.ok, true, JSON.stringify(r));
-      assert.deepStrictEqual(r.events.map((e) => e.title).sort(), ['Dinner with Gaian', 'Shared invite']);   // duplicate dropped
+      // the copied invite (same UID) once; two different "Appointment"s at the same time both stay
+      assert.deepStrictEqual(r.events.map((e) => e.title).sort(), ['Appointment', 'Appointment', 'Dinner with Gaian', 'Shared invite']);
       assert.ok(seen.every((s) => /<c:expand /.test(s.body)), 'asks the server to expand recurring events');
       const pad = (x) => String(x).padStart(2, '0');
       const tomorrow = new Date(Date.now() + 24 * 3600 * 1000);

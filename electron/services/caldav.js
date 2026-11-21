@@ -6,7 +6,7 @@
 // Works the same on the Mac and on the always-on server (plain CalDAV).
 //   • reads: every iCloud calendar that holds events (Home, Work, shared ones);
 //   • bookings: ICLOUD_CALENDAR (a calendar's name, e.g. "Home") or else the
-//     first one that can hold events.
+//     first one Fred may write to (not a read-only shared calendar).
 // Otherwise the old Nextcloud settings (NEXTCLOUD_URL/USER/APP_PW/CALENDAR).
 //
 // iCloud has no fixed address per account, so it is discovered once
@@ -39,7 +39,11 @@ function parseCalendars(xml, base) {
     const comps = tag(r, 'supported-calendar-component-set');
     if (comps && !/VEVENT/i.test(comps)) continue;              // reminders/tasks lists
     if (/<[^>]*(schedule-inbox|schedule-outbox)/i.test(type)) continue;
-    out.push({ url: new URL(href, base).toString(), name: unxml(tag(r, 'displayname')) || href.split('/').filter(Boolean).pop() });
+    // Shared read-only calendars stay readable but must not take bookings. No privilege
+    // list at all = the server did not say, assume it is ours.
+    const priv = tag(r, 'current-user-privilege-set');
+    const writable = priv == null || /<(?:[a-z0-9]+:)?(write|write-content|all)\s*\/?>/i.test(priv);
+    out.push({ url: new URL(href, base).toString(), name: unxml(tag(r, 'displayname')) || href.split('/').filter(Boolean).pop(), writable });
   }
   return out;
 }
@@ -65,11 +69,12 @@ function createCalendarAccount({ env = process.env, fetchImpl = (...a) => fetch(
     const home = hrefIn(tag(h.text, 'calendar-home-set'));
     if (!home) throw new Error('iCloud has no calendar home for this account');
     const homeUrl = new URL(home, principalUrl).toString();
-    const l = await propfind(homeUrl, auth, 1, '<d:displayname/><d:resourcetype/><c:supported-calendar-component-set/>');
+    const l = await propfind(homeUrl, auth, 1, '<d:displayname/><d:resourcetype/><c:supported-calendar-component-set/><d:current-user-privilege-set/>');
     const calendars = parseCalendars(l.text, homeUrl);
     if (!calendars.length) throw new Error('no iCloud calendar with events found');
     const want = String(env.ICLOUD_CALENDAR || '').trim().toLowerCase();
-    const write = (want && calendars.find((c) => c.name.toLowerCase() === want)) || calendars[0];
+    const own = calendars.filter((c) => c.writable);
+    const write = (want && calendars.find((c) => c.name.toLowerCase() === want)) || own[0] || calendars[0];
     return { kind: 'icloud', auth, read: calendars, write };
   }
 

@@ -79,6 +79,7 @@ function parseICalEvents(xml, now) {
       .replace(/\r\n[ \t]/g, '').replace(/\n[ \t]/g, '');  // unfold continuation lines
     for (const vevent of ics.split('BEGIN:VEVENT').slice(1)) {
       const body = vevent.split('END:VEVENT')[0];
+      const uid = ((body.match(/(?:^|\n)UID[^:\n]*:(.*)/) || [])[1] || '').trim();
       const summary = (body.match(/\nSUMMARY[^:]*:(.*)/) || body.match(/^SUMMARY[^:]*:(.*)/) || [])[1];
       const dtLine = (body.match(/DTSTART([^:\n]*):([0-9TZ]+)/) || []);
       if (!dtLine[2]) continue;
@@ -95,7 +96,7 @@ function parseICalEvents(xml, now) {
         when = new Date(+v.slice(0, 4), +v.slice(4, 6) - 1, +v.slice(6, 8), +v.slice(9, 11), +v.slice(11, 13));
         time = `${v.slice(9, 11)}:${v.slice(11, 13)}`;
       }
-      events.push({ ts: when.getTime(), time, allDay, title: (summary || '(no title)').trim() });
+      events.push({ ts: when.getTime(), time, allDay, title: (summary || '(no title)').trim(), ...(uid ? { uid } : {}) });
     }
   }
   const todayKey = new Date(now); todayKey.setHours(0, 0, 0, 0);
@@ -141,11 +142,13 @@ async function fetchCalendar(days) {
     console.log('[calendar] caldav failed', failed.join('; '));
     return { ok: false, error: failed[0] };
   }
-  // The same event can sit in two calendars (an invite copied over): keep one.
+  // The same event can sit in two calendars (an invite copied over, same UID): keep one.
+  // Different events that only share a title and time both stay.
   const seen = new Set();
   const list = events.sort((x, y) => x.ts - y.ts).filter((e) => {
-    const k = `${e.ts}|${e.title.toLowerCase()}`; if (seen.has(k)) return false; seen.add(k); return true;
-  });
+    if (!e.uid) return true;
+    const k = `${e.uid}|${e.ts}`; if (seen.has(k)) return false; seen.add(k); return true;
+  }).map(({ uid, ...e }) => e);
   return { ok: true, events: list, ...(failed.length ? { partial: failed } : {}) };
 }
 ipcMain.handle('calendar:events', (_e, days) => fetchCalendar(days));
