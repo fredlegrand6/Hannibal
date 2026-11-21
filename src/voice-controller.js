@@ -401,6 +401,9 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   // Name gate: when Hannibal last spoke, and when the wake word last fired.
   let turnEndedAt = 0;
   let tap = null, turnMark = 0, tapFloor = 0;   // tapFloor: never pre-roll back past this (his own voice, the last turn)
+  // Barge-in (src/barge-in.js): Fred talks over Hannibal → he stops.
+  let bargeTimer = null, bargeBusy = false, bargeCount = 0, turnSeq = 0, curSrc = null;
+  const spokenRecent = [];   // his last few sentences, to tell his own echo from Fred
   let lastSpokeAt = 0;
   let wokeAt = 0;
   const setPhase = (p) => {
@@ -417,6 +420,7 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     // a listening turn (a RESUME also re-arms the sidecar so ongoing speech re-fires START).
     if (p === 'speaking') vadControl('PAUSE');
     else if (p === 'listening') vadControl('RESUME');
+    if (p === 'speaking') startBargeWatch(); else stopBargeWatch();
     onPhase && onPhase(p);
   };
 
@@ -507,7 +511,7 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   }
   calibrateNoiseFloor(); // fire-and-forget; finishes well before the first wake/listen
 
-  async function startListening({ conversation = false } = {}) {
+  async function startListening({ conversation = false, fromMark = 0 } = {}) {
     if (confirmInFlight) return;                                 // gate owns the mic
     if (speaking) return;                                        // never open the mic over Hannibal's own voice
     if (phase === 'listening' || phase === 'thinking') return; // already busy
@@ -528,6 +532,8 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
       return;
     }
     turnMark = tap ? tap.mark() : 0;
+    // Barge-in: Fred is already talking — start the turn where he started.
+    if (fromMark && tap) { turnMark = fromMark; tapFloor = Math.max(0, fromMark - 1); }
 
     const src = tap ? tap.source : audioCtx.createMediaStreamSource(micStream);
     const analyser = audioCtx.createAnalyser();
@@ -702,14 +708,15 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   // its allow-list; unknown values fall back to en. Maps detected names to
   // ISO codes (the heuristic emits 'dutch'/'french'/'english').
   const LANG_CODE = { dutch: 'nl', french: 'fr', english: 'en', spanish: 'es' };
-  async function transcribeAndRespond(blob) {
+  const sttCode = () => (cfg.sttLanguage === 'follow' ? (LANG_CODE[currentLanguage] || 'en') : (cfg.sttLanguage || 'auto'));
+  async function transcribeAndRespond(blob, heardText = null) {
     if (confirmInFlight) return;   // gate is active — this audio is not for chat
     setPhase('thinking');
-    let transcript = '';
+    let transcript = heardText || '';
     // The big Whisper model detects the language itself ('auto'), so switching to
     // Dutch or French just works; HANNIBAL_STT_LANG=en|nl|fr pins one.
     const code = cfg.sttLanguage === 'follow' ? (LANG_CODE[currentLanguage] || 'en') : (cfg.sttLanguage || 'auto');
-    try {
+    if (blob) try {
       const r = await fetch(`${cfg.whisperUrl}/transcribe?language=${code}`, { method: 'POST', body: blob });
       const j = await r.json();
       transcript = ((j && j.transcript) || '').trim();
@@ -2048,6 +2055,58 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     startListening({ conversation: true });
   }
 
+  // ── BARGE-IN ─────────────────────────────────────────────────────────────
+  // While he speaks, the open mic (audio tap) is watched. A sustained jump in
+  // level is sent to Whisper; he stops only when it is Fred (his name, a stop
+  // word, or real words that are not his own echo). HANNIBAL_BARGE_IN=0 = off.
+  function stopBargeWatch() { if (bargeTimer) { clearInterval(bargeTimer); bargeTimer = null; } }
+  function startBargeWatch() {
+    if (bargeTimer || cfg.bargeIn === false || !window.BargeIn || confirmInFlight) return;
+    if (!(tap && tap.alive())) return;
+    const B = window.BargeIn;
+    const sr = tap.ring.sampleRate, frame = Math.floor(sr * 0.05);
+    const w = B.createWatcher();
+    let frames = 0, onsetMark = 0;
+    bargeTimer = setInterval(async () => {
+      if (phase !== 'speaking' || confirmInFlight || !tap || !tap.alive()) { stopBargeWatch(); return; }
+      if (bargeBusy) return;
+      const level = B.rms(tap.ring.read(tap.mark() - frame));
+      if (++frames <= 8) { w.learn(level); return; }      // first 0.4 s: learn the room + his echo
+      const ev = w.push(level);
+      if (ev === 'onset') { onsetMark = Math.max(0, tap.mark() - Math.floor(sr * 0.6)); console.log(`[barge] sound over his voice (level ${level.toFixed(3)}, bar ${w.bar.toFixed(3)})`); return; }
+      if (ev !== 'done' && ev !== 'long') return;
+      bargeBusy = true;
+      const stillTalking = ev === 'long';
+      let heard = '';
+      try {
+        const wav = tap.wav(onsetMark, 0, 0);
+        const r = await fetch(`${cfg.whisperUrl}/transcribe?language=${sttCode()}`, { method: 'POST', body: new Blob([wav], { type: 'audio/wav' }) });
+        heard = (((await r.json()) || {}).transcript || '').trim();
+      } catch (e) { console.warn('[barge] whisper failed', e && e.message); }
+      w.reset(); frames = 0; bargeBusy = false;
+      const d = B.decide(heard, spokenRecent, { mentionsName: window.NameGate && window.NameGate.mentionsName });
+      console.warn(`[barge] heard ${JSON.stringify(heard)} → ${d.barge ? 'STOP' : 'keep talking'} (${d.why})`);
+      if (!d.barge || phase !== 'speaking' || confirmInFlight) return;
+      bargeStop();
+      if (d.stopOnly) { setPhase('idle'); startListening({ conversation: true }); }          // "stop" → quiet, ears open
+      else if (stillTalking) startListening({ conversation: true, fromMark: onsetMark });     // he's mid-sentence: hear him out
+      else transcribeAndRespond(null, fixTranscript(heard)).catch((e) => console.warn('[barge] turn failed', e));
+    }, 50);
+  }
+  // Stop talking now: drop the queue, cut the sound, stop Claude's reply.
+  function bargeStop() {
+    stopBargeWatch();
+    bargeCount++;
+    turnSeq++;                                  // anything the old reply still streams is dropped
+    speakQueue.length = 0;
+    streamEnded = true;
+    speaking = false;
+    try { window.hannibal.claudeInterrupt && window.hannibal.claudeInterrupt(); } catch (_) {}
+    if (curSrc) { try { curSrc.stop(); } catch (_) {} }
+    brain.setAmplitude(0);
+    if (lastTaskType) recordInterruption(lastTaskType);   // he learns to keep that kind of answer shorter
+  }
+
   // ── LLM (Ollama, streamed) + SPEAK queue ─────────────────────────────────
   const speakQueue = [];
   let speaking = false;
@@ -2069,12 +2128,13 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     speaking = true;
     setPhase('speaking');
     if (audioCtx.state === 'suspended') await audioCtx.resume();
+    const seq = turnSeq;                       // a barge-in bumps this: stop at once
     // play while there's work, or while the LLM may still produce more
-    while (speakQueue.length || !streamEnded) {
+    while ((speakQueue.length || !streamEnded) && seq === turnSeq) {
       if (!speakQueue.length) { await sleep(40); continue; }
       const item = speakQueue.shift();
       playingOne = true;
-      try { await speakOne(item.text, item.audio); }
+      try { await speakOne(item.text, item.audio, seq); }
       catch (e) { console.warn('[voice] tts/play failed', e); }
       finally { playingOne = false; }
     }
@@ -2082,10 +2142,12 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     brain.setAmplitude(0);
   }
 
-  async function speakOne(text, prefetched) {
+  async function speakOne(text, prefetched, seq = null) {
+    spokenRecent.push(String(text || '')); if (spokenRecent.length > 3) spokenRecent.shift();
     const bytes = await (prefetched || window.hannibal.tts(text));   // Uint8Array (MP3)
     const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
     const audioBuf = await audioCtx.decodeAudioData(ab);
+    if (seq !== null && seq !== turnSeq) return;   // Fred cut in while this sentence was loading
     if (turnEndedAt) { console.warn(`[timing] you stopped talking → his first word: ${Math.round(performance.now() - turnEndedAt)} ms`); turnEndedAt = 0; }
     await playWithAmplitude(audioBuf);
   }
@@ -2109,7 +2171,8 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
         brain.setAmplitude(Math.min(1, rms * 3)); // scale speech RMS into 0..1
         raf = requestAnimationFrame(loop);
       };
-      src.onended = () => { cancelAnimationFrame(raf); brain.setAmplitude(0); resolve(); };
+      src.onended = () => { cancelAnimationFrame(raf); brain.setAmplitude(0); if (curSrc === src) curSrc = null; resolve(); };
+      curSrc = src;
       src.start();
       loop();
     });
@@ -2130,6 +2193,9 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     streamEnded = false;
     speaking = false;
     playerRun = null;
+    const myTurn = ++turnSeq;
+    // After a barge-in this reply is old: whatever it still produces is not spoken.
+    const say = (sentence) => { if (myTurn === turnSeq) enqueueSpeak(sentence); };
 
     // Strip action tags from spoken speech. Catches:
     //  (1) properly-bracketed tags `[TYPE: …]` — original behavior
@@ -2151,7 +2217,7 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     const flushSentences = () => {
       const re = /[^.!?]*[.!?]+/g;
       let consumed = 0, m;
-      while ((m = re.exec(buffer)) !== null) { enqueueSpeak(m[0]); consumed = re.lastIndex; }
+      while ((m = re.exec(buffer)) !== null) { say(m[0]); consumed = re.lastIndex; }
       buffer = buffer.slice(consumed);
     };
 
@@ -2216,13 +2282,14 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
       const spoken = stripActionTags(full);
       const re = /[^.!?]*[.!?]+/g;
       let consumed = 0, m;
-      while ((m = re.exec(spoken)) !== null) { enqueueSpeak(m[0]); consumed = re.lastIndex; }
+      while ((m = re.exec(spoken)) !== null) { say(m[0]); consumed = re.lastIndex; }
       const tail = spoken.slice(consumed).trim();
-      if (tail) enqueueSpeak(tail);
+      if (tail) say(tail);
     } else if (buffer.trim()) {
-      enqueueSpeak(buffer);                    // last partial sentence
+      say(buffer);                    // last partial sentence
     }
     if (gotToken) emitAssistant(stripTags ? stripActionTags(full) : full, true);
+    if (myTurn !== turnSeq) return full;     // cut off by Fred: the new turn owns the player now
     streamEnded = true;
     if (playerRun) await playerRun;            // wait for speech to finish
     return full;
@@ -2230,6 +2297,7 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
 
   async function respond(transcript) {
     const actionTurn = claudeActionTurn;
+    const barges = bargeCount;
     claudeActionTurn = false;
     setPhase('thinking');
     // Multi-model router: simple conversation goes to the fast model; only
@@ -2270,6 +2338,7 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
       } : null,
     });
     if (reply === null) return;                // the action fallback handled the turn
+    if (bargeCount !== barges) return;         // Fred cut in: his new turn is already running
 
     // Store the exchange — fire-and-forget so it never delays the next turn.
     if (qdrantReady && reply && reply.trim()) {

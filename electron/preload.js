@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld('hannibal', {
     return ipcRenderer.invoke('llm:chat', { ...payload, id })
       .finally(() => ipcRenderer.removeListener('llm:token', onTok));
   },
+  claudeInterrupt: () => ipcRenderer.invoke('llm:interrupt'),  // barge-in: stop the reply in flight
   claudeReset: () => ipcRenderer.invoke('llm:reset'),       // forget the running conversation
   config: () => ipcRenderer.invoke('voice:config'),         // -> { whisperUrl, ollamaUrl, ollamaModel, ... }
   capture: (kind) => ipcRenderer.invoke('voice:capture', kind), // 'screen'|'camera' -> { ok, b64 }

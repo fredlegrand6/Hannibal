@@ -404,6 +404,7 @@ ipcMain.handle('voice:config', () => ({
   alwaysListen: CONFIG.alwaysListen,
   nameGate: CONFIG.nameGate,
   nameFollowUpMs: CONFIG.nameFollowUpMs,
+  bargeIn: process.env.HANNIBAL_BARGE_IN !== '0',   // talk over him to cut him off
   qdrantUrl: CONFIG.qdrantUrl,
   qdrantApiKey: process.env.QDRANT_API_KEY || '',   // Qdrant on GEX131 requires it (api-key header)
   // Chat brain: Claude first (the key stays in main), Ollama on GEX131 as fallback.

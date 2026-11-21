@@ -92,7 +92,25 @@ function chat(payload, onText, opts) {
 
 // opts.runTool overrides the default tool runner for this turn (Telegram uses
 // its own, so confirmations are asked on the phone instead of by voice).
-async function chatOnce({ system, context, user, images }, onText, opts = {}) {
+// Barge-in: Fred talked over Hannibal → stop the running reply right away.
+// The half-said answer is kept in the history (marked as cut off), so the next
+// turn knows where the conversation stopped.
+let running = null;     // { cut, stream } of the turn in flight
+function interrupt() {
+  if (!running) return false;
+  running.cut = true;
+  try { running.stream && running.stream.abort(); } catch (_) {}
+  return true;
+}
+
+async function chatOnce(payload, onText, opts = {}) {
+  const me = { cut: false, stream: null };
+  running = me;
+  try { return await chatTurn(payload, onText, opts, me); }
+  finally { if (running === me) running = null; }
+}
+
+async function chatTurn({ system, context, user, images }, onText, opts, me) {
   const runTool = opts.runTool || runToolImpl;
   if (!enabled()) return { ok: false, error: 'Claude disabled or ANTHROPIC_API_KEY missing' };
   const frames = (Array.isArray(images) ? images : [])
@@ -120,7 +138,8 @@ async function chatOnce({ system, context, user, images }, onText, opts = {}) {
   let lastModel = model();
   try {
     for (let round = 0; ; round++) {
-      const stream = getClient().beta.messages.stream({
+      if (me.cut) throw new Error('interrupted');
+      const stream = me.stream = getClient().beta.messages.stream({
         model: model(),
         max_tokens: maxTokens(),
         output_config: { effort: effort() },
@@ -133,7 +152,7 @@ async function chatOnce({ system, context, user, images }, onText, opts = {}) {
         ...(tools ? { tools } : {}),
         messages: [...history, ...working],
       });
-      stream.on('text', (delta) => { streamed += delta; try { onText && onText(delta); } catch (_) {} });
+      stream.on('text', (delta) => { if (me.cut) return; streamed += delta; try { onText && onText(delta); } catch (_) {} });
       const msg = await stream.finalMessage();
       lastModel = msg.model || lastModel;
       const u = msg.usage || {};
@@ -190,6 +209,12 @@ async function chatOnce({ system, context, user, images }, onText, opts = {}) {
       + `cache_write=${total.cacheWrite} out=${total.output}${toolsUsed.length ? ` tools=${toolsUsed.map((t) => t.tool).join(',')}` : ''}`);
     return { ok: true, text, model: lastModel, toolsUsed, usage: total };
   } catch (e) {
+    if (me.cut) {
+      // Keep the conversation coherent: Fred's question + what Hannibal got out.
+      history.push(lightenImages(turn[0]), { role: 'assistant', content: `${streamed.trim() || '…'} [Fred cut me off here]` });
+      console.log('[claude] reply cut off by Fred (barge-in)');
+      return { ok: true, text: streamed.trim(), interrupted: true, toolsUsed, model: lastModel };
+    }
     const error = describeError(e);
     console.warn('[claude] failed:', error);
     // If an action already ran, say so — the caller must not re-run the request elsewhere.
@@ -207,8 +232,9 @@ function registerClaudeBrain(ipcMain, opts = {}) {
       try { event.sender.send('llm:token', { id, text }); } catch (_) {}
     });
   });
+  ipcMain.handle('llm:interrupt', () => ({ ok: interrupt() }));
   ipcMain.handle('llm:reset', () => { history = []; return { ok: true }; });
 }
 
-module.exports = { registerClaudeBrain, chat, enabled, model, toolsEnabled: () => !!runToolImpl && claudeTools.enabled(),
+module.exports = { registerClaudeBrain, chat, interrupt, enabled, model, toolsEnabled: () => !!runToolImpl && claudeTools.enabled(),
   resetHistory: () => { history = []; }, _setClient: (c) => { client = c; }, _setFactStore: (f) => { factStore = () => f; } };
