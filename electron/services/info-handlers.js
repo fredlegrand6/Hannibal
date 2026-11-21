@@ -202,7 +202,8 @@ async function findEvent(a, id) {
 }
 const sameTitle = (a, b) => {
   const n = (x) => String(x || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
-  return !!n(a) && !!n(b) && (n(a) === n(b) || n(a).includes(n(b)) || n(b).includes(n(a)));
+  // Whole title only: "Call with Jay" must never authorize "Call with Jay and legal".
+  return !!n(a) && n(a) === n(b);
 };
 async function locate(id, title) {
   const a = await calendarAccount.get();
@@ -457,9 +458,28 @@ function moveEvent(ics, { start, minutes, now = Date.now() } = {}) {
   const dur = (String(get('DURATION') || '').match(/PT?(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?/) || []);
   const oldMins = oldStart != null && oldEnd != null ? Math.round((oldEnd - oldStart) / 60000)
     : dur.length ? (+dur[1] || 0) * 1440 + (+dur[2] || 0) * 60 + (+dur[3] || 0) : 60;
-  const fresh = buildEvent({ title: 'x', start, minutes: Number(minutes) || (oldMins > 0 && oldMins < 1440 ? oldMins : 60), now, uid: 'x' });
+  const keep = !(Number(minutes) > 0);         // no new length given → keep the event's own length
+  const fresh = buildEvent({ title: 'x', start, minutes: keep ? (oldMins > 0 && oldMins < 1440 ? oldMins : 60) : minutes, now, uid: 'x' });
   if (!fresh.ok) return fresh;
-  const pick = (k) => fresh.ics.split('\r\n').find((l) => new RegExp(`^${k}[;:]`).test(l));
+  const lines2 = fresh.ics.split('\r\n');
+  if (keep && oldMins > 0) {
+    // Rebuild DTEND from the original span, so a 2-day trip stays 2 days.
+    const ymd = (x) => `${x.getFullYear()}${String(x.getMonth() + 1).padStart(2, '0')}${String(x.getDate()).padStart(2, '0')}`;
+    const s = String(start).trim();
+    const i = lines2.findIndex((l) => /^DTEND[;:]/.test(l));
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+      const days = Math.max(1, Math.round(oldMins / 1440));
+      const [y, m, d] = s.split('-').map(Number);
+      lines2[i] = `DTEND;VALUE=DATE:${ymd(new Date(y, m - 1, d + days))}`;
+      if (days > 1) fresh.when = fresh.when.replace('(all day)', `(${days} days)`);
+    } else if (oldMins >= 1440) {
+      const ms = Date.parse(s) + oldMins * 60000;
+      lines2[i] = `DTEND:${new Date(ms).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '')}`;
+      const h = Math.round(oldMins / 60);
+      fresh.when = fresh.when.replace(/\(\d+ min\)$/, `(${h} hours)`);
+    }
+  }
+  const pick = (k) => lines2.find((l) => new RegExp(`^${k}[;:]`).test(l));
   const utc = new Date(now).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
   const seq = Number((String(get('SEQUENCE') || '').match(/:(\d+)/) || [])[1] || 0) + 1;
   // Top-level VEVENT lines only: an alarm inside keeps its own lines.

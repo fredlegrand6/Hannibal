@@ -136,6 +136,24 @@ function fakeIcloud({ status = 207 } = {}) {
     assert.ok(!moveEvent(ics, { start: '2020-01-01T10:00' }).ok, 'no moving into the past');
   });
 
+  await t('move keeps a multi-day length when no new length is given', () => {
+    const { moveEvent } = require('./info-handlers');
+    const now = new Date(2026, 10, 21).getTime();
+    const wrap = (a, b) => ['BEGIN:VCALENDAR', 'BEGIN:VEVENT', 'UID:t', a, b, 'SUMMARY:Ibiza', 'END:VEVENT', 'END:VCALENDAR', ''].join('\r\n');
+    let r = moveEvent(wrap('DTSTART:20261201T080000Z', 'DTEND:20261203T080000Z'), { start: '2026-12-10T09:00', now });
+    assert.ok(r.ok, JSON.stringify(r));
+    const at = (k) => r.ics.split('\r\n').find((l) => l.startsWith(k));
+    const ms = (l) => { const v = l.split(':')[1]; return Date.UTC(+v.slice(0, 4), +v.slice(4, 6) - 1, +v.slice(6, 8), +v.slice(9, 11), +v.slice(11, 13)); };
+    assert.strictEqual(ms(at('DTEND')) - ms(at('DTSTART')), 48 * 3600000, '48 hours stays 48 hours');
+    assert.match(r.when, /\(48 hours\)/);
+    r = moveEvent(wrap('DTSTART;VALUE=DATE:20261201', 'DTEND;VALUE=DATE:20261204'), { start: '2026-12-10', now });
+    assert.ok(r.ok, JSON.stringify(r));
+    assert.ok(r.ics.includes('DTSTART;VALUE=DATE:20261210') && r.ics.includes('DTEND;VALUE=DATE:20261213'), '3 days stays 3 days');
+    assert.match(r.when, /\(3 days\)/);
+    r = moveEvent(wrap('DTSTART:20261201T080000Z', 'DTEND:20261203T080000Z'), { start: '2026-12-10T09:00', minutes: 30, now });
+    assert.match(r.when, /\(30 min\)/, 'an explicit length still wins');
+  });
+
   await t('delete and move find the event by id, check the title, refuse repeating events', async () => {
     const handlers = {};
     const ipc = { handle: (ch, fn) => { handlers[ch] = fn; } };
@@ -154,6 +172,10 @@ function fakeIcloud({ status = 207 } = {}) {
       require('./info-handlers').registerInfo(ipc, { calendarAccount: account, python: 'python3' });
       let r = await handlers['calendar:delete']({}, '/werk/jay.ics', 'Gym');
       assert.ok(!r.ok && /belongs to "Call with Jay"/.test(r.error), 'wrong title: nothing deleted');
+      r = await handlers['calendar:delete']({}, '/werk/jay.ics', 'Call');
+      assert.ok(!r.ok && /belongs to/.test(r.error), 'part of a title is not enough');
+      r = await handlers['calendar:delete']({}, '/werk/jay.ics', 'Call with Jay and legal');
+      assert.ok(!r.ok, 'a longer title is not enough either');
       r = await handlers['calendar:delete']({}, '/werk/gym.ics', 'Gym');
       assert.ok(!r.ok && /repeats/.test(r.error));
       r = await handlers['calendar:delete']({}, '/werk/nope.ics', 'X');
