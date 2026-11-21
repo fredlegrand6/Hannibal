@@ -74,6 +74,17 @@ ipc.handle('facts:remember', (_e, text, category) => factsChanged(facts.remember
 ipc.handle('facts:forget', (_e, query) => factsChanged(facts.forget(query)));
 ipc.handle('facts:list', (_e, category) => facts.list(category));
 
+// Conversation diary (phone + Telegram here). The server's copy is the master:
+// the desk's episodes are merged in, and every new one goes down to the Mac.
+const { createJournal, registerJournal } = require(path.join(SERVICES, 'conversation-journal'));
+const journal = createJournal({
+  filePath: path.join(CFG.dataDir, 'conversations.json'),
+  summarize: (t, p) => claudeBrain.summarizeForJournal(t, p),
+  onEpisode: (ep) => { if (hub) hub.notify('journal', { episodes: [ep] }); },
+});
+registerJournal(ipc, journal);
+claudeBrain.setJournal(journal, { liveFile: path.join(CFG.dataDir, 'conversation-live.json'), whereName: process.env.HANNIBAL_WHERE || 'phone' });
+
 const reminders = createReminderTools({ filePath: path.join(CFG.dataDir, 'reminders.json') });
 ipc.handle('reminders:add', (_e, message, at) => reminders.add(message, at));
 // Reminders set at the desk live on the Mac: when it is linked, both lists count.
@@ -260,6 +271,13 @@ if (process.env.BODY_LINK_TOKEN) {
         },
         'facts.remember': ({ text, category } = {}) => ({ result: factsChanged(facts.remember(text, category)), facts: facts.all() }),
         'facts.forget': ({ query } = {}) => ({ result: factsChanged(facts.forget(query)), facts: facts.all() }),
+        // Diary: the desk's episodes are merged in; the desk gets them all back.
+        'journal.sync': ({ episodes } = {}) => {
+          const got = journal.merge(episodes);
+          if (got) console.log(`[body] diary: ${got} conversations from the desk`);
+          return { episodes: journal.all() };
+        },
+        'journal.add': ({ episodes } = {}) => { journal.merge(episodes); return { ok: true }; },
         // The desk sends something to Fred's phone (a reminder that fired there).
         'phone.notify': async ({ text, voice } = {}) => { await tellFred(String(text || ''), { voice: !!voice }); return { ok: true }; },
       },
