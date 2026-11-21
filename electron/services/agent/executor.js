@@ -224,6 +224,7 @@ function summarizeAction(step, params) {
   const p = params || {};
   const q = (s) => `“${s}”`;
   switch (step.tool) {
+    case 'notes.remove': return `Remove the note ${q(p.query)} — remove it?`;
     case 'whatsapp.send': return `Send a WhatsApp to ${p.contact}${p.number ? ` (${p.number})` : ''}: ${q(p.message)} — send it?`;
     case 'imessage.send': return `Send an iMessage to ${p.contact || p.number}: ${q(p.message)} — send it?`;
     // mail.send only OPENS a pre-filled compose window (mailto:) — it does not

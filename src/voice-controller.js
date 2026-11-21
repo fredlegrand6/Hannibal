@@ -3602,6 +3602,9 @@ RULES:
     window.hannibal.onProactiveRun((job) => { runProactive(job).catch((e) => console.warn('[proactive] handler', e)); });
   }
   // Claude set or cancelled a reminder in main → pick up the new list.
+  if (window.hannibal && window.hannibal.onNotesChanged) {
+    window.hannibal.onNotesChanged(() => { loadNotes().catch(() => {}); });   // so a voice note never overwrites Claude's
+  }
   if (window.hannibal && window.hannibal.onRemindersChanged) {
     window.hannibal.onRemindersChanged(() => { loadReminders().catch(() => {}); });
   }
