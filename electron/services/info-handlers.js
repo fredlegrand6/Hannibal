@@ -138,7 +138,7 @@ async function fetchCalendar(days) {
   const got = await Promise.allSettled(a.read.map(one));
   const events = got.filter((g) => g.status === 'fulfilled').flatMap((g) => g.value);
   const failed = got.filter((g) => g.status === 'rejected').map((g) => g.reason && g.reason.message);
-  if (!events.length && failed.length) {
+  if (failed.length === got.length) {     // every calendar failed; one odd one (iCloud's read-only "notification" list answers 403) is fine
     console.log('[calendar] caldav failed', failed.join('; '));
     return { ok: false, error: failed[0] };
   }
@@ -149,7 +149,8 @@ async function fetchCalendar(days) {
     if (!e.uid) return true;
     const k = `${e.uid}|${e.ts}`; if (seen.has(k)) return false; seen.add(k); return true;
   }).map(({ uid, ...e }) => e);
-  return { ok: true, events: list, ...(failed.length ? { partial: failed } : {}) };
+  if (failed.length) console.log('[calendar] skipped:', failed.join('; '));
+  return { ok: true, events: list };
 }
 ipcMain.handle('calendar:events', (_e, days) => fetchCalendar(days));
 
