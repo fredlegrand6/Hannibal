@@ -1,6 +1,6 @@
 // ─────────────────────────────────────────────────────────────────────────
 // INFO HANDLERS — the read tools that need no Mac: GEX131 health, calendar
-// (Nextcloud CalDAV), mail (Zoho IMAP via the Python scripts next to this file)
+// (Apple Calendar over CalDAV, see caldav.js), mail (Zoho IMAP via the Python scripts next to this file)
 // and the web (SearXNG search + page fetch). Registered by the desk app
 // (electron/main.js) and by the always-on server (server/hannibal-server.js).
 //   opts: { python, searxngUrl, metricsLocal }
@@ -9,8 +9,10 @@
 
 const { spawn } = require('child_process');
 const path = require('path');
+const { createCalendarAccount } = require('./caldav');
 
 function registerInfo(ipcMain, opts = {}) {
+  const calendarAccount = opts.calendarAccount || createCalendarAccount();
 // ── SYSTEM METRICS: ssh to GEX131, return a raw snapshot for the right-rail gauges.
 // One ssh round-trip returns four @@-delimited sections. CPU% and NET rate are
 // computed in the renderer from deltas between polls (cumulative counters here).
@@ -63,12 +65,12 @@ ipcMain.handle('system:metrics', async () => {
   }
 });
 
-// ── CALENDAR: fetch today+tomorrow's events from Nextcloud over CalDAV. One
+// ── CALENDAR: fetch events from Apple Calendar (or Nextcloud) over CalDAV. One
 // REPORT (calendar-query) with a time-range filter returns matching VEVENTs as
 // raw iCalendar, which we unfold + parse minimally (DTSTART/SUMMARY). Creds live
 // in .env as an app password (never the main account password). ──
 function parseICalEvents(xml, now) {
-  const unesc = (s) => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+  const unesc = (s) => s.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').replace(/&#13;|&#x0?d;/gi, '\r').replace(/&#10;|&#x0?a;/gi, '\n').replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
   const events = [];
   // pull each <...calendar-data>…</…calendar-data> block regardless of ns prefix
   const blocks = xml.match(/<[^>]*calendar-data[^>]*>([\s\S]*?)<\/[^>]*calendar-data>/g) || [];
@@ -77,6 +79,7 @@ function parseICalEvents(xml, now) {
       .replace(/\r\n[ \t]/g, '').replace(/\n[ \t]/g, '');  // unfold continuation lines
     for (const vevent of ics.split('BEGIN:VEVENT').slice(1)) {
       const body = vevent.split('END:VEVENT')[0];
+      const uid = ((body.match(/(?:^|\n)UID[^:\n]*:(.*)/) || [])[1] || '').trim();
       const summary = (body.match(/\nSUMMARY[^:]*:(.*)/) || body.match(/^SUMMARY[^:]*:(.*)/) || [])[1];
       const dtLine = (body.match(/DTSTART([^:\n]*):([0-9TZ]+)/) || []);
       if (!dtLine[2]) continue;
@@ -93,7 +96,7 @@ function parseICalEvents(xml, now) {
         when = new Date(+v.slice(0, 4), +v.slice(4, 6) - 1, +v.slice(6, 8), +v.slice(9, 11), +v.slice(11, 13));
         time = `${v.slice(9, 11)}:${v.slice(11, 13)}`;
       }
-      events.push({ ts: when.getTime(), time, allDay, title: (summary || '(no title)').trim() });
+      events.push({ ts: when.getTime(), time, allDay, title: (summary || '(no title)').trim(), ...(uid ? { uid } : {}) });
     }
   }
   const todayKey = new Date(now); todayKey.setHours(0, 0, 0, 0);
@@ -109,57 +112,64 @@ function parseICalEvents(xml, now) {
     });
 }
 
-// Nextcloud calendar settings (.env): an app password, never the main one.
-function caldav() {
-  const base = (process.env.NEXTCLOUD_URL || '').replace(/\/$/, '');
-  const user = process.env.NEXTCLOUD_USER, pw = process.env.NEXTCLOUD_APP_PW;
-  const cal = process.env.NEXTCLOUD_CALENDAR || 'personal';
-  if (!base || !user || !pw) return null;
-  return { url: `${base}/remote.php/dav/calendars/${encodeURIComponent(user)}/${cal}/`,
-    auth: 'Basic ' + Buffer.from(`${user}:${pw}`).toString('base64') };
-}
-
-// Events from today through `days` days ahead (default 2 = today + tomorrow, max 31).
+// Events from today through `days` days ahead (default 2 = today + tomorrow, max 31),
+// from every calendar of the account (Apple Calendar: Home, Work, shared...).
+// <c:expand> makes the server hand back each repeat of a recurring event.
 async function fetchCalendar(days) {
-  const dav = caldav();
-  if (!dav) return { ok: false, error: 'nextcloud creds missing' };
+  const a = await calendarAccount.get();
+  if (a.error) return { ok: false, error: a.error };
   const n = Math.min(Math.max(Math.round(Number(days) || 2), 1), 31);
   const fmt = (d) => d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
   const now = new Date();
   const start = new Date(now); start.setHours(0, 0, 0, 0);
   const end = new Date(start); end.setDate(end.getDate() + n);
-  const body = `<?xml version="1.0"?><c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><c:calendar-data/></d:prop><c:filter><c:comp-filter name="VCALENDAR"><c:comp-filter name="VEVENT"><c:time-range start="${fmt(start)}" end="${fmt(end)}"/></c:comp-filter></c:comp-filter></c:filter></c:calendar-query>`;
-  try {
-    const res = await fetch(dav.url, {
+  const range = `start="${fmt(start)}" end="${fmt(end)}"`;
+  const body = `<?xml version="1.0"?><c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><c:calendar-data><c:expand ${range}/></c:calendar-data></d:prop><c:filter><c:comp-filter name="VCALENDAR"><c:comp-filter name="VEVENT"><c:time-range ${range}/></c:comp-filter></c:comp-filter></c:filter></c:calendar-query>`;
+  const one = async (cal) => {
+    const res = await fetch(cal.url, {
       method: 'REPORT',
-      headers: { Authorization: dav.auth, Depth: '1', 'Content-Type': 'application/xml' },
-      body, signal: AbortSignal.timeout(10000),
+      headers: { Authorization: a.auth, Depth: '1', 'Content-Type': 'application/xml; charset=utf-8' },
+      body, signal: AbortSignal.timeout(15000),
     });
-    if (!res.ok) return { ok: false, error: `caldav ${res.status}` };
-    return { ok: true, events: parseICalEvents(await res.text(), now) };
-  } catch (e) {
-    console.log('[calendar] caldav failed', e.message);
-    return { ok: false, error: e.message };
+    if (res.status === 401) { calendarAccount.forget(); throw new Error('the calendar login was refused (check the app-specific password)'); }
+    if (!res.ok && res.status !== 207) throw new Error(`caldav ${res.status} on ${cal.name}`);
+    return parseICalEvents(await res.text(), now).map((e) => ({ ...e, calendar: cal.name }));
+  };
+  const got = await Promise.allSettled(a.read.map(one));
+  const events = got.filter((g) => g.status === 'fulfilled').flatMap((g) => g.value);
+  const failed = got.filter((g) => g.status === 'rejected').map((g) => g.reason && g.reason.message);
+  if (!events.length && failed.length) {
+    console.log('[calendar] caldav failed', failed.join('; '));
+    return { ok: false, error: failed[0] };
   }
+  // The same event can sit in two calendars (an invite copied over, same UID): keep one.
+  // Different events that only share a title and time both stay.
+  const seen = new Set();
+  const list = events.sort((x, y) => x.ts - y.ts).filter((e) => {
+    if (!e.uid) return true;
+    const k = `${e.uid}|${e.ts}`; if (seen.has(k)) return false; seen.add(k); return true;
+  }).map(({ uid, ...e }) => e);
+  return { ok: true, events: list, ...(failed.length ? { partial: failed } : {}) };
 }
 ipcMain.handle('calendar:events', (_e, days) => fetchCalendar(days));
 
 // Book an event. Only ever reached after Fred's yes (catalog: confirm, ceiling 'never').
 // start: local "YYYY-MM-DDTHH:MM" (or "YYYY-MM-DD" for all day).
 ipcMain.handle('calendar:add', async (_e, title, start, minutes, location, notes) => {
-  const dav = caldav();
-  if (!dav) return { ok: false, error: 'nextcloud creds missing' };
+  const a = await calendarAccount.get();
+  if (a.error) return { ok: false, error: a.error };
   const ev = buildEvent({ title, start, minutes, location, notes });
   if (!ev.ok) return ev;
   try {
-    const res = await fetch(`${dav.url}${ev.uid}.ics`, {
+    const res = await fetch(`${a.write.url.replace(/\/?$/, '/')}${ev.uid}.ics`, {
       method: 'PUT',
-      headers: { Authorization: dav.auth, 'Content-Type': 'text/calendar; charset=utf-8', 'If-None-Match': '*' },
+      headers: { Authorization: a.auth, 'Content-Type': 'text/calendar; charset=utf-8', 'If-None-Match': '*' },
       body: ev.ics, signal: AbortSignal.timeout(10000),
     });
+    if (res.status === 401) calendarAccount.forget();
     if (!res.ok) return { ok: false, error: `caldav ${res.status}` };
-    console.log(`[calendar] booked "${ev.title}" ${ev.when}`);
-    return { ok: true, title: ev.title, when: ev.when };
+    console.log(`[calendar] booked "${ev.title}" ${ev.when} in ${a.write.name}`);
+    return { ok: true, title: ev.title, when: ev.when, calendar: a.write.name };
   } catch (e) {
     return { ok: false, error: e.message };
   }
