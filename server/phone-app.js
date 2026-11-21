@@ -87,7 +87,7 @@ function createPhoneApp(opts = {}) {
       { runTool: opts.runTool ? (name, input) => opts.runTool(name, input, { confirmer }) : undefined },
     );
     if (r && r.ok && r.text) {
-      if (opts.memory) opts.memory.store(`Fred said (phone app): ${text}\nHannibal replied: ${r.text.slice(0, 500)}`, { type: 'conversation', channel: 'phone-app' }).catch(() => {});
+      if (opts.memory) opts.memory.store(`Fred said (phone app): ${text}\nHannibal replied: ${r.text}`, { type: 'conversation', channel: 'phone-app' }).catch(() => {});
       return { ok: true, reply: r.text, spoken };
     }
     if (r && r.toolsUsed && r.toolsUsed.length) return { ok: false, reply: `I ran ${r.toolsUsed.map((t) => t.tool).join(', ')} but then lost the connection to my brain. Check before asking again.` };

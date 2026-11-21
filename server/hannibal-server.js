@@ -106,6 +106,8 @@ ipc.handle('reminders:upcoming', async () => {
 const memory = createQdrantMemory({ qdrantUrl: CFG.qdrantUrl, ollamaUrl: CFG.ollamaUrl });
 setShim('memory.query', async ({ text, limit = 3 } = {}) =>
   ({ ok: true, results: await memory.search(String(text || ''), Math.min(Number(limit) || 3, 10)) }));
+// Old memories saved cut off mid-sentence: trim them once, shortly after start.
+setTimeout(() => { memory.repairCutReplies().catch(() => {}); }, 60 * 1000).unref();
 
 // Only offer Claude the tools whose handlers exist: the server's own, plus the
 // Mac's while it is linked.

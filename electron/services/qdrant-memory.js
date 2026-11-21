@@ -8,10 +8,12 @@
 //     Hannibal"), overheard songs and rambling, and the old noisy record types
 //     (world-read prices, agent runs, app commands) are not stored;
 //   • DEDUPE: a near-identical memory that is already there is not stored again;
-//   • RECALL is picky: nomic-embed-text scores unrelated text around 0.6, so a
-//     hit must clear MIN_SCORE (default 0.68, MEMORY_MIN_SCORE in .env) and be
-//     close to the best hit. Each line carries its date, so Claude knows how
-//     old it is.
+//   • RECALL finds related memories, not only the same wording. Measured on
+//     Fred's own memories (Nov 2026): a related memory ranks first but scores
+//     only 0.58-0.66 with nomic-embed-text, unrelated questions top out around
+//     0.41-0.53. So a hit must clear MIN_SCORE (default 0.57, MEMORY_MIN_SCORE
+//     in .env), stand out from the crowd (the 20th-best score) and be close to
+//     the best hit. Each line carries its date, so Claude knows how old it is.
 //
 // Lasting facts about Fred's life live in memory-facts.js, not here.
 // Embeddings: Ollama nomic-embed-text. Every call fails soft (never throws).
@@ -22,8 +24,10 @@ const crypto = require('crypto');
 
 const COLLECTION = 'hannibal_memory';
 const EMBED_MODEL = 'nomic-embed-text';
-const DEFAULT_MIN_SCORE = 0.68;  // unrelated text scores ~0.55-0.65 with this model
-const NEAR_TOP = 0.08;           // keep only hits this close to the best one
+const DEFAULT_MIN_SCORE = 0.57;  // related memories score 0.58-0.66; unrelated tops ~0.41-0.53
+const NEAR_TOP = 0.06;           // keep only hits this close to the best one
+const CROWD_AT = 20;             // the n-th best score stands for "everything scores this much"
+const STAND_OUT = 0.07;          // a real hit beats the crowd by at least this much
 const DUPLICATE_SCORE = 0.97;    // this similar to an existing memory = already known
 
 // Record types that are not kept any more (and are left out of recall if old
@@ -35,6 +39,24 @@ const WAKE = /^(hey|hi|ok|okay)?[\s,]*(hannibal|jarvis)\b[\s,.!?]*/i;
 const SMALL_TALK = /^(hey|hi|hello|thanks?|thank you|thank you very much|thanks a lot|ok|okay|yes|yep|yeah|no|nope|sure|cool|nice|lovely|great|perfect|good|good morning|good night|morning|bye|goodbye|please do|go ahead|do it|never mind|how are you|how are you doing|how are you today|you listening|are you there|are you awake)[\s,.!?]*(hannibal|fred|mate)?[\s,.!?]*$/i;
 const MIN_WORDS = 4;
 const MAX_SAID_CHARS = 600;      // longer than this is almost always overheard audio
+const MAX_REPLY_CHARS = 1200;    // Hannibal's side of a stored exchange, cut at a sentence end
+
+// Hannibal's reply as it should be remembered. A reply that fits is kept as
+// it is (it may well end in a link or a list, not a full stop). Too long →
+// up to the last full sentence that fits, then " …"; never mid-word.
+const SENTENCE_END = /[.!?…]["'”’)\]]*(?=\s|$)/g;
+function tidyReply(reply, max = MAX_REPLY_CHARS) {
+  const t = String(reply || '').replace(/[ \t]+/g, ' ').trim();
+  if (t.length <= max) return t;
+  const fit = [...t.matchAll(SENTENCE_END)].map((m) => m.index + m[0].length).filter((e) => e <= max).pop();
+  return `${fit ? t.slice(0, fit) : t.slice(0, max).replace(/\s+\S*$/, '')} …`;
+}
+
+// A stored exchange with Hannibal's side tidied (other texts unchanged).
+function tidyExchange(text, max) {
+  const m = /^([\s\S]*?\n\s*Hannibal (?:replied|did):\s*)([\s\S]*)$/i.exec(String(text || ''));
+  return m ? m[1] + tidyReply(m[2], max) : String(text || '');
+}
 
 // The part Fred said, from a stored exchange ("Fred said (Telegram): …\nHannibal replied: …").
 function fredsPart(text) {
@@ -86,7 +108,7 @@ function createQdrantMemory({
   async function rawSearch(vector, limit, threshold) {
     const r = await fetchImpl(`${base}/collections/${COLLECTION}/points/search`, {
       method: 'POST', headers: qHeaders,
-      body: JSON.stringify({ vector, limit, with_payload: true, score_threshold: threshold, filter: notSkipped }),
+      body: JSON.stringify({ vector, limit, with_payload: true, ...(threshold ? { score_threshold: threshold } : {}), filter: notSkipped }),
       signal: AbortSignal.timeout(5000),
     });
     const j = await r.json();
@@ -103,10 +125,12 @@ function createQdrantMemory({
     const vec = await embed(text);
     if (!vec) return [];
     try {
-      const hits = await rawSearch(vec, limit, minScore);
-      if (!hits.length) return [];
-      const top = hits[0].score;
-      return hits.filter((h) => h.score >= top - NEAR_TOP);
+      const all = await rawSearch(vec, Math.max(CROWD_AT, limit));
+      if (!all.length || all[0].score < minScore) return [];
+      const crowd = all.length >= CROWD_AT ? all[CROWD_AT - 1].score : 0;
+      const top = all[0].score;
+      if (top - crowd < STAND_OUT) return [];
+      return all.filter((h) => h.score >= minScore && h.score >= top - NEAR_TOP).slice(0, limit);
     } catch (e) { log('query failed:', e.message); return []; }
   }
 
@@ -122,6 +146,7 @@ function createQdrantMemory({
   // -> true (stored) | false (skipped or failed).
   async function store(text, metadata = {}) {
     if (!worthRemembering(text, metadata)) return false;
+    text = tidyExchange(text);
     const vec = await embed(text);
     if (!vec) return false;
     try {
@@ -137,7 +162,40 @@ function createQdrantMemory({
     } catch (e) { log('store failed:', e.message); return false; }
   }
 
-  return { recall, search, store, embed };
+  // One-off clean-up: memories saved before replies were tidied end mid-word
+  // (they were cut at 500 characters). Trim them back to the last full
+  // sentence, keep the old text as text_was. Safe to run again. -> how many.
+  async function repairCutReplies() {
+    let fixed = 0; let offset = null;
+    try {
+      do {
+        const r = await fetchImpl(`${base}/collections/${COLLECTION}/points/scroll`, {
+          method: 'POST', headers: qHeaders, signal: AbortSignal.timeout(10000),
+          body: JSON.stringify({ limit: 200, with_payload: true, with_vector: false, ...(offset != null ? { offset } : {}),
+            filter: { must: [{ key: 'type', match: { value: 'conversation' } }] } }),
+        });
+        const j = await r.json();
+        for (const p of (j.result && j.result.points) || []) {
+          const old = String((p.payload && p.payload.text) || '');
+          const reply = (old.split(/\nHannibal replied:\s*/)[1] || '').trim();
+          // Only the old 500-character cut, and only when it really ended mid-sentence.
+          if (reply.length < 495 || reply.length > 500 || /([.!?…]["'”’)\]]*|…)$/.test(reply)) continue;
+          const text = tidyExchange(old, reply.length - 1);
+          if (text === old) continue;
+          await fetchImpl(`${base}/collections/${COLLECTION}/points/payload`, {
+            method: 'POST', headers: qHeaders, signal: AbortSignal.timeout(5000),
+            body: JSON.stringify({ points: [p.id], payload: { text, text_was: old } }),
+          });
+          fixed += 1;
+        }
+        offset = j.result ? j.result.next_page_offset : null;
+      } while (offset != null);
+      if (fixed) log(`repaired ${fixed} memories that ended mid-sentence`);
+    } catch (e) { log('repair failed:', e.message); }
+    return fixed;
+  }
+
+  return { recall, search, store, embed, repairCutReplies };
 }
 
 // memory:store / memory:search for the renderer (the desk voice loop).
@@ -146,4 +204,4 @@ function registerMemoryIpc(ipcMain, memory) {
   ipcMain.handle('memory:search', async (_e, { text, limit } = {}) => memory.search(String(text || ''), Math.min(Number(limit) || 3, 10)));
 }
 
-module.exports = { createQdrantMemory, registerMemoryIpc, worthRemembering, SKIP_TYPES };
+module.exports = { createQdrantMemory, registerMemoryIpc, worthRemembering, tidyReply, tidyExchange, SKIP_TYPES };
