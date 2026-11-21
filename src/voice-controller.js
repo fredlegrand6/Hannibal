@@ -1882,10 +1882,11 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   async function findNote(query) {
     emitModel('system');
     setPhase('thinking');
-    if (!qdrantReady) {
-      // Fallback: substring search on the JSON.
-      const q = String(query || '').toLowerCase();
-      const hit = NOTES.slice().reverse().find((n) => n.text.toLowerCase().includes(q));
+    // The saved notes themselves first (the newest that contains the words):
+    // that also finds notes Claude wrote. Then, if nothing, the memory index.
+    const q = String(query || '').toLowerCase().trim();
+    const hit = q ? NOTES.slice().reverse().find((n) => String(n.text || '').toLowerCase().includes(q)) : null;
+    if (hit || !qdrantReady) {
       if (!hit) await speakLine(`I don't have a note about ${query}.`);
       else await speakLine(hit.text);
       startListening({ conversation: true }); return;
@@ -3603,7 +3604,17 @@ RULES:
   }
   // Claude set or cancelled a reminder in main → pick up the new list.
   if (window.hannibal && window.hannibal.onNotesChanged) {
-    window.hannibal.onNotesChanged(() => { loadNotes().catch(() => {}); });   // so a voice note never overwrites Claude's
+    // Reload so a voice note never overwrites Claude's, and put the new ones in
+    // the memory index too (as addNote does), so "find my note about…" finds them.
+    window.hannibal.onNotesChanged(async () => {
+      const known = new Set(NOTES.map((n) => n.id));
+      await loadNotes().catch(() => {});
+      if (!qdrantReady) return;
+      for (const n of NOTES) {
+        if (known.has(n.id) || !n.text) continue;
+        storeMemory(n.text, cfg.ollamaUrl, { type: 'note', noteId: n.id, timestamp: new Date(n.ts).toISOString() }).catch(() => {});
+      }
+    });
   }
   if (window.hannibal && window.hannibal.onRemindersChanged) {
     window.hannibal.onRemindersChanged(() => { loadReminders().catch(() => {}); });
