@@ -169,7 +169,7 @@ const CONFIG = {
   pythonTTS:  process.env.HANNIBAL_PY      || '/opt/homebrew/bin/python3',     // has `requests`
   pythonWake: process.env.HANNIBAL_PY_WAKE || '/opt/homebrew/bin/python3.12',  // has picovoice
   node:       process.env.HANNIBAL_NODE    || '/opt/homebrew/bin/node',
-  whisperScript: process.env.WHISPER_SCRIPT || '/Users/Shared/HoloAssistant/ui/whisper-server.js',
+  whisperScript: process.env.WHISPER_SCRIPT || path.join(__dirname, 'services', 'stt-server.js'), // Hannibal's own fast ears (whisper.cpp kept loaded on the GPU)
   whisperUrl: process.env.WHISPER_URL || 'http://127.0.0.1:8765',
   ollamaUrl:  process.env.OLLAMA_URL  || 'http://127.0.0.1:11434',
   // Multi-model router: most turns ("how are you") go to a small, instant model;
@@ -305,20 +305,22 @@ ipcMain.on('voice:vad-control', (_e, cmd) => {
   try { vadProc && vadProc.stdin.writable && vadProc.stdin.write(String(cmd) + '\n'); } catch (_) {}
 });
 
-// ── WHISPER: start V1's server (builtin-http, absolute model path) if not up ──
+// ── WHISPER: start Hannibal's speech-to-text server (electron/services/stt-server.js)
+// if not up. It keeps whisper.cpp loaded on the GPU and picks the best model on
+// disk (large-v3-turbo when present). An OLD HoloAssistant server still holding
+// the port is replaced, so the new ears are always the ones used.
 async function ensureWhisper() {
-  const up = await ping(CONFIG.whisperUrl + '/health');
-  if (up) { console.log('[whisper] already running'); return; }
-  // Pass through the multilingual model path so the shared whisper-server
-  // (default = ggml-small.en.bin for legacy callers) runs the Dutch/French-
-  // capable model when launched by Hannibal. Env-overridable.
-  const whisperEnv = {
-    ...process.env,
-    WHISPER_MODEL: process.env.WHISPER_MODEL || '/Users/Shared/HoloAssistant/models/whisper/ggml-small.bin',
-  };
+  const health = await fetch(CONFIG.whisperUrl + '/health', { signal: AbortSignal.timeout(1500) })
+    .then((r) => (r.ok ? r.json().catch(() => ({})) : null)).catch(() => null);
+  if (health && health.engine === 'hannibal-stt') { console.log('[whisper] already running (' + health.model + ')'); return; }
+  if (health) {
+    console.log('[whisper] old speech server on the port — replacing it');
+    try { require('child_process').execSync("pkill -f 'HoloAssistant/ui/whisper-server.js'"); } catch (_) {}
+    await new Promise((r) => setTimeout(r, 800));
+  }
   whisperProc = spawn(CONFIG.node, [CONFIG.whisperScript], {
-    cwd: path.dirname(CONFIG.whisperScript),   // so __dirname helpers resolve
-    env: whisperEnv,
+    cwd: path.dirname(CONFIG.whisperScript),
+    env: process.env,
   });
   whisperProc.stdout.on('data', (d) => console.log('[whisper]', d.toString().trim()));
   whisperProc.stderr.on('data', (d) => console.log('[whisper]', d.toString().trim()));

@@ -399,10 +399,11 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   // the mic isn't reopened mid-remark; the single restOrRearm() at the end reopens.
   let autonomousSpeaking = false;
   // Name gate: when Hannibal last spoke, and when the wake word last fired.
+  let tap = null, turnMark = 0, tapFloor = 0;   // tapFloor: never pre-roll back past this (his own voice, the last turn)
   let lastSpokeAt = 0;
   let wokeAt = 0;
   const setPhase = (p) => {
-    if (phase === 'speaking' && p !== 'speaking') lastSpokeAt = Date.now();
+    if (phase === 'speaking' && p !== 'speaking') { lastSpokeAt = Date.now(); if (tap) tapFloor = tap.mark(); }
     phase = p;
     if (p !== 'listening') restfulListen = false;
     // Resting brain visual: 'vision' while screen-watching, else a steady
@@ -448,6 +449,15 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
 
   // ── LISTEN ──────────────────────────────────────────────────────────────
   let micStream = null, recorder = null, chunks = [], silenceTimer = null, aborted = false;
+  // One mic stream stays open between turns (src/audio-tap.js): no gap while the
+  // mic reopens, and each turn starts a little BEFORE it opened (pre-roll), so
+  // "Hannibal, ..." arrives whole. Falls back to the plain recorder if needed.
+  const micLive = () => !!(micStream && micStream.getTracks().some((t) => t.readyState === 'live'));
+  function releaseMic() {
+    if (tap) { tap.close(); tap = null; }
+    if (micStream) micStream.getTracks().forEach((t) => t.stop());
+    micStream = null;
+  }
   // Confirmation-gate lock. While a "send it?" confirmation is pending, the gate
   // owns the mic exclusively and the entire normal voice loop (wake, listen,
   // STT→chat→memory, typed submit) is suspended — so the spoken yes/no reaches
@@ -506,14 +516,19 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     // speak until real speech begins. Only meaningful in always-listen mode.
     restfulListen = continuousListen;
     try {
-      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (!micLive()) {
+        releaseMic();
+        micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        tap = window.AudioTap ? window.AudioTap.attach(audioCtx, micStream) : null;
+      }
     } catch (e) {
       console.warn('[voice] mic denied/unavailable', e);
       setPhase('idle');
       return;
     }
+    turnMark = tap ? tap.mark() : 0;
 
-    const src = audioCtx.createMediaStreamSource(micStream);
+    const src = tap ? tap.source : audioCtx.createMediaStreamSource(micStream);
     const analyser = audioCtx.createAnalyser();
     analyser.fftSize = 512;
     src.connect(analyser);
@@ -646,14 +661,18 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   async function finishListening() {
     if (silenceTimer) { clearInterval(silenceTimer); silenceTimer = null; }
     vadTurnActive = false;   // stop honoring silero events until the next turn
-    if (micStream) micStream.getTracks().forEach((t) => t.stop());
+    // Keep the mic open between turns in always-listen mode (no gap); otherwise let it go.
+    const useTap = !!(tap && tap.alive());
+    const tapWav = useTap && !aborted && !confirmInFlight ? tap.wav(turnMark, 0.8, tapFloor) : null;
+    if (tap) tapFloor = tap.mark();
+    if (!continuousListen) releaseMic();
     // If a confirmation gate took over mid-capture, drop this audio entirely:
     // no transcription, no chat, no memory, and don't touch the gate's phase.
     if (confirmInFlight) { aborted = false; return; }
     // An autonomous line grabbed the mic (presence/care/reminder) — leave the
     // phase alone; that path will re-arm when it's done speaking.
     if (aborted) { aborted = false; if (autonomousSpeaking) return; restOrRearm(); return; }
-    const blob = new Blob(chunks, { type: 'audio/webm' });
+    const blob = tapWav ? new Blob([tapWav], { type: 'audio/wav' }) : new Blob(chunks, { type: 'audio/webm' });
     if (!blob.size) { restOrRearm(); return; }
     await transcribeAndRespond(blob);
   }
