@@ -174,8 +174,10 @@ ipcMain.handle('calendar:add', async (_e, title, start, minutes, location, notes
     });
     if (res.status === 401) calendarAccount.forget();
     if (!res.ok) return { ok: false, error: `caldav ${res.status}` };
-    console.log(`[calendar] booked "${ev.title}" ${ev.when} in ${a.write.name}`);
-    return { ok: true, title: ev.title, when: ev.when, calendar: a.write.name };
+    const back = await readBack(a, `${a.write.url.replace(/\/?$/, '/')}${ev.uid}.ics`);
+    if (back === null || (back && back.uid !== ev.uid)) return { ok: false, verified: false, error: 'the calendar accepted the booking but it is not there when I look again' };
+    console.log(`[calendar] booked "${ev.title}" ${ev.when} in ${a.write.name}${back ? ' (checked)' : ' (could not check)'}`);
+    return { ok: true, verified: !!back, title: ev.title, when: ev.when, calendar: a.write.name };
   } catch (e) {
     return { ok: false, error: e.message };
   }
@@ -189,6 +191,33 @@ ipcMain.handle('calendar:add', async (_e, title, start, minutes, location, notes
 // The id is the event's address in the calendar (what calendar.events returns).
 // It must sit inside one of Fred's own calendars; the stored event is read back
 // fresh (with its ETag) so a change made meanwhile is never overwritten.
+// Check our own work: read the event back from the calendar after a change.
+// Returns the stored event (describeIcs) or null when it is not there (404).
+// undefined = could not check (network), which is reported as "not verified".
+async function readBack(a, url) {
+  try {
+    const res = await fetch(url, { headers: { Authorization: a.auth }, signal: AbortSignal.timeout(10000) });
+    if (res.status === 404 || res.status === 410) return null;
+    if (!res.ok) return undefined;
+    return describeIcs(await res.text());
+  } catch (_) { return undefined; }
+}
+// The event's own times (start + end/duration), from its top-level VEVENT only:
+// a VTIMEZONE or VALARM block has DTSTARTs of its own that must not count.
+const timesOf = (ics) => {
+  const lines = String(ics || '').replace(/\r?\n[ \t]/g, '').split(/\r?\n/);
+  const out = {}; let depth = 0, inEvent = false;
+  for (const l of lines) {
+    if (l === 'BEGIN:VEVENT' && depth === 1) inEvent = true;   // inside VCALENDAR
+    if (/^BEGIN:/.test(l)) { depth += 1; continue; }
+    if (/^END:/.test(l)) { depth -= 1; if (inEvent && depth === 1) break; continue; }
+    if (!inEvent || depth !== 2) continue;
+    const m = l.match(/^(DTSTART|DTEND|DURATION)[;:]/);
+    if (m) out[m[1]] = l.replace(/^[^:]*:/, '').trim();
+  }
+  return `${out.DTSTART || ''}|${out.DTEND || ''}|${out.DURATION || ''}`;
+};
+
 async function findEvent(a, id) {
   const cal = a.read.find((c) => { try { return new URL(id, c.url).toString().startsWith(c.url); } catch (_) { return false; } });
   if (!cal) return null;
@@ -222,8 +251,10 @@ ipcMain.handle('calendar:delete', async (_e, id, title) => {
   try {
     const res = await fetch(ev.url, { method: 'DELETE', headers: { Authorization: a.auth, ...(ev.etag ? { 'If-Match': ev.etag } : {}) }, signal: AbortSignal.timeout(10000) });
     if (!res.ok && res.status !== 404) return { ok: false, error: `caldav ${res.status}` };
-    console.log(`[calendar] deleted "${ev.title}" (${ev.cal.name})`);
-    return { ok: true, deleted: ev.title, calendar: ev.cal.name };
+    const back = await readBack(a, ev.url);
+    if (back) return { ok: false, verified: false, error: `"${ev.title}" is still in the calendar after deleting it` };
+    console.log(`[calendar] deleted "${ev.title}" (${ev.cal.name})${back === null ? ' (checked)' : ' (could not check)'}`);
+    return { ok: true, verified: back === null, deleted: ev.title, calendar: ev.cal.name };
   } catch (e) { return { ok: false, error: e.message }; }
 });
 
@@ -236,8 +267,11 @@ ipcMain.handle('calendar:move', async (_e, id, start, minutes, title) => {
     const res = await fetch(ev.url, { method: 'PUT', headers: { Authorization: a.auth, 'Content-Type': 'text/calendar; charset=utf-8', ...(ev.etag ? { 'If-Match': ev.etag } : {}) }, body: moved.ics, signal: AbortSignal.timeout(10000) });
     if (res.status === 412) return { ok: false, error: 'the event changed in the meantime: look it up again' };
     if (!res.ok) return { ok: false, error: `caldav ${res.status}` };
-    console.log(`[calendar] moved "${ev.title}" to ${moved.when}`);
-    return { ok: true, title: ev.title, when: moved.when, calendar: ev.cal.name };
+    const back = await readBack(a, ev.url);
+    if (back === null) return { ok: false, verified: false, error: `"${ev.title}" is gone from the calendar after moving it` };
+    if (back && timesOf(back.ics) !== timesOf(moved.ics)) return { ok: false, verified: false, error: `"${ev.title}" still shows its old time or length after moving it` };
+    console.log(`[calendar] moved "${ev.title}" to ${moved.when}${back ? ' (checked)' : ' (could not check)'}`);
+    return { ok: true, verified: !!back, title: ev.title, when: moved.when, calendar: ev.cal.name };
   } catch (e) { return { ok: false, error: e.message }; }
 });
 
