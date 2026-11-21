@@ -211,10 +211,54 @@ function fakeIcloud({ status = 207 } = {}) {
     } finally { global.fetch = realFetch; }
   });
 
+  await t('repeating events: skip or move just one repeat, or delete the whole series, each checked after', async () => {
+    const handlers = {};
+    const ipc = { handle: (ch, fn) => { handlers[ch] = fn; } };
+    const account = { get: async () => ({ kind: 'icloud', auth: 'Basic x', read: [{ url: 'https://c/werk/', name: 'Werk', writable: true }], write: { url: 'https://c/werk/', name: 'Werk' } }), forget: () => {} };
+    const series = (uid, title) => ['BEGIN:VCALENDAR', 'BEGIN:VTIMEZONE', 'TZID:Europe/Madrid', 'BEGIN:STANDARD', 'DTSTART:19701025T030000', 'TZOFFSETFROM:+0200', 'TZOFFSETTO:+0100', 'END:STANDARD', 'END:VTIMEZONE',
+      'BEGIN:VEVENT', `UID:${uid}`, 'DTSTART;TZID=Europe/Madrid:20991103T090000', 'DTEND;TZID=Europe/Madrid:20991103T100000', 'RRULE:FREQ=WEEKLY;BYDAY=TU', `SUMMARY:${title}`,
+      'BEGIN:VALARM', 'TRIGGER:-PT10M', 'ACTION:DISPLAY', 'END:VALARM', 'END:VEVENT', 'END:VCALENDAR', ''].join('\r\n');
+    const store = { '/werk/gym.ics': series('gym', 'Gym'), '/werk/yoga.ics': series('yoga', 'Yoga'), '/werk/team.ics': series('team', 'Team call'), '/werk/stuckgym.ics': series('sg', 'Stuck gym') };
+    const realFetch = global.fetch;
+    global.fetch = async (url, o = {}) => {
+      const path = new URL(url).pathname;
+      if (!o.method || o.method === 'GET') return store[path] ? { ok: true, status: 200, headers: { get: () => '"e"' }, text: async () => store[path] } : { ok: false, status: 404, headers: { get: () => null }, text: async () => '' };
+      if (!path.startsWith('/werk/stuck')) { if (o.method === 'DELETE') delete store[path]; if (o.method === 'PUT') store[path] = o.body; }
+      return { ok: true, status: 204, text: async () => '' };
+    };
+    try {
+      require('./info-handlers').registerInfo(ipc, { calendarAccount: account, python: 'python3' });
+      // 9:00 Madrid on Tuesday 24 Nov 2099 = 08:00 UTC, as calendar.events gives it
+      let r = await handlers['calendar:delete']({}, '/werk/gym.ics', 'Gym', 'Tuesday 24 November 09:00');
+      assert.ok(!r.ok && /only this one|scope/.test(r.error), 'a repeat: Hannibal must say which');
+      r = await handlers['calendar:delete']({}, '/werk/gym.ics', 'Gym', 'x', '20991124T080000Z', 'this');
+      assert.ok(r.ok && r.verified && r.only === 'this one', JSON.stringify(r));
+      assert.ok(store['/werk/gym.ics'].includes('EXDATE;TZID=Europe/Madrid:20991124T090000'));
+      assert.ok(store['/werk/gym.ics'].includes('RRULE:FREQ=WEEKLY') && store['/werk/gym.ics'].includes('TRIGGER:-PT10M'), 'the series and its alarm stay');
+      r = await handlers['calendar:delete']({}, '/werk/gym.ics', 'Gym', 'x', '20991124T100000Z', 'this');
+      assert.ok(!r.ok && /not one of its repeats/.test(r.error), 'a time that is not a repeat is refused');
+      r = await handlers['calendar:move']({}, '/werk/yoga.ics', '2099-11-25T18:00', undefined, 'Yoga', '20991124T080000Z', 'this');
+      assert.ok(r.ok && r.verified && r.only === 'this one', JSON.stringify(r));
+      assert.match(store['/werk/yoga.ics'], /BEGIN:VEVENT\r\nRECURRENCE-ID;TZID=Europe\/Madrid:20991124T090000\r\nDTSTART:2099112\dT\d{6}Z\r\nDTEND:/);
+      assert.strictEqual((store['/werk/yoga.ics'].match(/BEGIN:VEVENT/g) || []).length, 2);
+      r = await handlers['calendar:move']({}, '/werk/yoga.ics', '2099-11-25T19:00', 30, 'Yoga', '20991124T080000Z', 'this');
+      assert.ok(r.ok && (store['/werk/yoga.ics'].match(/BEGIN:VEVENT/g) || []).length === 2, 'moving it again replaces the override');
+      r = await handlers['calendar:move']({}, '/werk/team.ics', '2099-11-25T18:00', undefined, 'Team call', undefined, 'all');
+      assert.ok(!r.ok && /whole repeating series/.test(r.error));
+      r = await handlers['calendar:delete']({}, '/werk/team.ics', 'Team call', 'x', undefined, 'all');
+      assert.ok(r.ok && r.verified && !store['/werk/team.ics'] && r.only === 'the whole series', JSON.stringify(r));
+      r = await handlers['calendar:delete']({}, '/werk/stuckgym.ics', 'Stuck gym', 'x', '20991124T080000Z', 'this');
+      assert.ok(!r.ok && r.verified === false, 'server ignored the skip: ' + JSON.stringify(r));
+    } finally { global.fetch = realFetch; }
+  });
+
   await t('the questions Fred hears', () => {
     const { summarizeAction } = require('./agent/executor');
     assert.match(summarizeAction({ tool: 'calendar.delete' }, { id: 'x', title: 'Call with Jay', when: 'tomorrow 11:00' }), /Delete “Call with Jay” \(tomorrow 11:00\) from your calendar — delete it\?/);
     assert.match(summarizeAction({ tool: 'calendar.move' }, { id: 'x', title: 'Call with Jay', start: '2026-11-23T15:00' }), /Move “Call with Jay” to Monday 23 November.*15:00 — move it\?/);
+    assert.match(summarizeAction({ tool: 'calendar.delete' }, { title: 'Gym', when: 'Tuesday 09:00', scope: 'this', occurrence: 'x' }), /Delete only this one “Gym” \(Tuesday 09:00\); the other repeats stay/);
+    assert.match(summarizeAction({ tool: 'calendar.delete' }, { title: 'Gym', scope: 'all' }), /Delete the whole repeating “Gym”, every time it happens/);
+    assert.match(summarizeAction({ tool: 'calendar.move' }, { title: 'Gym', start: '2026-11-25T18:00', scope: 'this' }), /Move “Gym” \(only this one; the other repeats stay\) to/);
   });
 
   console.log(`caldav: ${n} passed`);
