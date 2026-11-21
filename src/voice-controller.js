@@ -881,11 +881,13 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   // planner_safe:false actions can't be composed into a plan, so they must NEVER
   // go through the agent loop/brain — they stay on the legacy direct tag-loop
   // (which keeps WhatsApp's own confirmation path intact).
+  function isShellAction(t) {
+    return /\b(run|execute)\b.*\b(command|shell|terminal|script)\b/.test((t || '').toLowerCase()); // mac.shell
+  }
   function isDirectOnlyAction(t) {
     const s = (t || '').toLowerCase();
     if (/\bwhats ?app\b/.test(s)) return true;                                   // whatsapp.send
-    if (/\b(run|execute)\b.*\b(command|shell|terminal|script)\b/.test(s)) return true; // mac.shell
-    return false;
+    return isShellAction(s);
   }
 
   // Run a spoken goal through main.js `agent:run` — the SAME entry the console
@@ -962,19 +964,21 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
         lastTaskType = 'chat_agent';
         noteTask(lastTaskType);
         noteActivity();
-        // WhatsApp / shell stay on the legacy direct tag-loop (planner_safe:false).
-        if (isDirectOnlyAction(transcript)) {
-          await agentLoop(transcript);
-          return true;
-        }
         // Claude with tools is the primary brain for actions: hand the turn to
         // respond(), where Claude plans and calls the real tools itself (same
-        // executor + voice gate). The Ollama planner below stays as the fallback
-        // when Claude or its tools are off.
-        if (cfg.claudeEnabled && cfg.claudeTools) {
+        // executor + voice gate). WhatsApp goes here too now: whatsapp.send is a
+        // real tool behind the yes/no gate, and the brain keeps the record, so he
+        // can't later deny a message he sent. The Ollama planner below stays as
+        // the fallback when Claude or its tools are off.
+        if (cfg.claudeEnabled && cfg.claudeTools && !isShellAction(transcript)) {
           console.log('[route] action → Claude with tools');
           claudeActionTurn = true;
           return false;
+        }
+        // Shell (and WhatsApp when Claude is off) stay on the legacy direct tag-loop.
+        if (isDirectOnlyAction(transcript)) {
+          await agentLoop(transcript);
+          return true;
         }
         // Genuine agent-loop goal → the brain (or in-process fallback). The Mac
         // speaks the gate for any confirm:true write, exactly like the console path.
@@ -2641,6 +2645,23 @@ ${dataBlock}`;
   // to the LLM with the tool prompt, executes the [ACTION:...] tags it emits, and —
   // if the model adds [CONTINUE] — re-screenshots and loops up to maxSteps. Speech
   // is de-tagged (stripTags) so tool syntax is never spoken.
+  // The legacy tag loop runs outside Claude's conversation. Note each action it
+  // takes (and how it went) so Claude doesn't later say it never happened.
+  function noteForBrain(request, a, result) {
+    try {
+      if (!window.hannibal || !window.hannibal.claudeNote) return;
+      const data = result && typeof result.data === 'string' ? result.data.slice(0, 120) : '';
+      const how = !result ? 'result unknown'
+        : result.success === false || /^ERROR/i.test(data) ? `failed${result.error ? `: ${result.error}` : data ? `: ${data}` : ''}`
+        : 'done' + (data ? ` (${data})` : '');
+      let what = `${a.type} ${a.action} ${a.params || ''}`.trim();
+      if (a.type === 'WHATSAPP' && a.action === 'send') {
+        try { const p = JSON.parse(a.params); what = `sent a WhatsApp to ${p.contact}: "${p.message}"`; } catch (_) {}
+      }
+      window.hannibal.claudeNote(`Fred asked "${String(request || '').slice(0, 120)}" and you did: ${what}, ${how}.`);
+    } catch (_) {}
+  }
+
   async function agentLoop(userRequest, { withScreenshot, maxSteps = 5 } = {}) {
     setPhase('thinking');
 
@@ -2892,6 +2913,8 @@ RULES:
         let actionResult;
         try { actionResult = await executeAction(a); executedAny = true; }
         catch (e) { console.warn('[agent] action failed:', e.message); }
+        // Tell the brain what this side path did, so the next chat turn knows.
+        noteForBrain(userRequest, a, actionResult);
 
         // ── WhatsApp miss recovery ──
         // The backend whatsapp-send AppleScript returns a SUCCESSFUL result

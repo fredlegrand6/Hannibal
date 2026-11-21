@@ -33,6 +33,7 @@ contextBridge.exposeInMainWorld('hannibal', {
   },
   claudeInterrupt: () => ipcRenderer.invoke('llm:interrupt'),  // barge-in: stop the reply in flight
   claudeReset: () => ipcRenderer.invoke('llm:reset'),       // forget the running conversation
+  claudeNote: (text) => ipcRenderer.invoke('llm:note', text), // tell the brain about something done outside the chat
   config: () => ipcRenderer.invoke('voice:config'),         // -> { whisperUrl, ollamaUrl, ollamaModel, ... }
   capture: (kind) => ipcRenderer.invoke('voice:capture', kind), // 'screen'|'camera' -> { ok, b64 }
   systemMetrics: () => ipcRenderer.invoke('system:metrics'),    // -> { ok, gpu, mem, cpu, net }

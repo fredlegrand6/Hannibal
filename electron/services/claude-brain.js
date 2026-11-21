@@ -56,6 +56,7 @@ const TOOL_GUIDE = `
 You can act, not just talk: the tools let you read Fred's mail and calendar, search the web, work with files, apps, the browser, music, the camera and his Mac. When Fred asks for something done, or for information a tool can get, use the tools instead of guessing — never invent results.
 Reads run immediately. Anything that sends, deletes or changes something is confirmed with Fred by voice automatically before it runs, so do NOT ask him for permission yourself first — just call the tool and the confirmation step asks him. If he declines, accept it and don't retry.
 Check your own work: never tell Fred something is done unless the tool result says ok. Changes come back with "verified": true when the result was read back and confirmed. If it says verified false, or the result is unclear, say plainly that it may not have worked and look again with a read tool (calendar.events, reminders.upcoming) before saying anything more. When Fred asks whether a reminder went off, check reminders.recent instead of guessing.
+Believe Fred about what happened: when he says something already went out or already happened, take his word, say "OK, then it went through" or check with a read tool, and never tell him he is wrong because a lookup came up empty. Some things run outside this chat (they are listed as "Done outside this chat"), so "I have no record of it" is not proof it didn't happen. An empty contacts.find means you could not find the person, not that the person doesn't exist.
 Fred talks to you through speech-to-text, which sometimes mishears (a name as a weekday, the TV as words). When a short answer only makes sense as the reply to the question you just asked, take it that way (after "how is Mandy saved?", "Monday" means "Mandy") and carry on, saying briefly what you understood. Ignore lines that are clearly background noise.
 Eyes: you can see. If Fred asks about anything you'd have to look at — himself, what he's holding or wearing, the room, something he shows you, his screen — call vision__capture (kind "camera", or "screen") and look before answering. Never guess what you can't see; if the image is unclear, say what you can make out and ask him to hold it closer.
 Memory: the saved facts below are things you know for sure. When Fred tells you something lasting — about a person, a project or client, how he likes things done, a decision, a place, a routine — save it with memory__remember as one short self-contained fact (do it quietly, no need to announce it unless he asked you to remember). If a saved fact is wrong or outdated, forget it and save the correct one. When he says "forget that", use memory__forget. Don't save small talk, passing moods or things that only matter right now.
@@ -163,6 +164,20 @@ function chat(payload, onText, opts) {
 // The half-said answer is kept in the history (marked as cut off), so the next
 // turn knows where the conversation stopped.
 let running = null;     // { cut, stream } of the turn in flight
+
+// Things that happened outside this conversation (an older voice command path
+// that sent a WhatsApp, an app opened by a shortcut…). They ride along with the
+// next turn, so Hannibal never denies something he actually did.
+let pendingNotes = [];
+function noteEvent(text) {
+  const t = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 400);
+  if (!t) return false;
+  const d = new Date();
+  const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  pendingNotes.push(`${hm} ${t}`);
+  if (pendingNotes.length > 8) pendingNotes = pendingNotes.slice(-8);
+  return true;
+}
 function interrupt() {
   if (!running) return false;
   running.cut = true;
@@ -199,7 +214,14 @@ async function chatTurn({ system, context, user, images }, onText, opts, me) {
   // persona above and the earlier conversation stay cacheable. The exact local
   // date/time always leads it, so dates ("Thursday", "in 2 hours") resolve right.
   const nowLine = `Now: ${nowStamp()}.`;
-  turn.push({ role: 'system', content: [nowLine, String(context || '').trim()].filter(Boolean).join('\n') });
+  const happened = pendingNotes.length
+    ? `Done outside this chat since your last reply (this really happened, count it as your own work):\n${pendingNotes.map((n) => `- ${n}`).join('\n')}`
+    : '';
+  // Kept pending until this turn is in the history (a failed, refused or cut-off
+  // turn must not lose the only record of what was done).
+  const carried = pendingNotes.slice();
+  const dropCarried = () => { pendingNotes = pendingNotes.filter((n) => !carried.includes(n)); };
+  turn.push({ role: 'system', content: [nowLine, happened, String(context || '').trim()].filter(Boolean).join('\n') });
 
   const useTools = !!runTool && claudeTools.enabled();
   const tools = useTools ? claudeTools.toolDefinitions() : undefined;
@@ -276,6 +298,7 @@ async function chatTurn({ system, context, user, images }, onText, opts, me) {
 
     // Images are only needed for the turn they were shown in; keep history light.
     history.push(...working.map(lightenImages));
+    dropCarried();
     if (history.length > HISTORY_MAX) {
       history = history.slice(-HISTORY_KEEP);
       // must start on a plain user turn (never on a tool result or assistant turn)
@@ -321,8 +344,9 @@ function registerClaudeBrain(ipcMain, opts = {}) {
     });
   });
   ipcMain.handle('llm:interrupt', () => ({ ok: interrupt() }));
+  ipcMain.handle('llm:note', (_e, text) => ({ ok: noteEvent(text) }));
   ipcMain.handle('llm:reset', () => { history = []; saveLive(); return { ok: true }; });
 }
 
-module.exports = { registerClaudeBrain, chat, interrupt, enabled, model, toolsEnabled: () => !!runToolImpl && claudeTools.enabled(),
+module.exports = { registerClaudeBrain, chat, interrupt, noteEvent, enabled, model, toolsEnabled: () => !!runToolImpl && claudeTools.enabled(),
   resetHistory: () => { history = []; saveLive(); }, setJournal, summarizeForJournal, closeEpisode, _setClient: (c) => { client = c; }, _setFactStore: (f) => { factStore = () => f; } };

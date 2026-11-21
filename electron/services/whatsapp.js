@@ -74,7 +74,10 @@ async function findInWhatsApp(query, { query: q2 = sqlite, dir = WA_DIR } = {}) 
     q2(path.join(dir, 'ContactsV2.sqlite'), `select coalesce(nullif(ZFULLNAME,''), trim(coalesce(ZGIVENNAME,'')||' '||coalesce(ZLASTNAME,''))), coalesce(nullif(ZWHATSAPPID,''), ZPHONENUMBER) from ZWAADDRESSBOOKCONTACT where ZFULLNAME like ${like} or ZGIVENNAME like ${like} or ZLASTNAME like ${like} or ZBUSINESSNAME like ${like};`),
     q2(path.join(dir, 'ChatStorage.sqlite'), `select ZPARTNERNAME, ZCONTACTJID from ZWACHATSESSION where ZSESSIONTYPE = 0 and ZCONTACTJID like '%@s.whatsapp.net' and ZPARTNERNAME like ${like};`),
   ]);
-  if (book == null && chats == null) return null;   // WhatsApp's files could not be read
+  if (book == null && chats == null) {               // WhatsApp's files could not be read
+    console.warn('[whatsapp] could not read WhatsApp\'s contact files (macOS may be blocking Hannibal from other apps\' data)');
+    return null;
+  }
   const out = [];
   for (const line of `${book || ''}\n${chats || ''}`.split(/\r?\n/)) {
     const [name, raw] = line.split('\t');
@@ -100,7 +103,9 @@ async function findContacts(query, { run = osa, whatsapp = findInWhatsApp } = {}
   return out
 end tell`);
   const mac = r.ok ? parseContacts(r.out).map((p) => ({ name: p.name, number: pickPhone(p), phones: p.phones, source: 'contacts' })) : [];
-  const wa = (await whatsapp(q).catch(() => null)) || [];
+  const waRaw = await whatsapp(q).catch(() => null);
+  const wa = waRaw || [];
+  const note = waRaw == null ? { whatsappUnreadable: true } : {};
   if (!r.ok && !wa.length) return { ok: false, error: /not allowed|-1743|authoriz/i.test(r.error) ? 'Hannibal is not allowed to read Contacts yet: allow it in System Settings → Privacy & Security → Contacts' : `Contacts: ${r.error}` };
   // One entry per number: the Mac's Contacts first, then WhatsApp's own list.
   const seen = new Set(); const people = [];
@@ -108,7 +113,7 @@ end tell`);
     const key = normalizeNumber(p.number) || `name:${p.name.toLowerCase()}`;
     if (seen.has(key)) continue; seen.add(key); people.push(p);
   }
-  return { ok: true, people };
+  return { ok: true, people, ...note };
 }
 
 // Pick the one person a send goes to, or explain why not.
@@ -166,7 +171,12 @@ async function sendWhatsApp({ contact, number, message } = {}, { run = osa, find
     const found = await find(name, { run });
     if (!found.ok) return found;
     const who = resolveRecipient(found.people, name);
-    if (!who.ok) return who;
+    if (!who.ok) {
+      // Never guess by name in WhatsApp's chat list (it can pick the wrong
+      // person). Say why, so Fred can give the number or fix the access.
+      if (found.whatsappUnreadable && !who.matches) who.error += ", and macOS did not let me read WhatsApp's own contacts: allow Hannibal access to other apps' data in System Settings, or give me the number. Nothing was sent";
+      return who;
+    }
     name = who.name; num = normalizeNumber(who.number);
   }
   if (!/^\d{8,15}$/.test(num)) return { ok: false, error: `"${number || num}" is not a phone number WhatsApp can use` };
