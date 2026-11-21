@@ -13,7 +13,7 @@
 //   • No per-sentence Python VAD: Hannibal's live silero VAD already decided
 //     there was speech. Whisper's own non-speech suppression drops the
 //     "*Multiple people talking*" / "[BLANK_AUDIO]" style lines.
-//   • The prompt "Hannibal" nudges Whisper to spell his name right.
+//   • The prompt (Hannibal and the names Fred says most) nudges Whisper to spell them right.
 //
 // Run: node electron/services/stt-server.js   (main.js starts it)
 // Env: WHISPER_MODEL, STT_PORT (8765), STT_ENGINE_PORT (8767),
@@ -30,7 +30,9 @@ const ENGINE_PORT = Number(process.env.STT_ENGINE_PORT || 8767);
 const BIN = process.env.WHISPER_SERVER_BIN || '/opt/homebrew/bin/whisper-server';
 const FFMPEG = process.env.FFMPEG || '/opt/homebrew/bin/ffmpeg';
 const MODEL_DIR = '/Users/Shared/HoloAssistant/models/whisper';
-const PROMPT = process.env.HANNIBAL_STT_PROMPT || 'Hannibal';
+// The names Fred says most, so Whisper spells them right ("Mandy", not "Monday").
+// Kept short: a long prompt makes Whisper invent those words in a quiet clip.
+const PROMPT = process.env.HANNIBAL_STT_PROMPT || 'Hannibal, Mandy, Jay, Gaian, WhatsApp, Revalis.';
 const ALLOWED_LANGS = new Set(['auto', 'en', 'nl', 'fr', 'de', 'es', 'it', 'pt']);
 // The languages Fred speaks. On 'auto', Whisper may only pick one of these: a
 // guess outside them (Icelandic, Chinese, Korean... from an accent or a noisy
