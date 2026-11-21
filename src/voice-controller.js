@@ -531,6 +531,7 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
         releaseMic();
         micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
         tap = window.AudioTap ? window.AudioTap.attach(audioCtx, micStream) : null;
+        tapFloor = 0;   // a new tap counts samples from zero again
       }
     } catch (e) {
       console.warn('[voice] mic denied/unavailable', e);
@@ -1219,7 +1220,8 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     if (!silent) emitAssistant(text, true);
     lastResponse = String(text || '');
     setPhase('speaking');
-    try { await speakOne(text); } catch (e) { console.warn('[voice] speak failed', e); }
+    // Pass the turn number so a barge-in while this line is still loading drops it.
+    try { await speakOne(text, null, turnSeq); } catch (e) { console.warn('[voice] speak failed', e); }
     brain.setAmplitude(0);
   }
 
