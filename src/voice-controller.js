@@ -3149,10 +3149,10 @@ RULES:
   // is a yes. Silence, a hedge ("uh", "wait"), a half-word, an off-topic phrase,
   // an explicit no, a mic failure, a handler error — every one resolves to NO. A
   // gate that treats ambiguity as approval feels safe while it isn't.
-  const CONFIRM_YES = /^(y|yes|yeah|yep|yup|yes please|ya|ja|jawel|oui|si|sí|sure|ok|okay|do it|send it|send|send that|book it|go|go ahead|confirm|confirmed|approve|approved|affirmative|doe maar|graag)$/i;
+  const CONFIRM_YES = /^(y|yes|yeah|yep|yup|yes please|ya|ja|jawel|oui|si|sí|sure|ok|okay|do it|send it|send|send that|book it|delete it|move it|delete|deleted|delete that|delete it please|remove it|move|moved|move that|book|booked|book that|vas-y|d'accord|supprime|supprime-le|efface|déplace|verwijder|verwijder maar|verwijderen|verplaats|vale|claro|go|go ahead|confirm|confirmed|approve|approved|affirmative|doe maar|graag)$/i;
   // "Yes, book it, Hannibal" / "okay go ahead please": a clean yes plus only
   // filler that adds no doubt. Anything else after it (", but…", "wait") is not a yes.
-  const YES_WORDS = /^(yes please|yes|yeah|yep|yup|ya|ja|jawel|oui|si|sí|sure|ok|okay|do it|send it|send that|send|book it|go ahead|go|confirm|confirmed|approve|approved|affirmative|doe maar|graag|please|thanks|thank you|hannibal|that's fine|that is fine|fine|perfect|great|good|dank je|merci)(?=\s|$)/i;
+  const YES_WORDS = /^(yes please|yes|yeah|yep|yup|ya|ja|jawel|oui|si|sí|sure|ok|okay|do it|send it|send that|send|book it|delete it|move it|delete it please|delete that|deleted|delete|remove it|move that|moved|move|book that|booked|book|vas-y|d'accord|supprime|supprime-le|efface|déplace|verwijder maar|verwijderen|verwijder|verplaats|vale|claro|go ahead|go|confirm|confirmed|approve|approved|affirmative|doe maar|graag|please|thanks|thank you|hannibal|that's fine|that is fine|fine|perfect|great|good|dank je|merci)(?=\s|$)/i;
   const YES_FILLER = /^(please|thanks|thank you|hannibal|book it|do it|go ahead|send it|that's fine|that is fine|fine|perfect|great|good|sure|yes|yeah|ok|okay|graag|dank je|merci)$/i;
   const CONFIRM_NO  = /^(n|no|nope|nah|don'?t|do not|stop|cancel|wait|hold on|hold up|never ?mind|negative|nee|non|skip|not now|leave it|abort)$/i;
 
@@ -3215,13 +3215,22 @@ RULES:
       const release = Math.max(SILENCE_THRESH, noiseFloor + NOISE_RELEASE_MARGIN);
       const HARD_CAP_MS = windowMs + 6000;
       const t0 = performance.now(); let lastLoud = t0, streak = 0, heard = false;
+      // The room right now can be louder than when it was calibrated (music, a
+      // fan, the TV). Learn it from the moments before Fred speaks, and also call
+      // it "quiet" once the level falls well under his own speaking level, so the
+      // answer ends on his pause instead of running into the time cap.
+      const pre = []; let speechSum = 0, speechN = 0;
       timer = setInterval(() => {
         analyser.getByteFrequencyData(freq);
         let sum = 0; for (let i = 0; i < freq.length; i++) sum += freq[i];
         const avg = sum / freq.length, now = performance.now();
         if (avg >= onset) streak++; else streak = 0;
-        if (avg > release) lastLoud = now;
         if (streak >= SPEECH_ONSET_SAMPLES) heard = true;
+        if (!heard) { pre.push(avg); if (pre.length > 30) pre.shift(); }
+        else if (avg >= onset) { speechSum += avg; speechN++; }
+        const room = pre.length ? [...pre].sort((x, y) => x - y)[Math.floor(pre.length / 2)] : 0;
+        const quietBelow = Math.max(release, room + NOISE_RELEASE_MARGIN, speechN ? (speechSum / speechN) * 0.55 : 0);
+        if (avg > quietBelow) lastLoud = now;
         if (now - t0 > HARD_CAP_MS) { console.warn('[gate] answer capture hit the time cap'); stop(); return; }
         if (!heard) { if (now - t0 > windowMs) stop(); return; }  // no speech in window → NO
         if (now - lastLoud > Math.min(SILENCE_MS, 1500)) stop();  // trailing pause → answer done

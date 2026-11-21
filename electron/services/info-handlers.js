@@ -133,7 +133,12 @@ async function fetchCalendar(days) {
     });
     if (res.status === 401) { calendarAccount.forget(); throw new Error('the calendar login was refused (check the app-specific password)'); }
     if (!res.ok && res.status !== 207) throw new Error(`caldav ${res.status} on ${cal.name}`);
-    return parseICalEvents(await res.text(), now).map((e) => ({ ...e, calendar: cal.name }));
+    // One <response> per stored event: keep its address, so delete/move can reach it.
+    const xml = await res.text();
+    return String(xml).split(/<(?:[a-z0-9]+:)?response[\s>]/i).slice(1).flatMap((block) => {
+      const href = ((block.match(/<(?:[a-z0-9]+:)?href[^>]*>([\s\S]*?)<\//i) || [])[1] || '').trim();
+      return parseICalEvents(block, now).map((e) => ({ ...e, calendar: cal.name, ...(href ? { href } : {}) }));
+    });
   };
   const got = await Promise.allSettled(a.read.map(one));
   const events = got.filter((g) => g.status === 'fulfilled').flatMap((g) => g.value);
@@ -148,7 +153,7 @@ async function fetchCalendar(days) {
   const list = events.sort((x, y) => x.ts - y.ts).filter((e) => {
     if (!e.uid) return true;
     const k = `${e.uid}|${e.ts}`; if (seen.has(k)) return false; seen.add(k); return true;
-  }).map(({ uid, ...e }) => e);
+  }).map(({ uid, href, ...e }) => (href ? { ...e, id: href } : e));
   if (failed.length) console.log('[calendar] skipped:', failed.join('; '));
   return { ok: true, events: list };
 }
@@ -174,6 +179,66 @@ ipcMain.handle('calendar:add', async (_e, title, start, minutes, location, notes
   } catch (e) {
     return { ok: false, error: e.message };
   }
+});
+
+// ── DELETE / MOVE an existing event. Only ever reached after Fred's yes (catalog:
+// confirm, ceiling 'never'). The event is found by its id (the UID that
+// calendar.events returns) and must carry the title Claude named in the
+// question Fred said yes to, so a mixed-up id can never touch another event.
+// Repeating events are left alone: changing one would change the whole series.
+// The id is the event's address in the calendar (what calendar.events returns).
+// It must sit inside one of Fred's own calendars; the stored event is read back
+// fresh (with its ETag) so a change made meanwhile is never overwritten.
+async function findEvent(a, id) {
+  const cal = a.read.find((c) => { try { return new URL(id, c.url).toString().startsWith(c.url); } catch (_) { return false; } });
+  if (!cal) return null;
+  const url = new URL(id, cal.url).toString();
+  try {
+    const res = await fetch(url, { headers: { Authorization: a.auth }, signal: AbortSignal.timeout(10000) });
+    if (!res.ok) return null;
+    const ev = describeIcs(await res.text());
+    return ev.uid ? { ...ev, etag: res.headers.get('etag'), cal, url } : null;
+  } catch (_) { return null; }
+}
+const sameTitle = (a, b) => {
+  const n = (x) => String(x || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  // Whole title only: "Call with Jay" must never authorize "Call with Jay and legal".
+  return !!n(a) && n(a) === n(b);
+};
+async function locate(id, title) {
+  const a = await calendarAccount.get();
+  if (a.error) return { error: a.error };
+  const ev = await findEvent(a, String(id || '').trim());
+  if (!ev) return { error: 'that event is not in the calendar any more (check calendar.events for its id)' };
+  if (title && !sameTitle(ev.title, title)) return { error: `that id belongs to "${ev.title}", not "${title}": nothing changed` };
+  if (ev.recurring) return { error: `"${ev.title}" repeats; Hannibal does not change repeating events yet, so Fred should change it in the Calendar app` };
+  if (ev.cal.writable === false) return { error: `"${ev.title}" is in ${ev.cal.name}, a calendar Fred can only read` };
+  return { a, ev };
+}
+
+ipcMain.handle('calendar:delete', async (_e, id, title) => {
+  const { a, ev, error } = await locate(id, title);
+  if (error) return { ok: false, error };
+  try {
+    const res = await fetch(ev.url, { method: 'DELETE', headers: { Authorization: a.auth, ...(ev.etag ? { 'If-Match': ev.etag } : {}) }, signal: AbortSignal.timeout(10000) });
+    if (!res.ok && res.status !== 404) return { ok: false, error: `caldav ${res.status}` };
+    console.log(`[calendar] deleted "${ev.title}" (${ev.cal.name})`);
+    return { ok: true, deleted: ev.title, calendar: ev.cal.name };
+  } catch (e) { return { ok: false, error: e.message }; }
+});
+
+ipcMain.handle('calendar:move', async (_e, id, start, minutes, title) => {
+  const { a, ev, error } = await locate(id, title);
+  if (error) return { ok: false, error };
+  const moved = moveEvent(ev.ics, { start, minutes });
+  if (!moved.ok) return moved;
+  try {
+    const res = await fetch(ev.url, { method: 'PUT', headers: { Authorization: a.auth, 'Content-Type': 'text/calendar; charset=utf-8', ...(ev.etag ? { 'If-Match': ev.etag } : {}) }, body: moved.ics, signal: AbortSignal.timeout(10000) });
+    if (res.status === 412) return { ok: false, error: 'the event changed in the meantime: look it up again' };
+    if (!res.ok) return { ok: false, error: `caldav ${res.status}` };
+    console.log(`[calendar] moved "${ev.title}" to ${moved.when}`);
+    return { ok: true, title: ev.title, when: moved.when, calendar: ev.cal.name };
+  } catch (e) { return { ok: false, error: e.message }; }
 });
 
 // ── MAIL: Zoho inbox summary over IMAP (stdlib imaplib via a spawned Python
@@ -349,4 +414,86 @@ function buildEvent({ title, start, minutes, location, notes, now = Date.now(), 
   return { ok: true, uid: id, title: t, when, ics: lines.join('\r\n') + '\r\n' };
 }
 
-module.exports = { registerInfo, buildEvent };
+// Event objects in a calendar-query answer: [{ href, etag, ics, uid, title, recurring }].
+function parseEventObjects(xml) {
+  const unxml = (v) => String(v || '').replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').replace(/&#13;|&#x0?d;/gi, '\r').replace(/&#10;|&#x0?a;/gi, '\n')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;|&#39;/g, "'").replace(/&amp;/g, '&');
+  const out = [];
+  for (const r of String(xml || '').split(/<(?:[a-z0-9]+:)?response[\s>]/i).slice(1)) {
+    const href = (r.match(/<(?:[a-z0-9]+:)?href[^>]*>([\s\S]*?)<\//i) || [])[1];
+    const etag = (r.match(/<(?:[a-z0-9]+:)?getetag[^>]*>([\s\S]*?)<\//i) || [])[1];
+    const data = (r.match(/<(?:[a-z0-9]+:)?calendar-data[^>]*>([\s\S]*?)<\/(?:[a-z0-9]+:)?calendar-data>/i) || [])[1];
+    if (!href || !data) continue;
+    out.push({ href: unxml(href).trim(), etag: etag ? unxml(etag).trim() : null, ...describeIcs(unxml(data)) });
+  }
+  return out;
+}
+
+// { ics, uid, title, recurring } of one stored calendar object.
+function describeIcs(raw) {
+  const ics = String(raw || '').replace(/\r?\n[ \t]/g, '');
+  const ev = (ics.split(/BEGIN:VEVENT/)[1] || '').split(/END:VEVENT/)[0];
+  const field = (k) => ((ev.match(new RegExp(`(?:^|\\n)${k}[^:\\n]*:(.*)`)) || [])[1] || '').trim();
+  return { ics, uid: field('UID'), title: field('SUMMARY').replace(/\\([,;\\])/g, '$1').replace(/\\n/gi, ' '),
+    recurring: /(?:^|\n)(RRULE|RDATE|RECURRENCE-ID)[;:]/.test(ics) || (ics.match(/BEGIN:VEVENT/g) || []).length > 1 };
+}
+
+// The event's own text with new times. start: local "YYYY-MM-DDTHH:MM" (or
+// "YYYY-MM-DD" for all day); minutes: new length, default = the old length.
+function moveEvent(ics, { start, minutes, now = Date.now() } = {}) {
+  const text = String(ics || '').replace(/\r?\n[ \t]/g, '');
+  const a = text.indexOf('BEGIN:VEVENT'); const b = text.indexOf('END:VEVENT', a);
+  if (a < 0 || b < 0) return { ok: false, error: 'could not read that event' };
+  const lines = text.slice(a, b).split(/\r?\n/);
+  const get = (k) => lines.find((l) => new RegExp(`^${k}[;:]`).test(l));
+  const when = (line) => {                     // ms of a DTSTART/DTEND line (TZID = Fred's own wall clock)
+    const v = (String(line || '').match(/:(\d{8}(T\d{6}Z?)?)\s*$/) || [])[1];
+    if (!v) return null;
+    if (v.length === 8) return new Date(+v.slice(0, 4), +v.slice(4, 6) - 1, +v.slice(6, 8)).getTime();
+    const p = [+v.slice(0, 4), +v.slice(4, 6) - 1, +v.slice(6, 8), +v.slice(9, 11), +v.slice(11, 13), +v.slice(13, 15)];
+    return v.endsWith('Z') ? Date.UTC(...p) : new Date(...p).getTime();
+  };
+  const oldStart = when(get('DTSTART'));
+  const oldEnd = when(get('DTEND'));
+  const dur = (String(get('DURATION') || '').match(/PT?(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?/) || []);
+  const oldMins = oldStart != null && oldEnd != null ? Math.round((oldEnd - oldStart) / 60000)
+    : dur.length ? (+dur[1] || 0) * 1440 + (+dur[2] || 0) * 60 + (+dur[3] || 0) : 60;
+  const keep = !(Number(minutes) > 0);         // no new length given → keep the event's own length
+  const fresh = buildEvent({ title: 'x', start, minutes: keep ? (oldMins > 0 && oldMins < 1440 ? oldMins : 60) : minutes, now, uid: 'x' });
+  if (!fresh.ok) return fresh;
+  const lines2 = fresh.ics.split('\r\n');
+  if (keep && oldMins > 0) {
+    // Rebuild DTEND from the original span, so a 2-day trip stays 2 days.
+    const ymd = (x) => `${x.getFullYear()}${String(x.getMonth() + 1).padStart(2, '0')}${String(x.getDate()).padStart(2, '0')}`;
+    const s = String(start).trim();
+    const i = lines2.findIndex((l) => /^DTEND[;:]/.test(l));
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+      const days = Math.max(1, Math.round(oldMins / 1440));
+      const [y, m, d] = s.split('-').map(Number);
+      lines2[i] = `DTEND;VALUE=DATE:${ymd(new Date(y, m - 1, d + days))}`;
+      if (days > 1) fresh.when = fresh.when.replace('(all day)', `(${days} days)`);
+    } else if (oldMins >= 1440) {
+      const ms = Date.parse(s) + oldMins * 60000;
+      lines2[i] = `DTEND:${new Date(ms).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '')}`;
+      const h = Math.round(oldMins / 60);
+      fresh.when = fresh.when.replace(/\(\d+ min\)$/, `(${h} hours)`);
+    }
+  }
+  const pick = (k) => lines2.find((l) => new RegExp(`^${k}[;:]`).test(l));
+  const utc = new Date(now).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+  const seq = Number((String(get('SEQUENCE') || '').match(/:(\d+)/) || [])[1] || 0) + 1;
+  // Top-level VEVENT lines only: an alarm inside keeps its own lines.
+  const out = []; let depth = 0;
+  for (const l of lines) {
+    if (/^BEGIN:/.test(l)) depth += 1;
+    const top = depth === 1;
+    if (top && /^(DTSTART|DTEND|DURATION|SEQUENCE|DTSTAMP)[;:]/.test(l)) continue;
+    out.push(l);
+    if (/^END:/.test(l)) depth -= 1;
+    if (l === 'BEGIN:VEVENT') out.push(pick('DTSTART'), pick('DTEND'), `DTSTAMP:${utc}`, `SEQUENCE:${seq}`);
+  }
+  const ics2 = (text.slice(0, a) + out.join('\r\n') + '\r\n' + text.slice(b)).replace(/\r?\n/g, '\r\n');
+  return { ok: true, ics: ics2, when: fresh.when };
+}
+
+module.exports = { registerInfo, buildEvent, moveEvent, parseEventObjects };

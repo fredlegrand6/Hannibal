@@ -105,6 +105,7 @@ function fakeIcloud({ status = 207 } = {}) {
       assert.strictEqual(r.ok, true, JSON.stringify(r));
       // the copied invite (same UID) once; two different "Appointment"s at the same time both stay
       assert.deepStrictEqual(r.events.map((e) => e.title).sort(), ['Appointment', 'Appointment', 'Dinner with Gaian', 'Shared invite']);
+      assert.ok(r.events.every((e) => e.id === '/e.ics'), 'each event carries its address as id');
       assert.ok(seen.every((s) => /<c:expand /.test(s.body)), 'asks the server to expand recurring events');
       const pad = (x) => String(x).padStart(2, '0');
       const tomorrow = new Date(Date.now() + 24 * 3600 * 1000);
@@ -115,6 +116,89 @@ function fakeIcloud({ status = 207 } = {}) {
       const put = seen.find((s) => s.method === 'PUT');
       assert.match(put.url, /^https:\/\/c\/work\/[^/]+\.ics$/);
     } finally { global.fetch = realFetch; }
+  });
+
+  await t('move rewrites only the times (keeps alarm, notes, timezone block) and keeps the length', () => {
+    const { moveEvent } = require('./info-handlers');
+    const ics = ['BEGIN:VCALENDAR', 'BEGIN:VTIMEZONE', 'TZID:Europe/Madrid', 'BEGIN:STANDARD', 'DTSTART:19701025T030000', 'END:STANDARD', 'END:VTIMEZONE',
+      'BEGIN:VEVENT', 'UID:abc', 'DTSTAMP:20261101T000000Z', 'DTSTART;TZID=Europe/Madrid:20261122T110000', 'DTEND;TZID=Europe/Madrid:20261122T113000',
+      'SEQUENCE:2', 'SUMMARY:Call with Jay', 'DESCRIPTION:bring the deck', 'BEGIN:VALARM', 'TRIGGER:-PT15M', 'ACTION:DISPLAY', 'END:VALARM',
+      'END:VEVENT', 'END:VCALENDAR', ''].join('\r\n');
+    const r = moveEvent(ics, { start: '2026-11-23T15:00', now: new Date(2026, 10, 21).getTime() });
+    assert.ok(r.ok, JSON.stringify(r));
+    assert.match(r.when, /Monday 23 November.*15:00 \(30 min\)/);
+    const lines = r.ics.split('\r\n');
+    assert.strictEqual(lines.filter((l) => l.startsWith('DTSTART')).length, 2, 'the timezone block keeps its own DTSTART');
+    assert.ok(lines.includes('DTSTART:19701025T030000'));
+    assert.ok(lines.some((l) => /^DTSTART:20261123T\d{6}Z$/.test(l)));
+    assert.ok(lines.includes('SEQUENCE:3') && lines.includes('DESCRIPTION:bring the deck') && lines.includes('TRIGGER:-PT15M'));
+    assert.ok(!lines.some((l) => l.includes('TZID=Europe/Madrid:2026112')));
+    assert.ok(!moveEvent(ics, { start: '2020-01-01T10:00' }).ok, 'no moving into the past');
+  });
+
+  await t('move keeps a multi-day length when no new length is given', () => {
+    const { moveEvent } = require('./info-handlers');
+    const now = new Date(2026, 10, 21).getTime();
+    const wrap = (a, b) => ['BEGIN:VCALENDAR', 'BEGIN:VEVENT', 'UID:t', a, b, 'SUMMARY:Ibiza', 'END:VEVENT', 'END:VCALENDAR', ''].join('\r\n');
+    let r = moveEvent(wrap('DTSTART:20261201T080000Z', 'DTEND:20261203T080000Z'), { start: '2026-12-10T09:00', now });
+    assert.ok(r.ok, JSON.stringify(r));
+    const at = (k) => r.ics.split('\r\n').find((l) => l.startsWith(k));
+    const ms = (l) => { const v = l.split(':')[1]; return Date.UTC(+v.slice(0, 4), +v.slice(4, 6) - 1, +v.slice(6, 8), +v.slice(9, 11), +v.slice(11, 13)); };
+    assert.strictEqual(ms(at('DTEND')) - ms(at('DTSTART')), 48 * 3600000, '48 hours stays 48 hours');
+    assert.match(r.when, /\(48 hours\)/);
+    r = moveEvent(wrap('DTSTART;VALUE=DATE:20261201', 'DTEND;VALUE=DATE:20261204'), { start: '2026-12-10', now });
+    assert.ok(r.ok, JSON.stringify(r));
+    assert.ok(r.ics.includes('DTSTART;VALUE=DATE:20261210') && r.ics.includes('DTEND;VALUE=DATE:20261213'), '3 days stays 3 days');
+    assert.match(r.when, /\(3 days\)/);
+    r = moveEvent(wrap('DTSTART:20261201T080000Z', 'DTEND:20261203T080000Z'), { start: '2026-12-10T09:00', minutes: 30, now });
+    assert.match(r.when, /\(30 min\)/, 'an explicit length still wins');
+  });
+
+  await t('delete and move find the event by id, check the title, refuse repeating events', async () => {
+    const handlers = {};
+    const ipc = { handle: (ch, fn) => { handlers[ch] = fn; } };
+    const account = { get: async () => ({ kind: 'icloud', auth: 'Basic x', read: [{ url: 'https://c/werk/', name: 'Werk', writable: true }], write: { url: 'https://c/werk/', name: 'Werk' } }), forget: () => {} };
+    const obj = (uid, title, extra = '') => `BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:${uid}\r\nDTSTART:20991122T100000Z\r\nDTEND:20991122T110000Z\r\nSUMMARY:${title}\r\n${extra}END:VEVENT\r\nEND:VCALENDAR\r\n`;
+    const store = { '/werk/jay.ics': obj('jay', 'Call with Jay'), '/werk/gym.ics': obj('gym', 'Gym', 'RRULE:FREQ=WEEKLY\r\n'), '/other/x.ics': obj('x', 'Secret') };
+    const seen = [];
+    const realFetch = global.fetch;
+    global.fetch = async (url, o = {}) => {
+      seen.push({ url, method: o.method || 'GET', headers: o.headers || {}, body: o.body });
+      const path = new URL(url).pathname;
+      if (!o.method || o.method === 'GET') return store[path] ? { ok: true, status: 200, headers: { get: () => `"e-${path}"` }, text: async () => store[path] } : { ok: false, status: 404, headers: { get: () => null }, text: async () => '' };
+      return { ok: true, status: 204, text: async () => '' };
+    };
+    try {
+      require('./info-handlers').registerInfo(ipc, { calendarAccount: account, python: 'python3' });
+      let r = await handlers['calendar:delete']({}, '/werk/jay.ics', 'Gym');
+      assert.ok(!r.ok && /belongs to "Call with Jay"/.test(r.error), 'wrong title: nothing deleted');
+      r = await handlers['calendar:delete']({}, '/werk/jay.ics', 'Call');
+      assert.ok(!r.ok && /belongs to/.test(r.error), 'part of a title is not enough');
+      r = await handlers['calendar:delete']({}, '/werk/jay.ics', 'Call with Jay and legal');
+      assert.ok(!r.ok, 'a longer title is not enough either');
+      r = await handlers['calendar:delete']({}, '/werk/gym.ics', 'Gym');
+      assert.ok(!r.ok && /repeats/.test(r.error));
+      r = await handlers['calendar:delete']({}, '/werk/nope.ics', 'X');
+      assert.ok(!r.ok && /not in the calendar/.test(r.error));
+      r = await handlers['calendar:delete']({}, '/werk/../other/x.ics', 'Secret');
+      assert.ok(!r.ok, 'outside Fred\'s calendars: refused');
+      assert.ok(!seen.some((x) => x.method === 'DELETE'));
+      r = await handlers['calendar:delete']({}, '/werk/jay.ics', 'call with jay');
+      assert.ok(r.ok, JSON.stringify(r));
+      const del = seen.find((x) => x.method === 'DELETE');
+      assert.strictEqual(del.url, 'https://c/werk/jay.ics'); assert.strictEqual(del.headers['If-Match'], '"e-/werk/jay.ics"');
+      r = await handlers['calendar:move']({}, '/werk/jay.ics', '2099-11-23T15:00', undefined, 'Call with Jay');
+      assert.ok(r.ok, JSON.stringify(r));
+      const put = seen.find((x) => x.method === 'PUT');
+      assert.match(put.body, /DTSTART:2099112\dT\d{6}Z\r\nDTEND:/); assert.match(put.body, /SEQUENCE:1/);
+      assert.match(r.when, /\(60 min\)/);
+    } finally { global.fetch = realFetch; }
+  });
+
+  await t('the questions Fred hears', () => {
+    const { summarizeAction } = require('./agent/executor');
+    assert.match(summarizeAction({ tool: 'calendar.delete' }, { id: 'x', title: 'Call with Jay', when: 'tomorrow 11:00' }), /Delete “Call with Jay” \(tomorrow 11:00\) from your calendar — delete it\?/);
+    assert.match(summarizeAction({ tool: 'calendar.move' }, { id: 'x', title: 'Call with Jay', start: '2026-11-23T15:00' }), /Move “Call with Jay” to Monday 23 November.*15:00 — move it\?/);
   });
 
   console.log(`caldav: ${n} passed`);
