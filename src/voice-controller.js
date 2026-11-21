@@ -3149,7 +3149,10 @@ RULES:
   // is a yes. Silence, a hedge ("uh", "wait"), a half-word, an off-topic phrase,
   // an explicit no, a mic failure, a handler error — every one resolves to NO. A
   // gate that treats ambiguity as approval feels safe while it isn't.
-  const CONFIRM_YES = /^(y|yes|yeah|yep|yup|yes please|ya|ja|jawel|oui|sure|do it|send it|send|send that|go|go ahead|confirm|confirmed|approve|approved|affirmative)$/i;
+  const CONFIRM_YES = /^(y|yes|yeah|yep|yup|yes please|ya|ja|jawel|oui|si|sí|sure|ok|okay|do it|send it|send|send that|book it|go|go ahead|confirm|confirmed|approve|approved|affirmative|doe maar|graag)$/i;
+  // "Yes, book it, Hannibal" / "okay go ahead please": a clean yes plus only
+  // filler that adds no doubt. Anything else after it (", but…", "wait") is not a yes.
+  const YES_FILLER = /^(please|thanks|thank you|hannibal|book it|do it|go ahead|send it|that's fine|that is fine|fine|perfect|great|good|sure|yes|yeah|ok|okay|graag|dank je|merci)$/i;
   const CONFIRM_NO  = /^(n|no|nope|nah|don'?t|do not|stop|cancel|wait|hold on|hold up|never ?mind|negative|nee|non|skip|not now|leave it|abort)$/i;
 
   function classifyConfirmation(raw) {
@@ -3157,6 +3160,8 @@ RULES:
     if (!t) return 'silence';               // nothing heard at all
     if (CONFIRM_YES.test(t)) return 'yes';  // a clean affirmative and nothing more
     if (CONFIRM_NO.test(t)) return 'no';    // an explicit negative / hedge
+    const parts = t.split(/\s*[,.!]\s*|\s+(?=please|thanks|hannibal|book it|go ahead|do it|graag|merci)\b/i).filter(Boolean);
+    if (parts.length > 1 && CONFIRM_YES.test(parts[0]) && parts.slice(1).every((p) => YES_FILLER.test(p) || CONFIRM_YES.test(p))) return 'yes';
     return 'unclear';                        // anything else — treated as NO
   }
 
@@ -3193,15 +3198,23 @@ RULES:
         } catch (e) { console.warn('[gate] transcribe failed', e); resolve(null); }
       };
       rec.start();
+      // The same per-room floor the normal listening loop calibrated, not the old
+      // fixed 15: in a room whose hum sits above 15 the answer never "ended" and
+      // the gate hung for good. A hard cap makes sure it always ends.
+      const onset = Math.max(SILENCE_THRESH, speechThreshold);
+      const release = Math.max(SILENCE_THRESH, noiseFloor + NOISE_RELEASE_MARGIN);
+      const HARD_CAP_MS = windowMs + 6000;
       const t0 = performance.now(); let lastLoud = t0, streak = 0, heard = false;
       timer = setInterval(() => {
         analyser.getByteFrequencyData(freq);
         let sum = 0; for (let i = 0; i < freq.length; i++) sum += freq[i];
         const avg = sum / freq.length, now = performance.now();
-        if (avg >= SILENCE_THRESH) { streak++; lastLoud = now; } else streak = 0;
+        if (avg >= onset) streak++; else streak = 0;
+        if (avg > release) lastLoud = now;
         if (streak >= SPEECH_ONSET_SAMPLES) heard = true;
+        if (now - t0 > HARD_CAP_MS) { console.warn('[gate] answer capture hit the time cap'); stop(); return; }
         if (!heard) { if (now - t0 > windowMs) stop(); return; }  // no speech in window → NO
-        if (now - lastLoud > SILENCE_MS) stop();                  // trailing pause → answer done
+        if (now - lastLoud > Math.min(SILENCE_MS, 1500)) stop();  // trailing pause → answer done
       }, 100);
     });
   }
@@ -3224,7 +3237,7 @@ RULES:
     const finalize = (val, how) => {
       if (decided) return;
       decided = true; decision = !!val;
-      console.log(`[gate] "${req.summary}" → ${decision ? 'YES' : 'NO'} (${how})`);
+      console.warn(`[gate] "${req.summary}" → ${decision ? 'YES' : 'NO'} (${how})`);
       try { if (confirmCancel) confirmCancel(); } catch (_) {}
     };
     try {
@@ -3257,10 +3270,11 @@ RULES:
         const heard = await recordConfirmation();
         if (decided) break;               // a click won during capture
         if (heard == null || heard === '') {
-          console.log(`[gate] confirm: VAD/no clean speech (attempt ${attempt + 1}/2)`);
+          console.warn(`[gate] confirm: VAD/no clean speech (attempt ${attempt + 1}/2)`);
           continue;                        // re-ask, or fall through to NO after the 2nd miss
         }
         heardVerdict = classifyConfirmation(heard);
+        console.warn(`[gate] heard "${heard}" → ${heardVerdict}`);
         finalize(heardVerdict === 'yes', `voice:${heardVerdict}`);
       }
       if (!decided) finalize(false, 'silence');   // deny-by-default after one honest re-ask
