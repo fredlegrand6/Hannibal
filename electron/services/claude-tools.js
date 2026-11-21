@@ -12,7 +12,7 @@
 //     or no; silence or a timeout means NO;
 //   • the permission store's remembered "always"/"never" answers are honoured;
 //   • tools the planner may never compose (planner_safe:false — mac.shell,
-//     skills.execute, whatsapp.send) are NOT exposed to Claude either.
+//     skills.execute) are NOT exposed to Claude either.
 //
 // Each Claude tool call becomes a one-step plan. Failures are handed back to
 // Claude as an error result (no Ollama retry/replan), so Claude decides what to

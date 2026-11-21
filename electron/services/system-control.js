@@ -348,6 +348,11 @@ function registerControls(ipcMain) {
     return true;
   });
 
+  // ── WHATSAPP (via Contacts + whatsapp:// link, checked after sending) ──
+  const wa = require('./whatsapp');
+  ipcMain.handle('contacts:find', (_e, query) => wa.findContacts(query));
+  ipcMain.handle('whatsapp:send', (_e, contact, message, number) => wa.sendWhatsApp({ contact, message, number }));
+
   // ── MAC SYSTEM CONTROL ──
   ipcMain.handle('mac-control', (event, action, params) => {
     console.log('Mac control:', action, params);

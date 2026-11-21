@@ -63,10 +63,10 @@ function harness({ answer = true, invokeImpl } = {}) {
   });
   await test('dangerous / planner-excluded / housekeeping tools are NOT exposed', () => {
     const names = new Set(claudeTools.toolDefinitions().map((d) => claudeTools.fromApiName(d.name)));
-    for (const n of ['mac.shell', 'skills.execute', 'whatsapp.send', 'memory.store', 'personality.save', 'preferences.save', 'voice.config']) {
+    for (const n of ['mac.shell', 'skills.execute', 'memory.store', 'personality.save', 'preferences.save', 'voice.config']) {
       assert(!names.has(n), `${n} must not be exposed`);
     }
-    for (const n of ['mail.inbox', 'calendar.events', 'mail.send', 'web.search', 'file.trash', 'memory.query']) {
+    for (const n of ['mail.inbox', 'calendar.events', 'mail.send', 'web.search', 'file.trash', 'memory.query', 'whatsapp.send', 'contacts.find']) {
       assert(names.has(n), `${n} should be exposed`);
     }
   });
