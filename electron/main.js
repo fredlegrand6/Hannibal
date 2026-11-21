@@ -360,10 +360,20 @@ async function voiceNote(text) {
   } finally { fs.unlink(mp3, () => {}); fs.unlink(ogg, () => {}); }
 }
 
+const { speakToMp3 } = require('./services/fast-tts');
 ipcMain.handle('voice:tts', async (_e, text) => {
   // Unique per call — two sentences requested in the same millisecond must not share a file.
   const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   let file = `/tmp/hannibal-tts-${stamp}.mp3`;
+  const t0 = Date.now();
+  // Fast path: ElevenLabs straight from Node (electron/services/fast-tts.js).
+  if (process.env.HANNIBAL_FAST_TTS !== '0' && process.env.ELEVENLABS_API_KEY) {
+    try {
+      const buf = await speakToMp3(text);
+      console.log(`[tts] ElevenLabs (fast, ${Date.now() - t0} ms): ${String(text || '').length} chars → ${buf.length} bytes of audio`);
+      return buf;
+    } catch (e) { console.warn('[tts] fast voice failed, trying the old path:', e.message); }
+  }
   try {
     await runTts(CONFIG.pythonTTS, [CONFIG.ttsScript, file], String(text || ''));   // ElevenLabs
   } catch (e) {

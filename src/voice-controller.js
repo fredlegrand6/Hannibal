@@ -399,6 +399,7 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   // the mic isn't reopened mid-remark; the single restOrRearm() at the end reopens.
   let autonomousSpeaking = false;
   // Name gate: when Hannibal last spoke, and when the wake word last fired.
+  let turnEndedAt = 0;
   let tap = null, turnMark = 0, tapFloor = 0;   // tapFloor: never pre-roll back past this (his own voice, the last turn)
   let lastSpokeAt = 0;
   let wokeAt = 0;
@@ -672,6 +673,7 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     // An autonomous line grabbed the mic (presence/care/reminder) — leave the
     // phase alone; that path will re-arm when it's done speaking.
     if (aborted) { aborted = false; if (autonomousSpeaking) return; restOrRearm(); return; }
+    turnEndedAt = performance.now();   // for the "[timing]" log: you stop talking → his first word
     const blob = tapWav ? new Blob([tapWav], { type: 'audio/wav' }) : new Blob(chunks, { type: 'audio/webm' });
     if (!blob.size) { restOrRearm(); return; }
     await transcribeAndRespond(blob);
@@ -2055,7 +2057,11 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   function enqueueSpeak(sentence) {
     const s = sentence.trim();
     if (!s) return;
-    speakQueue.push(s);
+    // Ask for the audio NOW, while earlier sentences are still playing, so there
+    // is no silent gap between sentences (the player awaits these in order).
+    const audio = window.hannibal.tts(s);
+    audio.catch(() => {});
+    speakQueue.push({ text: s, audio });
     if (!speaking) playerRun = runPlayer();
   }
 
@@ -2066,9 +2072,9 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     // play while there's work, or while the LLM may still produce more
     while (speakQueue.length || !streamEnded) {
       if (!speakQueue.length) { await sleep(40); continue; }
-      const sentence = speakQueue.shift();
+      const item = speakQueue.shift();
       playingOne = true;
-      try { await speakOne(sentence); }
+      try { await speakOne(item.text, item.audio); }
       catch (e) { console.warn('[voice] tts/play failed', e); }
       finally { playingOne = false; }
     }
@@ -2076,10 +2082,11 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     brain.setAmplitude(0);
   }
 
-  async function speakOne(text) {
-    const bytes = await window.hannibal.tts(text);         // Uint8Array (MP3)
+  async function speakOne(text, prefetched) {
+    const bytes = await (prefetched || window.hannibal.tts(text));   // Uint8Array (MP3)
     const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
     const audioBuf = await audioCtx.decodeAudioData(ab);
+    if (turnEndedAt) { console.warn(`[timing] you stopped talking → his first word: ${Math.round(performance.now() - turnEndedAt)} ms`); turnEndedAt = 0; }
     await playWithAmplitude(audioBuf);
   }
 
