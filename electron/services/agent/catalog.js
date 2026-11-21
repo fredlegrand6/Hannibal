@@ -143,14 +143,14 @@ const TOOLS = [
 
   // ═══════════════════════ CALENDAR ═══════════════════════
   { name: 'calendar.events', domain: 'calendar',
-    description: "Fred's calendar events from today onwards (Nextcloud). Default today + tomorrow; ask for more days to see further ahead or check for clashes before booking.",
+    description: "Fred's calendar events from today onwards (Apple Calendar: all his iCloud calendars). Default today + tomorrow; ask for more days to see further ahead or check for clashes before booking.",
     params: [{ name: 'days', type: 'number', required: false, desc: 'how many days from today, 1-31 (default 2)' }],
     side_effect: SIDE_EFFECT.READ, executor: EXECUTOR.MAIN,
     via: { channel: 'calendar:events' },
-    returns: '{ ok, events:[{ ts, time, allDay, title, day:"today"|"tomorrow"|"Monday 24 November" }] }',
-    note: 'CalDAV REPORT against cloud.revalisgroup.com using the .env app password.' },
+    returns: '{ ok, events:[{ ts, time, allDay, title, calendar, day:"today"|"tomorrow"|"Monday 24 November" }] }',
+    note: 'CalDAV REPORT on every iCloud calendar (caldav.js, ICLOUD_EMAIL + app-specific ICLOUD_APP_PW in .env); Nextcloud if only that is set.' },
   { name: 'calendar.add', domain: 'calendar',
-    description: "Book an event in Fred's calendar (Nextcloud), e.g. a meeting you just agreed on. Check calendar.events for clashes first. Fred always confirms before it is booked.",
+    description: "Book an event in Fred's calendar (Apple Calendar), e.g. a meeting you just agreed on. Check calendar.events for clashes first. Fred always confirms before it is booked.",
     params: [
       { name: 'title', type: 'string', required: true, desc: 'e.g. "Call with Jean-Marc about HTS"' },
       { name: 'start', type: 'string', required: true, desc: 'local time YYYY-MM-DDTHH:MM, or YYYY-MM-DD for an all-day event' },
