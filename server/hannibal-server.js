@@ -309,7 +309,13 @@ async function fireReminders() {
   try { due = reminders.takeDue(); } catch (e) { console.warn('[reminders] check failed:', e.message); }
   for (const r of due) {
     console.log('[reminders] due:', r.message);
-    await tellFred(`⏰ Reminder: ${r.message}`, { voice: true }).catch((e) => console.warn('[reminders] send failed:', e.message));
+    try {
+      await tellFred(`⏰ Reminder: ${r.message}`, { voice: true });
+      reminders.markDelivered(r.id, true);
+    } catch (e) {
+      console.warn('[reminders] send failed:', e.message);
+      reminders.markDelivered(r.id, false, e.message);   // so "did it go off?" gets an honest no
+    }
   }
 }
 

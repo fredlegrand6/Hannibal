@@ -159,7 +159,9 @@ function fakeIcloud({ status = 207 } = {}) {
     const ipc = { handle: (ch, fn) => { handlers[ch] = fn; } };
     const account = { get: async () => ({ kind: 'icloud', auth: 'Basic x', read: [{ url: 'https://c/werk/', name: 'Werk', writable: true }], write: { url: 'https://c/werk/', name: 'Werk' } }), forget: () => {} };
     const obj = (uid, title, extra = '') => `BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:${uid}\r\nDTSTART:20991122T100000Z\r\nDTEND:20991122T110000Z\r\nSUMMARY:${title}\r\n${extra}END:VEVENT\r\nEND:VCALENDAR\r\n`;
-    const store = { '/werk/jay.ics': obj('jay', 'Call with Jay'), '/werk/lunch.ics': obj('lunch', 'Lunch with John'), '/werk/stuck.ics': obj('stuck', 'Stuck'), '/werk/gym.ics': obj('gym', 'Gym', 'RRULE:FREQ=WEEKLY\r\n'), '/other/x.ics': obj('x', 'Secret') };
+    const tzObj = ['BEGIN:VCALENDAR', 'BEGIN:VTIMEZONE', 'TZID:Europe/Madrid', 'BEGIN:STANDARD', 'DTSTART:19701025T030000', 'END:STANDARD', 'END:VTIMEZONE',
+      'BEGIN:VEVENT', 'UID:tz', 'DTSTART:20991122T100000Z', 'DTEND:20991122T110000Z', 'SUMMARY:Stuck in Madrid', 'END:VEVENT', 'END:VCALENDAR', ''].join('\r\n');
+    const store = { '/werk/stucktz.ics': tzObj, '/werk/jay.ics': obj('jay', 'Call with Jay'), '/werk/lunch.ics': obj('lunch', 'Lunch with John'), '/werk/stuck.ics': obj('stuck', 'Stuck'), '/werk/gym.ics': obj('gym', 'Gym', 'RRULE:FREQ=WEEKLY\r\n'), '/other/x.ics': obj('x', 'Secret') };
     const seen = [];
     const realFetch = global.fetch;
     global.fetch = async (url, o = {}) => {
@@ -167,7 +169,7 @@ function fakeIcloud({ status = 207 } = {}) {
       const path = new URL(url).pathname;
       if (!o.method || o.method === 'GET') return store[path] ? { ok: true, status: 200, headers: { get: () => `"e-${path}"` }, text: async () => store[path] } : { ok: false, status: 404, headers: { get: () => null }, text: async () => '' };
       // A real server: DELETE removes, PUT stores. "stuck" says yes but changes nothing.
-      if (path !== '/werk/stuck.ics') { if (o.method === 'DELETE') delete store[path]; if (o.method === 'PUT') store[path] = o.body; }
+      if (!path.startsWith('/werk/stuck')) { if (o.method === 'DELETE') delete store[path]; if (o.method === 'PUT') store[path] = o.body; }
       return { ok: true, status: 204, text: async () => '' };
     };
     try {
@@ -200,6 +202,12 @@ function fakeIcloud({ status = 207 } = {}) {
       assert.ok(!r.ok && r.verified === false && /still in the calendar/.test(r.error), JSON.stringify(r));
       r = await handlers['calendar:move']({}, '/werk/stuck.ics', '2099-11-24T09:00', 30, 'Stuck');
       assert.ok(!r.ok && r.verified === false && /old time/.test(r.error), JSON.stringify(r));
+      // only the length changes (same start): an ignored change is still caught
+      r = await handlers['calendar:move']({}, '/werk/stuck.ics', '2099-11-22T11:00', 30, 'Stuck');
+      assert.ok(!r.ok && r.verified === false, 'length-only change ignored: ' + JSON.stringify(r));
+      // a timezone block before the event must not fool the check
+      r = await handlers['calendar:move']({}, '/werk/stucktz.ics', '2099-11-24T09:00', 30, 'Stuck in Madrid');
+      assert.ok(!r.ok && r.verified === false, 'VTIMEZONE: ' + JSON.stringify(r));
     } finally { global.fetch = realFetch; }
   });
 

@@ -85,12 +85,27 @@ function createReminderTools({ filePath = path.join(DATA, 'reminders.json'), not
     const t = now(); const since = t - Math.max(1, Number(hours) || 48) * 3600000;
     const list = read();
     const firedAt = (r) => Number(r.firedTs || r.firedAt || 0);
-    const went = list.filter((r) => r.fired && (firedAt(r) || Number(r.triggerTs)) >= since)
-      .sort((a, b) => firedAt(b) - firedAt(a))
+    const lately = list.filter((r) => r.fired && (firedAt(r) || Number(r.triggerTs)) >= since).sort((a, b) => firedAt(b) - firedAt(a));
+    // delivered === false: it was due, but sending it to Fred failed. Not "went off".
+    const went = lately.filter((r) => r.delivered !== false)
       .map((r) => ({ id: r.id, message: r.message, due: fmt(r.triggerTs), wentOff: firedAt(r) ? fmt(firedAt(r)) : 'yes (time not recorded)' }));
-    const missed = list.filter((r) => !r.fired && Number(r.triggerTs) < t - 5 * 60000)
-      .map((r) => ({ id: r.id, message: r.message, due: fmt(r.triggerTs) }));
+    const missed = [
+      ...list.filter((r) => !r.fired && Number(r.triggerTs) < t - 5 * 60000)
+        .map((r) => ({ id: r.id, message: r.message, due: fmt(r.triggerTs), why: 'never fired' })),
+      ...lately.filter((r) => r.delivered === false)
+        .map((r) => ({ id: r.id, message: r.message, due: fmt(r.triggerTs), why: `sending it failed${r.deliveryError ? ': ' + r.deliveryError : ''}` })),
+    ];
     return { ok: true, wentOff: went, missed };
+  }
+
+  // The server tells us whether a fired reminder actually reached Fred.
+  function markDelivered(id, ok, error) {
+    const list = read();
+    const r = list.find((x) => x.id === id);
+    if (!r) return;
+    r.delivered = !!ok;
+    if (!ok) r.deliveryError = String(error || '').slice(0, 200); else delete r.deliveryError;
+    write(list);
   }
 
   // Reminders that are due now, marked fired so each goes out once.
@@ -105,7 +120,7 @@ function createReminderTools({ filePath = path.join(DATA, 'reminders.json'), not
     return due.map((r) => ({ id: r.id, message: r.message, triggerTs: r.triggerTs }));
   }
 
-  return { add, cancel, upcoming, recent, takeDue };
+  return { add, cancel, upcoming, recent, takeDue, markDelivered };
 }
 
 // Cancel across two lists (the server's own + the desk's, read through the

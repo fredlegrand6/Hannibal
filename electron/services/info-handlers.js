@@ -202,7 +202,21 @@ async function readBack(a, url) {
     return describeIcs(await res.text());
   } catch (_) { return undefined; }
 }
-const startOf = (ics) => (String(ics || '').replace(/\r?\n[ \t]/g, '').split(/\r?\n/).find((l) => /^DTSTART[;:]/.test(l)) || '').replace(/^DTSTART[^:]*:/, '').trim();
+// The event's own times (start + end/duration), from its top-level VEVENT only:
+// a VTIMEZONE or VALARM block has DTSTARTs of its own that must not count.
+const timesOf = (ics) => {
+  const lines = String(ics || '').replace(/\r?\n[ \t]/g, '').split(/\r?\n/);
+  const out = {}; let depth = 0, inEvent = false;
+  for (const l of lines) {
+    if (l === 'BEGIN:VEVENT' && depth === 1) inEvent = true;   // inside VCALENDAR
+    if (/^BEGIN:/.test(l)) { depth += 1; continue; }
+    if (/^END:/.test(l)) { depth -= 1; if (inEvent && depth === 1) break; continue; }
+    if (!inEvent || depth !== 2) continue;
+    const m = l.match(/^(DTSTART|DTEND|DURATION)[;:]/);
+    if (m) out[m[1]] = l.replace(/^[^:]*:/, '').trim();
+  }
+  return `${out.DTSTART || ''}|${out.DTEND || ''}|${out.DURATION || ''}`;
+};
 
 async function findEvent(a, id) {
   const cal = a.read.find((c) => { try { return new URL(id, c.url).toString().startsWith(c.url); } catch (_) { return false; } });
@@ -255,7 +269,7 @@ ipcMain.handle('calendar:move', async (_e, id, start, minutes, title) => {
     if (!res.ok) return { ok: false, error: `caldav ${res.status}` };
     const back = await readBack(a, ev.url);
     if (back === null) return { ok: false, verified: false, error: `"${ev.title}" is gone from the calendar after moving it` };
-    if (back && startOf(back.ics) !== startOf(moved.ics)) return { ok: false, verified: false, error: `"${ev.title}" still shows its old time after moving it` };
+    if (back && timesOf(back.ics) !== timesOf(moved.ics)) return { ok: false, verified: false, error: `"${ev.title}" still shows its old time or length after moving it` };
     console.log(`[calendar] moved "${ev.title}" to ${moved.when}${back ? ' (checked)' : ' (could not check)'}`);
     return { ok: true, verified: !!back, title: ev.title, when: moved.when, calendar: ev.cal.name };
   } catch (e) { return { ok: false, error: e.message }; }

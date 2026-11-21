@@ -640,7 +640,7 @@ const TOOLS = [
     params: [{ name: 'hours', type: 'number', required: false, desc: 'how far back to look, default 48' }],
     side_effect: SIDE_EFFECT.READ, executor: EXECUTOR.MAIN,
     via: { channel: 'reminders:recent' },
-    returns: '{ ok, wentOff:[{ id, message, due, wentOff }], missed:[{ id, message, due }] }' },
+    returns: '{ ok, wentOff:[{ id, message, due, wentOff }], missed:[{ id, message, due, why }] }' },
   { name: 'timers.list', domain: 'timers', description: 'Load persisted timers.', params: [],
     side_effect: SIDE_EFFECT.READ, executor: EXECUTOR.MAIN, via: { channel: 'timers:load' } },
   { name: 'timers.save', domain: 'timers', description: 'Replace the persisted timers list (data/timers.json).',

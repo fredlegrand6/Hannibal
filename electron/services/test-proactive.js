@@ -87,6 +87,11 @@ async function test(name, fn) {
     const rec = r.recent();
     assert.deepStrictEqual(rec.wentOff.map((x) => x.message).sort(), ['call Jay', 'stretch']);
     assert.deepStrictEqual(rec.missed.map((x) => x.message), ['fly to Ibiza']);
+    // the server tried to send one but Telegram failed: that is not "went off"
+    r.markDelivered(a.id, false, 'fetch failed');
+    const rec2 = r.recent();
+    assert.deepStrictEqual(rec2.wentOff.map((x) => x.message), ['stretch']);
+    assert.ok(rec2.missed.some((x) => x.message === 'call Jay' && /sending it failed/.test(x.why)));
   });
   await test('the whole-list replace tools are NOT given to Claude; add/cancel/upcoming are', () => {
     const names = new Set(claudeTools.toolDefinitions().map((d) => claudeTools.fromApiName(d.name)));
