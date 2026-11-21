@@ -425,6 +425,8 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     if (p === 'speaking') vadControl('PAUSE');
     else if (p === 'listening') vadControl('RESUME');
     if (p === 'speaking') startBargeWatch(); else stopBargeWatch();
+    // Start Apple's echo cancelling while he thinks, so his first word isn't delayed.
+    if (p === 'thinking' && vio) { try { window.hannibal.vioWarm(); } catch (_) {} }
     onPhase && onPhase(p);
   };
 

@@ -43,7 +43,8 @@ function createVoiceIO({ send = () => {} } = {}) {
   function onLine(line) {
     let j; try { j = JSON.parse(line); } catch (_) { return; }
     if (j.ev === 'level') { send('vio:level', { mic: j.mic, out: j.out }); return; }
-    if (j.ev === 'ready') { ready = true; failures = 0; log(`ready (mic ${j.micRate} Hz, ${j.channels} ch, echo cancelling on)`); send('vio:ready', {}); return; }
+    if (j.ev === 'engine') { log(j.on ? 'echo cancelling on (he is talking)' : 'echo cancelling off, mic handed back'); return; }
+    if (j.ev === 'ready') { ready = true; failures = 0; log('ready (echo cancelling works here; it runs only while he talks)'); send('vio:ready', {}); return; }
     if (j.ev === 'done' || j.ev === 'clip') { const w = waiting.get(j.id); if (w) { waiting.delete(j.id); w(j); } return; }
     if (j.ev === 'error') { log('error:', j.error); if (j.id && waiting.has(j.id)) { const w = waiting.get(j.id); waiting.delete(j.id); w(j); } return; }
     if (j.ev === 'reconfigured') log('audio device changed — engine restarted');
@@ -96,16 +97,18 @@ function createVoiceIO({ send = () => {} } = {}) {
   }
 
   function stop() { cmd({ cmd: 'stop' }); }
+  function warm() { if (ready) cmd({ cmd: 'warm' }); }
   function quit() { wanted = false; cmd({ cmd: 'quit' }); setTimeout(() => { try { child && child.kill(); } catch (_) {} }, 500); }
 
   function register(ipcMain) {
     ipcMain.handle('vio:status', () => ({ ready }));
     ipcMain.handle('vio:play', async (_e, bytes) => { const j = await play(bytes); return { ok: !j.error, stopped: !!j.stopped, error: j.error }; });
     ipcMain.handle('vio:stop', () => { stop(); return { ok: true }; });
+    ipcMain.handle('vio:warm', () => { warm(); return { ok: true }; });
     ipcMain.handle('vio:clip', async (_e, ms) => clip(ms));
   }
 
-  return { start, stop, play, clip, quit, register, get ready() { return ready; } };
+  return { start, stop, warm, play, clip, quit, register, get ready() { return ready; } };
 }
 
 module.exports = { createVoiceIO, build };

@@ -2,16 +2,21 @@
 //
 // Talking over Hannibal failed because the browser's echo canceller mangles
 // Fred's voice while Hannibal plays. Apple's voice processing (the one FaceTime
-// uses) is built for both people talking at once, but it can only remove the
-// sound it plays itself. So this helper does both: it plays Hannibal's voice
-// AND listens, with voice processing on.
+// uses) is built for both people talking at once, but it only removes the sound
+// it plays itself, so this helper plays Hannibal's voice AND listens.
+//
+// Voice processing takes the mic over for the whole Mac while it runs (his normal
+// ears went deaf when it stayed on), so the engine runs ONLY while he speaks:
+// it starts on "warm" (he is thinking) or the first "play", and is torn down
+// IDLE_S after the last sentence finishes.
 //
 // stdin (one JSON per line):
+//   {"cmd":"warm"}                                 → start the engine now (he's about to talk)
 //   {"cmd":"play","id":"7","path":"/tmp/x.mp3"}   → {"ev":"done","id":"7"} when heard
 //   {"cmd":"stop"}                                 → stops at once; pending ids get "done"
 //   {"cmd":"clip","id":"c1","ms":2500}             → {"ev":"clip","id":"c1","path":"/tmp/….wav"}
-// stdout: {"ev":"ready"}, {"ev":"level","mic":0.012,"out":0.08} every 50 ms while
-// playing (and 1 s after), {"ev":"error","error":"…"}.
+// stdout: {"ev":"ready"} (helper alive), {"ev":"level","mic":…,"out":…} every 50 ms
+// while the engine runs, {"ev":"engine","on":true|false}, {"ev":"error","error":"…"}.
 // Build: swiftc -O VoiceIO.swift -o voice-io
 import AVFoundation
 import Foundation
@@ -22,34 +27,13 @@ func emit(_ d: [String: Any]) {
   guard let j = try? JSONSerialization.data(withJSONObject: d), let s = String(data: j, encoding: .utf8) else { return }
   lock.lock(); print(s); lock.unlock()
 }
-
-let engine = AVAudioEngine()
-let input = engine.inputNode
-do { try input.setVoiceProcessingEnabled(true) } catch {
-  emit(["ev": "error", "error": "voice processing unavailable: \(error.localizedDescription)"]); exit(1)
-}
-if #available(macOS 14.0, *) {
-  // Don't turn other apps (music, calls) down while Hannibal listens.
-  input.voiceProcessingOtherAudioDuckingConfiguration =
-    AVAudioVoiceProcessingOtherAudioDuckingConfiguration(enableAdvancedDucking: false, duckingLevel: .min)
-}
-
-let player = AVAudioPlayerNode()
-engine.attach(player)
-// Straight into the output: with voice processing on, any mixer in between stops
-// the engine from starting (tested on Fred's Mac, macOS 27).
-var playFormat = engine.outputNode.inputFormat(forBus: 0)
-if playFormat.sampleRate == 0 { playFormat = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 2)! }
-engine.connect(player, to: engine.outputNode, format: playFormat)
+let IDLE_S = 1.5
 
 // ── ears: echo-cancelled mic → 16 kHz mono ring (last 30 s) ──
 let ringRate = 16000.0
 var ring = [Int16](repeating: 0, count: Int(ringRate * 30))
 var ringTotal = 0
 var micLevel: Float = 0
-var lastPlayAt = Date.distantPast
-let inFormat = input.outputFormat(forBus: 0)
-var ringRatio = inFormat.sampleRate / ringRate
 func onMic(_ buf: AVAudioPCMBuffer) {
   guard let ch = buf.floatChannelData?[0] else { return }
   let n = Int(buf.frameLength)
@@ -69,95 +53,126 @@ func onMic(_ buf: AVAudioPCMBuffer) {
   }
   lock.unlock()
 }
-// With voice processing on, the mic reports odd channel counts (x9 on a MacBook);
-// tapping in that format can stop the engine from starting. Try what works.
-let monoIn = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: inFormat.sampleRate, channels: 1, interleaved: false)
-let tapFormats: [(String, AVAudioFormat?)] = [("default", nil), ("mono", monoIn), ("native", inFormat)]
-_ = ringRatio
-// His loudness for the brain animation: per-50 ms RMS of each scheduled sentence,
-// looked up by how far the player has got (no tap on the output, which voice
-// processing does not like).
-var schedule: [(start: Int64, rms: [Float])] = []
-var scheduledEnd: Int64 = 0
-func chunkRMS(_ b: AVAudioPCMBuffer) -> [Float] {
-  guard let ch = b.floatChannelData?[0] else { return [] }
-  let n = Int(b.frameLength), step = 2205
-  var out: [Float] = []
-  var i = 0
-  while i < n { let e = min(n, i + step); var s: Float = 0; for j in i..<e { s += ch[j] * ch[j] }; out.append(sqrt(s / Float(e - i))); i = e }
-  return out
-}
-func currentOut() -> Float {
-  guard player.isPlaying, let nt = player.lastRenderTime, let pt = player.playerTime(forNodeTime: nt) else { return 0 }
-  let t = pt.sampleTime
-  for e in schedule.reversed() where t >= e.start {
-    let k = Int((t - e.start) / 2205)
-    return k < e.rms.count ? e.rms[k] : 0
-  }
-  return 0
-}
 
-let outFmt = engine.outputNode.inputFormat(forBus: 0)
-emit(["ev": "info", "in": "\(inFormat.sampleRate) Hz x\(inFormat.channelCount)", "out": "\(outFmt.sampleRate) Hz x\(outFmt.channelCount)"])
-var started = false
-for (name, fmt) in tapFormats {
-  input.removeTap(onBus: 0)
-  input.installTap(onBus: 0, bufferSize: 1024, format: fmt) { buf, _ in onMic(buf) }
-  engine.prepare()
-  do { try engine.start(); started = true; emit(["ev": "info", "error": "engine started (mic tap: \(name))"]); break } catch {
-    emit(["ev": "info", "error": "engine start with \(name) tap: \(error.localizedDescription)"])
+// ── one speaking session: engine + player, voice processing on ──
+final class Session {
+  let engine = AVAudioEngine()
+  let player = AVAudioPlayerNode()
+  var playFormat: AVAudioFormat
+  var chunks: [(start: Int64, rms: [Float], step: Int)] = []
+  var scheduledEnd: Int64 = 0
+
+  init() throws {
+    let input = engine.inputNode
+    try input.setVoiceProcessingEnabled(true)
+    if #available(macOS 14.0, *) {
+      // Don't turn other apps (music, calls) down while he talks.
+      input.voiceProcessingOtherAudioDuckingConfiguration =
+        AVAudioVoiceProcessingOtherAudioDuckingConfiguration(enableAdvancedDucking: false, duckingLevel: .min)
+    }
+    engine.attach(player)
+    // Straight into the output: with voice processing on, any mixer in between
+    // stops the engine from starting (tested on Fred's Mac, macOS 27).
+    playFormat = engine.outputNode.inputFormat(forBus: 0)
+    if playFormat.sampleRate == 0 { playFormat = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 2)! }
+    engine.connect(player, to: engine.outputNode, format: playFormat)
+    input.installTap(onBus: 0, bufferSize: 1024, format: nil) { buf, _ in onMic(buf) }
+    engine.prepare()
+    try engine.start()
+  }
+
+  func load(_ path: String) throws -> AVAudioPCMBuffer {
+    let file = try AVAudioFile(forReading: URL(fileURLWithPath: path))
+    let src = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length))!
+    try file.read(into: src)
+    if file.processingFormat == playFormat { return src }
+    // mono 44.1 kHz MP3 → the output's format (e.g. stereo 48 kHz)
+    let conv = AVAudioConverter(from: file.processingFormat, to: playFormat)!
+    if file.processingFormat.channelCount == 1 && playFormat.channelCount > 1 {
+      conv.channelMap = [NSNumber](repeating: 0, count: Int(playFormat.channelCount))   // his voice on every speaker
+    }
+    let cap = AVAudioFrameCount(Double(src.frameLength) * playFormat.sampleRate / file.processingFormat.sampleRate) + 1024
+    let dst = AVAudioPCMBuffer(pcmFormat: playFormat, frameCapacity: cap)!
+    var fed = false
+    var err: NSError?
+    conv.convert(to: dst, error: &err) { _, status in
+      if fed { status.pointee = .endOfStream; return nil }
+      fed = true; status.pointee = .haveData; return src
+    }
+    if let e = err { throw e }
+    return dst
+  }
+
+  // His loudness for the brain animation (no tap on the output: voice processing refuses it).
+  func chunkRMS(_ b: AVAudioPCMBuffer, step: Int) -> [Float] {
+    guard let ch = b.floatChannelData?[0] else { return [] }
+    let n = Int(b.frameLength)
+    var out: [Float] = []; var i = 0
+    while i < n { let e = min(n, i + step); var s: Float = 0; for j in i..<e { s += ch[j] * ch[j] }; out.append(sqrt(s / Float(e - i))); i = e }
+    return out
+  }
+  func schedule(_ buf: AVAudioPCMBuffer, done: @escaping () -> Void) {
+    if !player.isPlaying { chunks.removeAll(); scheduledEnd = 0 }
+    let step = Int(playFormat.sampleRate * 0.05)
+    chunks.append((start: scheduledEnd, rms: chunkRMS(buf, step: step), step: step))
+    scheduledEnd += Int64(buf.frameLength)
+    if chunks.count > 20 { chunks.removeFirst(chunks.count - 20) }
+    player.scheduleBuffer(buf, completionCallbackType: .dataPlayedBack) { _ in done() }
+    if !player.isPlaying { player.play() }
+  }
+  func outLevel() -> Float {
+    guard player.isPlaying, let nt = player.lastRenderTime, let pt = player.playerTime(forNodeTime: nt) else { return 0 }
+    let t = pt.sampleTime
+    for e in chunks.reversed() where t >= e.start {
+      let k = Int((t - e.start) / Int64(e.step))
+      return k < e.rms.count ? e.rms[k] : 0
+    }
+    return 0
+  }
+  func close() {
+    player.stop()
+    engine.inputNode.removeTap(onBus: 0)
     engine.stop()
-  }
-}
-if !started {
-  // Diagnose: is it voice processing itself (e.g. mic and speakers at different sample rates)?
-  engine.stop()
-  try? input.setVoiceProcessingEnabled(false)
-  engine.prepare()
-  let plain = (try? engine.start()) != nil
-  emit(["ev": "error", "error": plain
-    ? "voice processing would not start, the plain engine does (mic \(Int(inFormat.sampleRate)) Hz vs speakers \(Int(engine.outputNode.outputFormat(forBus: 0).sampleRate)) Hz?)"
-    : "audio engine would not start even without voice processing (microphone permission?)"])
-  exit(1)
-}
-emit(["ev": "ready", "micRate": inFormat.sampleRate, "channels": Int(inFormat.channelCount)])
-
-// levels every 50 ms while he speaks (and a second after)
-Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { _ in
-  lock.lock(); let m = micLevel; micLevel = 0; lock.unlock()
-  let o = currentOut()
-  if player.isPlaying || Date().timeIntervalSince(lastPlayAt) < 1 {
-    emit(["ev": "level", "mic": Double(m), "out": Double(o)])
+    try? engine.inputNode.setVoiceProcessingEnabled(false)   // hand the mic back to the rest of the Mac
   }
 }
 
+var session: Session? = nil
 var pending = Set<String>()
+var lastActive = Date()
+var warmUntil = Date.distantPast   // a "warm" keeps the engine up a while for the first sentence
+
+func ensureSession() -> Session? {
+  if let s = session { return s }
+  do {
+    let s = try Session()
+    session = s
+    lock.lock(); micLevel = 0; lock.unlock()
+    emit(["ev": "engine", "on": true])
+    return s
+  } catch {
+    emit(["ev": "error", "error": "voice processing would not start: \(error.localizedDescription)"])
+    return nil
+  }
+}
+func closeSession() {
+  guard let s = session else { return }
+  s.close(); session = nil
+  emit(["ev": "engine", "on": false])
+}
+
+// levels every 50 ms while the engine runs; tear it down when he has been quiet IDLE_S
+Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { _ in
+  guard let s = session else { return }
+  lock.lock(); let m = micLevel; micLevel = 0; lock.unlock()
+  emit(["ev": "level", "mic": Double(m), "out": Double(s.outLevel())])
+  if pending.isEmpty && !s.player.isPlaying && Date().timeIntervalSince(lastActive) > IDLE_S && Date() > warmUntil { closeSession() }
+}
+
 func finish(_ id: String) {
   DispatchQueue.main.async {
-    if pending.remove(id) != nil { lastPlayAt = Date(); emit(["ev": "done", "id": id]) }
+    if pending.remove(id) != nil { lastActive = Date(); emit(["ev": "done", "id": id]) }
   }
-}
-
-func load(_ path: String) throws -> AVAudioPCMBuffer {
-  let file = try AVAudioFile(forReading: URL(fileURLWithPath: path))
-  let src = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length))!
-  try file.read(into: src)
-  if file.processingFormat == playFormat { return src }
-  // mono 44.1 kHz MP3 → the output's format (e.g. stereo 48 kHz)
-  let conv = AVAudioConverter(from: file.processingFormat, to: playFormat)!
-  if file.processingFormat.channelCount == 1 && playFormat.channelCount > 1 {
-    conv.channelMap = [NSNumber](repeating: 0, count: Int(playFormat.channelCount))   // his voice on every speaker
-  }
-  let cap = AVAudioFrameCount(Double(src.frameLength) * playFormat.sampleRate / file.processingFormat.sampleRate) + 1024
-  let dst = AVAudioPCMBuffer(pcmFormat: playFormat, frameCapacity: cap)!
-  var fed = false
-  var err: NSError?
-  conv.convert(to: dst, error: &err) { _, status in
-    if fed { status.pointee = .endOfStream; return nil }
-    fed = true; status.pointee = .haveData; return src
-  }
-  if let e = err { throw e }
-  return dst
 }
 
 func writeClip(ms: Int) -> String? {
@@ -186,43 +201,38 @@ DispatchQueue.global().async {
     let id = (j["id"] as? String) ?? ""
     DispatchQueue.main.async {
       switch cmd {
+      case "warm":
+        lastActive = Date(); warmUntil = Date().addingTimeInterval(8)
+        _ = ensureSession()
       case "play":
         guard let path = j["path"] as? String else { return }
+        lastActive = Date(); warmUntil = .distantPast
+        guard let s = ensureSession() else { emit(["ev": "done", "id": id, "error": "no engine"]); return }
         do {
-          let buf = try load(path)
+          let buf = try s.load(path)
           pending.insert(id)
-          lastPlayAt = Date()
-          if !player.isPlaying { schedule.removeAll(); scheduledEnd = 0 }
-          schedule.append((start: scheduledEnd, rms: chunkRMS(buf)))
-          scheduledEnd += Int64(buf.frameLength)
-          if schedule.count > 20 { schedule.removeFirst(schedule.count - 20) }
-          player.scheduleBuffer(buf, completionCallbackType: .dataPlayedBack) { _ in finish(id) }
-          if !engine.isRunning { try? engine.start() }
-          if !player.isPlaying { player.play() }
+          s.schedule(buf) { finish(id) }
         } catch {
-          emit(["ev": "error", "id": id, "error": "play: \(error.localizedDescription)"]); emit(["ev": "done", "id": id])
+          emit(["ev": "error", "id": id, "error": "play: \(error.localizedDescription)"])
         }
       case "stop":
         let ids = pending; pending.removeAll()
-        player.stop()
-        lastPlayAt = Date()
+        session?.player.stop()
+        lastActive = Date()
         for p in ids { emit(["ev": "done", "id": p, "stopped": true]) }
       case "clip":
         let ms = (j["ms"] as? Int) ?? Int((j["ms"] as? Double) ?? 2500)
         if let p = writeClip(ms: ms) { emit(["ev": "clip", "id": id, "path": p]) }
         else { emit(["ev": "error", "id": id, "error": "clip failed"]) }
       case "quit":
-        exit(0)
+        closeSession(); exit(0)
       default: break
       }
     }
   }
-  exit(0)
+  DispatchQueue.main.async { closeSession(); exit(0) }
 }
 
-NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { _ in
-  // A headset was plugged in / the output changed: restart the engine.
-  try? engine.start()
-  emit(["ev": "reconfigured"])
-}
+// Check once at start that voice processing works here, then let the mic go.
+if let _ = ensureSession() { closeSession(); emit(["ev": "ready"]) } else { exit(1) }
 RunLoop.main.run()

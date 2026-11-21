@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld('hannibal', {
   vioStatus: () => ipcRenderer.invoke('vio:status'),
   vioPlay: (bytes) => ipcRenderer.invoke('vio:play', bytes),
   vioStop: () => ipcRenderer.invoke('vio:stop'),
+  vioWarm: () => ipcRenderer.invoke('vio:warm'),
   vioClip: (ms) => ipcRenderer.invoke('vio:clip', ms),
   onVioLevel: (cb) => ipcRenderer.on('vio:level', (_e, m) => cb(m)),
   onVioReady: (cb) => ipcRenderer.on('vio:ready', (_e, m) => cb(m)),     // -> Uint8Array (MP3 bytes)
