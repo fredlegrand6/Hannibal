@@ -243,6 +243,12 @@ function summarizeAction(step, params) {
       const body = String(p.body || '').trim();
       return `Send an email to ${p.to} about “${p.subject || ''}”: “${body.length > 1200 ? body.slice(0, 1200) + '…' : body}” — send it?`;
     }
+    case 'calendar.add': {
+      const when = /^\d{4}-\d{2}-\d{2}$/.test(String(p.start || '')) ? `${p.start} (all day)`
+        : (() => { const t = Date.parse(p.start); return Number.isFinite(t) ? new Date(t).toLocaleString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' }) : String(p.start || ''); })();
+      const len = /T/.test(String(p.start || '')) ? `, ${Math.round(Number(p.minutes) || 60)} minutes` : '';
+      return `Put ${q(p.title)} in your calendar on ${when}${len}${p.location ? `, at ${p.location}` : ''} — book it?`;
+    }
     case 'file.trash':    return `Move ${p.path} to the Trash — go ahead?`;
     case 'mac.emptyTrash':return `Empty the Trash permanently — go ahead?`;
     case 'mac.sleep':     return `Put the machine to sleep — go ahead?`;

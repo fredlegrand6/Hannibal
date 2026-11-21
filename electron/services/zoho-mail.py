@@ -5,6 +5,7 @@
   zoho-mail.py reply                         stdin {uid, to, body}  → sends a threaded reply
   zoho-mail.py write                         stdin {to, subject, body} → sends a new mail
   zoho-mail.py seen <uid>                    mark one message read
+  zoho-mail.py waiting [hours=48] [days=7]   mail from people still waiting for Fred's answer
 
 Env: ZOHO_EMAIL, ZOHO_APP_PW, ZOHO_IMAP_HOST (imap.zoho.eu), ZOHO_SMTP_HOST
 (smtp.zoho.eu), ZOHO_FROM_NAME (Fred Legrand), ZOHO_SIGNATURE (optional).
@@ -198,6 +199,86 @@ def cmd_triage(days, limit):
     return {"ok": True, "unread_total": total, "days": days, "messages": items}
 
 
+# Sent by a system, not typed by a person: mailing services leave their marks
+# (SES, SendGrid, Mailgun, Zoho Campaigns, Stripe...), bounces go to a robot.
+BULK_HEADERS = ("list-unsubscribe", "list-id", "feedback-id", "x-ses-outgoing", "x-sg-eid", "x-mailgun-sid",
+                "x-msfbl", "x-report-abuse", "x-transmail", "x-stripe-eid", "x-campaign", "x-mc-user", "precedence")
+ROBOT_SENDER = re.compile(r"^(no-?reply|do-?not-?reply|noreply|notifications?|notification|mailer|mailer-daemon|wordpress|billing|invoice|"
+                          r"support|info|news|newsletter|hello|team|account|accounts|security|authentication|alerts?)[^@]*@", re.I)
+
+
+def is_bulk(h):
+    keys = {k.lower() for k in h.keys()}
+    if any(k in keys for k in BULK_HEADERS) or any(k.startswith("x-mailgun") for k in keys):
+        return True
+    if h.get("Auto-Submitted", "no").lower() != "no":
+        return True
+    if "bounce" in (h.get("Return-Path", "") or "").lower():
+        return True
+    return bool(ROBOT_SENDER.match(parseaddr(h.get("From", ""))[1] or ""))
+
+
+def cmd_waiting(min_hours, max_days, limit=15):
+    """Mail from real people, to Fred directly, unanswered for min_hours or more.
+
+    Unanswered = no \\Answered flag AND nothing in Sent to that address since it came."""
+    M = imap()
+    M.select("INBOX", readonly=True)
+    since = (datetime.now() - timedelta(days=max_days)).strftime("%d-%b-%Y")
+    typ, data = M.uid("SEARCH", None, "UNANSWERED", "SINCE", since)
+    uids = (data[0].split() if data and data[0] else [])[::-1]
+    now = datetime.now().astimezone()
+    found = []
+    for u in uids[:80]:
+        typ, hd = M.uid("FETCH", u.decode(), "(BODY.PEEK[HEADER])")
+        raw = b"".join(p[1] for p in (hd or []) if isinstance(p, tuple) and len(p) > 1 and p[1])
+        if not raw:
+            continue
+        h = email.message_from_bytes(raw)
+        if is_bulk(h):
+            continue
+        if USER.lower() not in (h.get("To", "") or "").lower():
+            continue
+        frm = reply_target(h)
+        if not frm or frm == USER.lower():
+            continue
+        try:
+            when = parsedate_to_datetime(h.get("Date", "")).astimezone()
+        except Exception:
+            continue
+        age = (now - when).total_seconds() / 3600
+        if age < min_hours:
+            continue
+        found.append((u.decode(), h, frm, when, age))
+        if len(found) >= limit:
+            break
+    # Answered from another device or client? Look in Sent.
+    items = []
+    try:
+        M.select(sent_folder(M), readonly=True)
+        sent_ok = True
+    except Exception:
+        sent_ok = False
+    for uid, h, frm, when, age in found:
+        if sent_ok:
+            typ, sd = M.uid("SEARCH", None, "TO", frm, "SINCE", when.strftime("%d-%b-%Y"))
+            if sd and sd[0]:
+                continue
+        items.append({"uid": uid, "from": dec(parseaddr(h.get("From", ""))[0]) or frm, "from_email": frm,
+                      "subject": dec(h.get("Subject", "")) or "(no subject)", "age_hours": round(age),
+                      "to_me_directly": True, "newsletter": False})
+    # A short preview for the ones that are left.
+    if items:
+        M.select("INBOX", readonly=True)
+        for it in items:
+            try:
+                it["preview"] = preview(text_of(fetch(M, it["uid"])), 300)
+            except Exception:
+                it["preview"] = ""
+    M.logout()
+    return {"ok": True, "messages": items}
+
+
 def cmd_reply(req):
     uid, to, body = str(req.get("uid") or ""), str(req.get("to") or "").strip().lower(), str(req.get("body") or "")
     if not uid or not body.strip():
@@ -246,6 +327,8 @@ if __name__ == "__main__":
     try:
         if a[0] == "triage":
             out(cmd_triage(int(a[1]) if len(a) > 1 else 3, int(a[2]) if len(a) > 2 else 20))
+        elif a[0] == "waiting":
+            out(cmd_waiting(int(a[1]) if len(a) > 1 else 48, int(a[2]) if len(a) > 2 else 7))
         elif a[0] in ("reply", "write"):
             req = json.loads(sys.stdin.read() or "{}")
             out(cmd_reply(req) if a[0] == "reply" else cmd_write(req))

@@ -62,7 +62,7 @@ const { registerWorld } = require(path.join(SERVICES, 'world'));
 const claudeBrain = require(path.join(SERVICES, 'claude-brain'));
 const claudeTools = require(path.join(SERVICES, 'claude-tools'));
 
-registerInfo(ipc, { python: CFG.python, searxngUrl: CFG.searxngUrl, metricsLocal: true });
+const info = registerInfo(ipc, { python: CFG.python, searxngUrl: CFG.searxngUrl, metricsLocal: true });
 registerWorld(ipc);   // views can't open here (no screen); the narrated read still works
 
 const facts = createFactStore({ filePath: path.join(CFG.dataDir, 'memory-facts.json') });
@@ -278,6 +278,9 @@ if (process.env.BODY_LINK_TOKEN) {
           return { episodes: journal.all() };
         },
         'journal.add': ({ episodes } = {}) => { journal.merge(episodes); return { ok: true }; },
+        // Nudges: which ones were already said, on either side.
+        'nudge.said': ({ keys } = {}) => ({ added: nudger.markSaid(keys) }),
+        'nudge.sync': ({ keys } = {}) => { nudger.markSaid(keys); return { keys: nudger.said() }; },
         // The desk sends something to Fred's phone (a reminder that fired there).
         'phone.notify': async ({ text, voice } = {}) => { await tellFred(String(text || ''), { voice: !!voice }); return { ok: true }; },
       },
@@ -323,7 +326,23 @@ function sendPhoneLinkOnce() {
     .then((r) => { if (r && r.ok) fs.writeFileSync(sentFile, url); })
     .catch(() => {});
 }
+// NUDGES while the Mac is away: the same checks as the desk, sent to the phone
+// as a short text. While the Mac is linked the desk speaks them instead; the
+// two share which ones were already said (nudge.said / nudge.sync).
+const { createNudger, knownPeople } = require(path.join(SERVICES, 'nudges'));
+const nudger = createNudger({
+  statePath: path.join(CFG.dataDir, 'nudges.json'),
+  getEvents: () => info.calendar(8),
+  getMail: () => info.waitingMail(48, 7),
+  isKnown: (m) => knownPeople(facts.all().map((f) => f.text).join('\n'))(m),
+  deliver: async (n) => {
+    if (hub && hub.linked()) return false;          // the desk has it
+    try { await tellFred(`👋 ${n.text}`); return true; } catch (_) { return false; }
+  },
+});
+
 const timers = [
+  setInterval(() => { if (!(hub && hub.linked())) nudger.tick().catch((e) => console.warn('[nudge] tick failed:', e.message)); }, 60000),
   // Checked a few times: the deploy may switch the link to https a little
   // after start-up; a changed link is sent again, an unchanged one is not.
   ...[20, 60, 180].map((s) => setTimeout(sendPhoneLinkOnce, s * 1000)),

@@ -59,6 +59,7 @@ registerProactive(ipcMain, {
   // Briefs and reminders also reach Fred's phone, wherever he is. With the
   // always-on server, it sends its own morning brief; desk reminders go via it.
   onBrief: (text) => { if (telegram) telegram.notify(`☀️ Morning brief\n\n${text}`, { voice: true }).catch(() => {}); },
+  onNudgeDone: (r) => { const done = pendingNudges.get(r.id); if (done) { pendingNudges.delete(r.id); done(r.ok); } },
   onReminder: (message) => {
     const text = `⏰ Reminder: ${message}`;
     if (telegram) telegram.notify(text).catch(() => {});
@@ -407,7 +408,53 @@ ipcMain.handle('voice:tts', async (_e, text) => {
 
 // System metrics, calendar, mail and web live in services/info-handlers.js
 // (shared with the always-on server, server/hannibal-server.js).
-registerInfo(ipcMain, { python: CONFIG.pythonTTS, searxngUrl: CONFIG.searxngUrl });
+const info = registerInfo(ipcMain, { python: CONFIG.pythonTTS, searxngUrl: CONFIG.searxngUrl });
+
+// NUDGES (services/nudges.js): Hannibal brings things up himself (a meeting
+// about to start, a trip, a person's mail waiting days for an answer), at a
+// quiet moment and never while Fred is in the zone. The desk speaks them; the
+// server (on the phone) knows which ones were already said.
+const { createNudger, createZoneWatcher, knownPeople } = require('./services/nudges');
+const zoneWatch = createZoneWatcher({
+  sample: async () => {
+    const { frontmost } = require('./services/awareness');
+    const [front, idle] = await Promise.all([frontmost(), hidIdleSeconds()]);
+    return { app: front.app, title: front.title, idle };
+  },
+});
+function hidIdleSeconds() {
+  return new Promise((resolve) => {
+    require('child_process').execFile('/usr/sbin/ioreg', ['-c', 'IOHIDSystem', '-d', '4'], { timeout: 4000, maxBuffer: 4 * 1024 * 1024 }, (e, out) => {
+      const m = !e && String(out).match(/"HIDIdleTime"\s*=\s*(\d+)/);
+      resolve(m ? Number(m[1]) / 1e9 : 9999);
+    });
+  });
+}
+const pendingNudges = new Map();   // id → resolve(ok)
+let nudgeSeq = 0;
+const nudger = createNudger({
+  getEvents: () => info.calendar(8),
+  getMail: () => info.waitingMail(48, 7),
+  isKnown: (m) => knownPeople(deskFacts.all().map((f) => f.text).join('\n'))(m),
+  zone: () => zoneWatch.status(),
+  // Spoken at the desk, at a quiet moment (the renderer waits up to 10 min for one).
+  deliver: (n) => new Promise((resolve) => {
+    const id = `n${++nudgeSeq}`;
+    const timer = setTimeout(() => { pendingNudges.delete(id); resolve(false); }, 12 * 60 * 1000);
+    pendingNudges.set(id, (ok) => { clearTimeout(timer); resolve(!!ok); });
+    try { win && !win.isDestroyed() ? win.webContents.send('proactive:run', { kind: 'nudge', id, prompt: n.prompt }) : (clearTimeout(timer), resolve(false)); }
+    catch (_) { clearTimeout(timer); resolve(false); }
+  }),
+  quietText: async (n) => {
+    if (!linked()) return false;
+    try { await bodyLink.request('phone.notify', { text: `⏰ ${n.text}`, voice: false }); return true; } catch (_) { return false; }
+  },
+  onSaid: (keys) => { if (linked()) bodyLink.request('nudge.said', { keys }).catch(() => {}); },
+});
+setTimeout(() => {
+  zoneWatch.poll();
+  setInterval(async () => { await zoneWatch.poll(); nudger.tick().catch((e) => console.warn('[nudge] tick failed:', e.message)); }, 60 * 1000);
+}, 90 * 1000);
 
 ipcMain.handle('voice:config', () => ({
   whisperUrl: CONFIG.whisperUrl,
@@ -1191,6 +1238,8 @@ function startBodyLink() {
         await bodyLink.request('body.register', { channels: Object.keys(installToolTap._registry || {}) });
         const r = await bodyLink.request('facts.sync', { facts: deskFacts.all(), lastSynced: lastSyncedFacts() });
         applyServerFacts(r && r.facts);
+        const ns = await bodyLink.request('nudge.sync', { keys: nudger.said() }).catch(() => null);
+        if (ns && ns.keys) nudger.markSaid(ns.keys);
         const j = await bodyLink.request('journal.sync', { episodes: deskJournal.all() });
         const got = deskJournal.merge(j && j.episodes);
         console.log(`[body] diary in sync with the server (${deskJournal.size} conversations${got ? `, ${got} new from the phone` : ''})`);

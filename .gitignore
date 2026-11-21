@@ -9,3 +9,4 @@ native/voice-io/voice-io
 data/conversations.json
 data/conversation-live.json
 data/*.tmp
+data/nudges.json

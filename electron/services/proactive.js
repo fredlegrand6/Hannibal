@@ -165,7 +165,7 @@ function createBriefScheduler({ send, statePath = path.join(DATA, 'proactive.jso
 }
 
 // Wire both into Electron main.
-function registerProactive(ipcMain, { getWindow, onBrief, onReminder, statePath, remindersPath } = {}) {
+function registerProactive(ipcMain, { getWindow, onBrief, onReminder, onNudgeDone, statePath, remindersPath } = {}) {
   const toRenderer = (channel, payload) => {
     const w = getWindow && getWindow();
     try { w && !w.isDestroyed() && w.webContents.send(channel, payload); } catch (_) {}
@@ -177,6 +177,7 @@ function registerProactive(ipcMain, { getWindow, onBrief, onReminder, statePath,
 
   const brief = createBriefScheduler({ ...(statePath ? { statePath } : {}), send: (job) => { console.log('[proactive] morning brief due → renderer'); toRenderer('proactive:run', job); } });
   ipcMain.handle('proactive:done', (_e, r) => {
+    if (r && r.kind === 'nudge') { try { onNudgeDone && onNudgeDone(r); } catch (_) {} return { ok: true }; }
     const res = brief.done(r);
     // The brief that was spoken at the desk also goes to Fred's phone.
     if (r && r.ok && r.kind === 'morning-brief' && r.text && onBrief) { try { onBrief(String(r.text)); } catch (_) {} }
