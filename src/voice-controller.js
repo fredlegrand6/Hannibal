@@ -3152,6 +3152,7 @@ RULES:
   const CONFIRM_YES = /^(y|yes|yeah|yep|yup|yes please|ya|ja|jawel|oui|si|sí|sure|ok|okay|do it|send it|send|send that|book it|go|go ahead|confirm|confirmed|approve|approved|affirmative|doe maar|graag)$/i;
   // "Yes, book it, Hannibal" / "okay go ahead please": a clean yes plus only
   // filler that adds no doubt. Anything else after it (", but…", "wait") is not a yes.
+  const YES_WORDS = /^(yes please|yes|yeah|yep|yup|ya|ja|jawel|oui|si|sí|sure|ok|okay|do it|send it|send that|send|book it|go ahead|go|confirm|confirmed|approve|approved|affirmative|doe maar|graag|please|thanks|thank you|hannibal|that's fine|that is fine|fine|perfect|great|good|dank je|merci)(?=\s|$)/i;
   const YES_FILLER = /^(please|thanks|thank you|hannibal|book it|do it|go ahead|send it|that's fine|that is fine|fine|perfect|great|good|sure|yes|yeah|ok|okay|graag|dank je|merci)$/i;
   const CONFIRM_NO  = /^(n|no|nope|nah|don'?t|do not|stop|cancel|wait|hold on|hold up|never ?mind|negative|nee|non|skip|not now|leave it|abort)$/i;
 
@@ -3160,8 +3161,17 @@ RULES:
     if (!t) return 'silence';               // nothing heard at all
     if (CONFIRM_YES.test(t)) return 'yes';  // a clean affirmative and nothing more
     if (CONFIRM_NO.test(t)) return 'no';    // an explicit negative / hedge
-    const parts = t.split(/\s*[,.!]\s*|\s+(?=please|thanks|hannibal|book it|go ahead|do it|graag|merci)\b/i).filter(Boolean);
-    if (parts.length > 1 && CONFIRM_YES.test(parts[0]) && parts.slice(1).every((p) => YES_FILLER.test(p) || CONFIRM_YES.test(p))) return 'yes';
+    // "yes yes", "yes, book it", "okay go ahead please": made up ONLY of yes-words
+    // and harmless filler, starting with a yes. Eat known phrases from the front;
+    // anything left over ("but", "tomorrow", "cancel") means it is not a clean yes.
+    let rest = t.replace(/[,.!?;:]+/g, ' ').replace(/\s+/g, ' ').trim().replace(/^((uh|um|uhm|eh|ehm|oh|ah)\s+)+/, '');
+    let first = true, ok = true;
+    while (rest && ok) {
+      const m = YES_WORDS.exec(rest);
+      if (!m || (first && !CONFIRM_YES.test(m[1]))) { ok = false; break; }
+      first = false; rest = rest.slice(m[0].length).trim();
+    }
+    if (ok && !first) return 'yes';
     return 'unclear';                        // anything else — treated as NO
   }
 
