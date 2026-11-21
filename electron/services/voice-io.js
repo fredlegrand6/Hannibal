@@ -37,16 +37,17 @@ function build() {
 }
 
 function createVoiceIO({ send = () => {} } = {}) {
-  let child = null, ready = false, seq = 0, wanted = false;
+  let child = null, ready = false, seq = 0, wanted = false, failures = 0;
   const waiting = new Map();   // id → resolve
 
   function onLine(line) {
     let j; try { j = JSON.parse(line); } catch (_) { return; }
     if (j.ev === 'level') { send('vio:level', { mic: j.mic, out: j.out }); return; }
-    if (j.ev === 'ready') { ready = true; log(`ready (mic ${j.micRate} Hz, ${j.channels} ch, echo cancelling on)`); send('vio:ready', {}); return; }
+    if (j.ev === 'ready') { ready = true; failures = 0; log(`ready (mic ${j.micRate} Hz, ${j.channels} ch, echo cancelling on)`); send('vio:ready', {}); return; }
     if (j.ev === 'done' || j.ev === 'clip') { const w = waiting.get(j.id); if (w) { waiting.delete(j.id); w(j); } return; }
     if (j.ev === 'error') { log('error:', j.error); if (j.id && waiting.has(j.id)) { const w = waiting.get(j.id); waiting.delete(j.id); w(j); } return; }
     if (j.ev === 'reconfigured') log('audio device changed — engine restarted');
+    if (j.ev === 'info') log(j.error || `input ${j.in}, output ${j.out}`);
   }
 
   async function start() {
@@ -63,6 +64,8 @@ function createVoiceIO({ send = () => {} } = {}) {
       child = null; ready = false; send('vio:ready', { ready: false });
       for (const [, w] of waiting) w({ ev: 'done', error: 'helper exited' });
       waiting.clear();
+      // Keep his voice on, but don't spin: after 3 quick failures stay on the old playback.
+      if (code !== 0 && ++failures >= 3) { log('giving up for this session — he speaks through the page instead'); return; }
       if (wanted) setTimeout(start, 3000);
     });
   }

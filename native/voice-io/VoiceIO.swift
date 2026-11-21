@@ -43,7 +43,7 @@ engine.connect(player, to: engine.mainMixerNode, format: playFormat)
 let ringRate = 16000.0
 var ring = [Int16](repeating: 0, count: Int(ringRate * 30))
 var ringTotal = 0
-var micLevel: Float = 0, outLevel: Float = 0
+var micLevel: Float = 0
 var lastPlayAt = Date.distantPast
 let inFormat = input.outputFormat(forBus: 0)
 input.installTap(onBus: 0, bufferSize: 1024, format: inFormat) { buf, _ in
@@ -65,19 +65,46 @@ input.installTap(onBus: 0, bufferSize: 1024, format: inFormat) { buf, _ in
   }
   lock.unlock()
 }
-engine.mainMixerNode.installTap(onBus: 0, bufferSize: 1024, format: nil) { buf, _ in
-  guard let ch = buf.floatChannelData?[0] else { return }
-  let n = Int(buf.frameLength); var sum: Float = 0
-  for i in 0..<n { sum += ch[i] * ch[i] }
-  lock.lock(); outLevel = max(outLevel, sqrt(sum / Float(max(1, n)))); lock.unlock()
+// His loudness for the brain animation: per-50 ms RMS of each scheduled sentence,
+// looked up by how far the player has got (no tap on the output, which voice
+// processing does not like).
+var schedule: [(start: Int64, rms: [Float])] = []
+var scheduledEnd: Int64 = 0
+func chunkRMS(_ b: AVAudioPCMBuffer) -> [Float] {
+  guard let ch = b.floatChannelData?[0] else { return [] }
+  let n = Int(b.frameLength), step = 2205
+  var out: [Float] = []
+  var i = 0
+  while i < n { let e = min(n, i + step); var s: Float = 0; for j in i..<e { s += ch[j] * ch[j] }; out.append(sqrt(s / Float(e - i))); i = e }
+  return out
+}
+func currentOut() -> Float {
+  guard player.isPlaying, let nt = player.lastRenderTime, let pt = player.playerTime(forNodeTime: nt) else { return 0 }
+  let t = pt.sampleTime
+  for e in schedule.reversed() where t >= e.start {
+    let k = Int((t - e.start) / 2205)
+    return k < e.rms.count ? e.rms[k] : 0
+  }
+  return 0
 }
 
-do { try engine.start() } catch { emit(["ev": "error", "error": "audio engine: \(error.localizedDescription)"]); exit(1) }
+let outFmt = engine.outputNode.inputFormat(forBus: 0)
+emit(["ev": "info", "in": "\(inFormat.sampleRate) Hz x\(inFormat.channelCount)", "out": "\(outFmt.sampleRate) Hz x\(outFmt.channelCount)"])
+engine.prepare()
+var started = false
+for attempt in 1...3 {
+  do { try engine.start(); started = true; break } catch {
+    emit(["ev": "info", "error": "audio engine start \(attempt): \(error.localizedDescription)"])
+    Thread.sleep(forTimeInterval: 0.5)
+  }
+}
+if !started { emit(["ev": "error", "error": "audio engine would not start"]); exit(1) }
 emit(["ev": "ready", "micRate": inFormat.sampleRate, "channels": Int(inFormat.channelCount)])
 
 // levels every 50 ms while he speaks (and a second after)
 Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { _ in
-  lock.lock(); let m = micLevel, o = outLevel; micLevel = 0; outLevel = 0; lock.unlock()
+  lock.lock(); let m = micLevel; micLevel = 0; lock.unlock()
+  let o = currentOut()
   if player.isPlaying || Date().timeIntervalSince(lastPlayAt) < 1 {
     emit(["ev": "level", "mic": Double(m), "out": Double(o)])
   }
@@ -140,6 +167,10 @@ DispatchQueue.global().async {
           let buf = try load(path)
           pending.insert(id)
           lastPlayAt = Date()
+          if !player.isPlaying { schedule.removeAll(); scheduledEnd = 0 }
+          schedule.append((start: scheduledEnd, rms: chunkRMS(buf)))
+          scheduledEnd += Int64(buf.frameLength)
+          if schedule.count > 20 { schedule.removeFirst(schedule.count - 20) }
           player.scheduleBuffer(buf, completionCallbackType: .dataPlayedBack) { _ in finish(id) }
           if !engine.isRunning { try? engine.start() }
           if !player.isPlaying { player.play() }
