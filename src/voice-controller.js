@@ -511,8 +511,10 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   }
   calibrateNoiseFloor(); // fire-and-forget; finishes well before the first wake/listen
 
-  async function startListening({ conversation = false, fromMark = 0 } = {}) {
+  async function startListening({ conversation = false, fromMark = 0, interrupt = false } = {}) {
     if (confirmInFlight) return;                                 // gate owns the mic
+    // Space / a click on the core while he talks = stop talking and listen.
+    if (interrupt && (speaking || phase === 'speaking')) { console.warn('[barge] stopped by key/click'); bargeStop(); setPhase('idle'); conversation = true; }
     if (speaking) return;                                        // never open the mic over Hannibal's own voice
     if (phase === 'listening' || phase === 'thinking') return; // already busy
     aborted = false;
@@ -2956,8 +2958,16 @@ RULES:
     // interrupt to whatever task was talking. This is the primary signal for
     // "response was too long" — at 3 hits per task type, the override flips
     // that task's default length to 'short'.
-    if (phase === 'speaking' && lastTaskType) recordInterruption(lastTaskType);
     unlock();
+    // The wake word while he talks = stop talking and listen (his own voice
+    // never says it, so this one is reliable even over the speakers).
+    if (phase === 'speaking' || speaking) {
+      console.warn('[barge] stopped by the wake word');
+      bargeStop();
+      setPhase('idle');
+      startListening({ conversation: true });
+      return;
+    }
     // Context-aware greeting on wake-from-idle. Suppress on quick re-wakes
     // (within 5 min) so a back-to-back "hey hannibal" doesn't make Hannibal
     // re-greet on every utterance. Greeting is short (1-2 seconds of TTS)
