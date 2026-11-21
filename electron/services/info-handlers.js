@@ -133,7 +133,12 @@ async function fetchCalendar(days) {
     });
     if (res.status === 401) { calendarAccount.forget(); throw new Error('the calendar login was refused (check the app-specific password)'); }
     if (!res.ok && res.status !== 207) throw new Error(`caldav ${res.status} on ${cal.name}`);
-    return parseICalEvents(await res.text(), now).map((e) => ({ ...e, calendar: cal.name }));
+    // One <response> per stored event: keep its address, so delete/move can reach it.
+    const xml = await res.text();
+    return String(xml).split(/<(?:[a-z0-9]+:)?response[\s>]/i).slice(1).flatMap((block) => {
+      const href = ((block.match(/<(?:[a-z0-9]+:)?href[^>]*>([\s\S]*?)<\//i) || [])[1] || '').trim();
+      return parseICalEvents(block, now).map((e) => ({ ...e, calendar: cal.name, ...(href ? { href } : {}) }));
+    });
   };
   const got = await Promise.allSettled(a.read.map(one));
   const events = got.filter((g) => g.status === 'fulfilled').flatMap((g) => g.value);
@@ -148,7 +153,7 @@ async function fetchCalendar(days) {
   const list = events.sort((x, y) => x.ts - y.ts).filter((e) => {
     if (!e.uid) return true;
     const k = `${e.uid}|${e.ts}`; if (seen.has(k)) return false; seen.add(k); return true;
-  }).map(({ uid, ...e }) => (uid ? { ...e, id: uid } : e));
+  }).map(({ uid, href, ...e }) => (href ? { ...e, id: href } : e));
   if (failed.length) console.log('[calendar] skipped:', failed.join('; '));
   return { ok: true, events: list };
 }
@@ -181,18 +186,19 @@ ipcMain.handle('calendar:add', async (_e, title, start, minutes, location, notes
 // calendar.events returns) and must carry the title Claude named in the
 // question Fred said yes to, so a mixed-up id can never touch another event.
 // Repeating events are left alone: changing one would change the whole series.
-async function findEvent(a, uid) {
-  const xmlEsc = (v) => String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  const body = `<?xml version="1.0"?><c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><d:getetag/><c:calendar-data/></d:prop><c:filter><c:comp-filter name="VCALENDAR"><c:comp-filter name="VEVENT"><c:prop-filter name="UID"><c:text-match collation="i;octet">${xmlEsc(uid)}</c:text-match></c:prop-filter></c:comp-filter></c:comp-filter></c:filter></c:calendar-query>`;
-  for (const cal of a.read) {
-    try {
-      const res = await fetch(cal.url, { method: 'REPORT', headers: { Authorization: a.auth, Depth: '1', 'Content-Type': 'application/xml; charset=utf-8' }, body, signal: AbortSignal.timeout(15000) });
-      if (!res.ok && res.status !== 207) continue;
-      const hit = parseEventObjects(await res.text()).find((o) => o.uid === uid);
-      if (hit) return { ...hit, cal, url: new URL(hit.href, cal.url).toString() };
-    } catch (_) {}
-  }
-  return null;
+// The id is the event's address in the calendar (what calendar.events returns).
+// It must sit inside one of Fred's own calendars; the stored event is read back
+// fresh (with its ETag) so a change made meanwhile is never overwritten.
+async function findEvent(a, id) {
+  const cal = a.read.find((c) => { try { return new URL(id, c.url).toString().startsWith(c.url); } catch (_) { return false; } });
+  if (!cal) return null;
+  const url = new URL(id, cal.url).toString();
+  try {
+    const res = await fetch(url, { headers: { Authorization: a.auth }, signal: AbortSignal.timeout(10000) });
+    if (!res.ok) return null;
+    const ev = describeIcs(await res.text());
+    return ev.uid ? { ...ev, etag: res.headers.get('etag'), cal, url } : null;
+  } catch (_) { return null; }
 }
 const sameTitle = (a, b) => {
   const n = (x) => String(x || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
@@ -417,14 +423,18 @@ function parseEventObjects(xml) {
     const etag = (r.match(/<(?:[a-z0-9]+:)?getetag[^>]*>([\s\S]*?)<\//i) || [])[1];
     const data = (r.match(/<(?:[a-z0-9]+:)?calendar-data[^>]*>([\s\S]*?)<\/(?:[a-z0-9]+:)?calendar-data>/i) || [])[1];
     if (!href || !data) continue;
-    const ics = unxml(data).replace(/\r?\n[ \t]/g, '');
-    const ev = (ics.split(/BEGIN:VEVENT/)[1] || '').split(/END:VEVENT/)[0];
-    const field = (k) => ((ev.match(new RegExp(`(?:^|\\n)${k}[^:\\n]*:(.*)`)) || [])[1] || '').trim();
-    out.push({ href: unxml(href).trim(), etag: etag ? unxml(etag).trim() : null, ics,
-      uid: field('UID'), title: field('SUMMARY').replace(/\\([,;\\])/g, '$1').replace(/\\n/gi, ' '),
-      recurring: /(?:^|\n)(RRULE|RDATE|RECURRENCE-ID)[;:]/.test(ics) || (ics.match(/BEGIN:VEVENT/g) || []).length > 1 });
+    out.push({ href: unxml(href).trim(), etag: etag ? unxml(etag).trim() : null, ...describeIcs(unxml(data)) });
   }
   return out;
+}
+
+// { ics, uid, title, recurring } of one stored calendar object.
+function describeIcs(raw) {
+  const ics = String(raw || '').replace(/\r?\n[ \t]/g, '');
+  const ev = (ics.split(/BEGIN:VEVENT/)[1] || '').split(/END:VEVENT/)[0];
+  const field = (k) => ((ev.match(new RegExp(`(?:^|\\n)${k}[^:\\n]*:(.*)`)) || [])[1] || '').trim();
+  return { ics, uid: field('UID'), title: field('SUMMARY').replace(/\\([,;\\])/g, '$1').replace(/\\n/gi, ' '),
+    recurring: /(?:^|\n)(RRULE|RDATE|RECURRENCE-ID)[;:]/.test(ics) || (ics.match(/BEGIN:VEVENT/g) || []).length > 1 };
 }
 
 // The event's own text with new times. start: local "YYYY-MM-DDTHH:MM" (or

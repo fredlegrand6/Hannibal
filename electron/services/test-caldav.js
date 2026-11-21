@@ -105,6 +105,7 @@ function fakeIcloud({ status = 207 } = {}) {
       assert.strictEqual(r.ok, true, JSON.stringify(r));
       // the copied invite (same UID) once; two different "Appointment"s at the same time both stay
       assert.deepStrictEqual(r.events.map((e) => e.title).sort(), ['Appointment', 'Appointment', 'Dinner with Gaian', 'Shared invite']);
+      assert.ok(r.events.every((e) => e.id === '/e.ics'), 'each event carries its address as id');
       assert.ok(seen.every((s) => /<c:expand /.test(s.body)), 'asks the server to expand recurring events');
       const pad = (x) => String(x).padStart(2, '0');
       const tomorrow = new Date(Date.now() + 24 * 3600 * 1000);
@@ -139,37 +140,32 @@ function fakeIcloud({ status = 207 } = {}) {
     const handlers = {};
     const ipc = { handle: (ch, fn) => { handlers[ch] = fn; } };
     const account = { get: async () => ({ kind: 'icloud', auth: 'Basic x', read: [{ url: 'https://c/werk/', name: 'Werk', writable: true }], write: { url: 'https://c/werk/', name: 'Werk' } }), forget: () => {} };
-    const obj = (uid, title, extra = '') => `<response><href>/werk/${uid}.ics</href><propstat><prop><getetag>"e-${uid}"</getetag><C:calendar-data xmlns:C="urn:ietf:params:xml:ns:caldav">BEGIN:VCALENDAR&#13;
-BEGIN:VEVENT&#13;
-UID:${uid}&#13;
-DTSTART:20991122T100000Z&#13;
-DTEND:20991122T110000Z&#13;
-SUMMARY:${title}&#13;
-${extra}END:VEVENT&#13;
-END:VCALENDAR&#13;
-</C:calendar-data></prop></propstat></response>`;
-    const store = { jay: obj('jay', 'Call with Jay'), gym: obj('gym', 'Gym', 'RRULE:FREQ=WEEKLY&#13;\n') };
+    const obj = (uid, title, extra = '') => `BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:${uid}\r\nDTSTART:20991122T100000Z\r\nDTEND:20991122T110000Z\r\nSUMMARY:${title}\r\n${extra}END:VEVENT\r\nEND:VCALENDAR\r\n`;
+    const store = { '/werk/jay.ics': obj('jay', 'Call with Jay'), '/werk/gym.ics': obj('gym', 'Gym', 'RRULE:FREQ=WEEKLY\r\n'), '/other/x.ics': obj('x', 'Secret') };
     const seen = [];
     const realFetch = global.fetch;
-    global.fetch = async (url, o) => {
-      seen.push({ url, method: o.method, headers: o.headers, body: o.body });
-      if (o.method === 'REPORT') { const uid = (o.body.match(/i;octet">([^<]+)</) || [])[1]; return { ok: false, status: 207, text: async () => ms(store[uid] || '') }; }
+    global.fetch = async (url, o = {}) => {
+      seen.push({ url, method: o.method || 'GET', headers: o.headers || {}, body: o.body });
+      const path = new URL(url).pathname;
+      if (!o.method || o.method === 'GET') return store[path] ? { ok: true, status: 200, headers: { get: () => `"e-${path}"` }, text: async () => store[path] } : { ok: false, status: 404, headers: { get: () => null }, text: async () => '' };
       return { ok: true, status: 204, text: async () => '' };
     };
     try {
       require('./info-handlers').registerInfo(ipc, { calendarAccount: account, python: 'python3' });
-      let r = await handlers['calendar:delete']({}, 'jay', 'Gym');
+      let r = await handlers['calendar:delete']({}, '/werk/jay.ics', 'Gym');
       assert.ok(!r.ok && /belongs to "Call with Jay"/.test(r.error), 'wrong title: nothing deleted');
-      r = await handlers['calendar:delete']({}, 'gym', 'Gym');
+      r = await handlers['calendar:delete']({}, '/werk/gym.ics', 'Gym');
       assert.ok(!r.ok && /repeats/.test(r.error));
-      r = await handlers['calendar:delete']({}, 'nope', 'X');
+      r = await handlers['calendar:delete']({}, '/werk/nope.ics', 'X');
       assert.ok(!r.ok && /not in the calendar/.test(r.error));
+      r = await handlers['calendar:delete']({}, '/werk/../other/x.ics', 'Secret');
+      assert.ok(!r.ok, 'outside Fred\'s calendars: refused');
       assert.ok(!seen.some((x) => x.method === 'DELETE'));
-      r = await handlers['calendar:delete']({}, 'jay', 'call with jay');
+      r = await handlers['calendar:delete']({}, '/werk/jay.ics', 'call with jay');
       assert.ok(r.ok, JSON.stringify(r));
       const del = seen.find((x) => x.method === 'DELETE');
-      assert.strictEqual(del.url, 'https://c/werk/jay.ics'); assert.strictEqual(del.headers['If-Match'], '"e-jay"');
-      r = await handlers['calendar:move']({}, 'jay', '2099-11-23T15:00', undefined, 'Call with Jay');
+      assert.strictEqual(del.url, 'https://c/werk/jay.ics'); assert.strictEqual(del.headers['If-Match'], '"e-/werk/jay.ics"');
+      r = await handlers['calendar:move']({}, '/werk/jay.ics', '2099-11-23T15:00', undefined, 'Call with Jay');
       assert.ok(r.ok, JSON.stringify(r));
       const put = seen.find((x) => x.method === 'PUT');
       assert.match(put.body, /DTSTART:2099112\dT\d{6}Z\r\nDTEND:/); assert.match(put.body, /SEQUENCE:1/);
