@@ -403,6 +403,10 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   let tap = null, turnMark = 0, tapFloor = 0;   // tapFloor: never pre-roll back past this (his own voice, the last turn)
   // Barge-in (src/barge-in.js): Fred talks over Hannibal → he stops.
   let bargeTimer = null, bargeBusy = 0, bargeCount = 0, turnSeq = 0, curSrc = null;
+  let bargeSession = null, vioFeed = null;
+  // Voice helper (native/voice-io, Apple echo cancelling): when it is ready he
+  // speaks through it, and barge-in listens on its clean mic.
+  let vio = false;
   const spokenRecent = [];   // his last few sentences, to tell his own echo from Fred
   let lastSpokeAt = 0;
   let wokeAt = 0;
@@ -2057,49 +2061,75 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     startListening({ conversation: true });
   }
 
+  if (window.hannibal && window.hannibal.vioStatus) {
+    const setVio = (on, why) => { if (on !== vio) console.warn(`[voice] echo-cancelling voice helper ${on ? 'ON — he speaks through it, talk over him any time' : 'off'}${why ? ` (${why})` : ''}`); vio = on; };
+    window.hannibal.vioStatus().then((st) => setVio(!!(st && st.ready))).catch(() => {});
+    window.hannibal.onVioReady((m) => setVio(!(m && m.ready === false)));
+    window.hannibal.onVioLevel((m) => {
+      if (phase !== 'speaking') return;
+      brain.setAmplitude(Math.min(1, (m.out || 0) * 3));
+      if (vioFeed) vioFeed(m.mic || 0);
+    });
+  }
+
   // ── BARGE-IN ─────────────────────────────────────────────────────────────
   // While he speaks, the open mic (audio tap) is watched. A sustained jump in
   // level is sent to Whisper; he stops only when it is Fred (his name, a stop
   // word, or real words that are not his own echo). HANNIBAL_BARGE_IN=0 = off.
-  function stopBargeWatch() { if (bargeTimer) { clearInterval(bargeTimer); bargeTimer = null; } }
+  function stopBargeWatch() {
+    if (bargeTimer) { clearInterval(bargeTimer); bargeTimer = null; }
+    vioFeed = null; bargeSession = null;
+  }
   function startBargeWatch() {
-    if (bargeTimer || cfg.bargeIn === false || !window.BargeIn || confirmInFlight) return;
-    if (!(tap && tap.alive())) { console.warn('[barge] not watching: the open mic is off'); return; }
+    if (bargeSession || cfg.bargeIn === false || !window.BargeIn || confirmInFlight) return;
     const B = window.BargeIn;
-    const sr = tap.ring.sampleRate, frame = Math.floor(sr * 0.05);
-    const w = B.createWatcher({ minBar: Number(cfg.bargeMinBar) || 0.006 });
-    let frames = 0, onsetMark = 0, peak = 0, lastReport = performance.now();
-    bargeTimer = setInterval(async () => {
-      if (phase !== 'speaking' || confirmInFlight || !tap || !tap.alive()) { stopBargeWatch(); return; }
-      const level = B.rms(tap.ring.read(tap.mark() - frame));
+    const useVio = vio;
+    if (!useVio && !(tap && tap.alive())) { console.warn('[barge] not watching: the open mic is off'); return; }
+    const sr = useVio ? 16000 : tap.ring.sampleRate;
+    const w = B.createWatcher(useVio
+      ? { minBar: Number(cfg.bargeMinBar) || 0.01, maxMs: 6000 }       // clean mic: wait for Fred to finish
+      : { minBar: Number(cfg.bargeMinBar) || 0.006 });
+    const session = {};
+    bargeSession = session;
+    let frames = 0, onsetAt = 0, onsetMark = 0, peak = 0, lastReport = performance.now();
+    const onFrame = async (level) => {
+      if (bargeSession !== session) return;
+      if (phase !== 'speaking' || confirmInFlight) { stopBargeWatch(); return; }
       peak = Math.max(peak, level);
       if (performance.now() - lastReport > 3000) {   // tuning trace (renderer only forwards warnings)
-        console.warn(`[barge] watching: mic peak ${peak.toFixed(4)}, bar ${w.bar.toFixed(4)}`);
+        console.warn(`[barge] watching${useVio ? ' (echo-cancelled)' : ''}: mic peak ${peak.toFixed(4)}, bar ${w.bar.toFixed(4)}`);
         peak = 0; lastReport = performance.now();
       }
       if (++frames <= 8) { w.learn(level); return; }      // first 0.4 s: learn the room + his echo
       const ev = w.push(level);
-      if (ev === 'onset') { onsetMark = Math.max(0, tap.mark() - Math.floor(sr * 0.6)); console.warn(`[barge] sound over his voice (level ${level.toFixed(3)}, bar ${w.bar.toFixed(3)})`); return; }
+      if (ev === 'onset') {
+        onsetAt = performance.now();
+        if (!useVio) onsetMark = Math.max(0, tap.mark() - Math.floor(sr * 0.6));
+        console.warn(`[barge] sound over his voice (level ${level.toFixed(3)}, bar ${w.bar.toFixed(3)})`);
+        return;
+      }
       if (ev !== 'done' && ev !== 'long') return;
-      // Check this clip in the background and keep watching: his own echo makes
-      // many false candidates, and Fred's real "stop" must not wait behind them.
-      const stillTalking = ev === 'long';
+      // Check this clip in the background and keep watching: a false alarm must
+      // never make Fred's real "stop" wait.
+      const stillTalking = !useVio && ev === 'long';
       const clipMark = onsetMark;
-      const clip = tap.wav(clipMark, 0, 0);
-      w.reset();                                      // still loud → a new slice starts in 0.25 s
-      if (bargeBusy >= 2) return;                     // two checks already running
+      const clipMs = performance.now() - onsetAt + 600 + 250;
+      const tapClip = useVio ? null : tap.wav(clipMark, 0, 0);
+      w.reset();
+      if (bargeBusy >= 2) return;
       bargeBusy++;
-      const mine = bargeTimer;
       let heard = '';
       try {
-        // Short clips: Whisper's language guess goes wild ("Hann er bótt" = Icelandic),
-        // so use the language of the conversation.
-        const lang = cfg.sttLanguage && cfg.sttLanguage !== 'auto' && cfg.sttLanguage !== 'follow' ? cfg.sttLanguage : (LANG_CODE[currentLanguage] || 'en');
-        const r = await fetch(`${cfg.whisperUrl}/transcribe?language=${lang}`, { method: 'POST', body: new Blob([clip], { type: 'audio/wav' }) });
-        heard = (((await r.json()) || {}).transcript || '').trim();
+        const clip = useVio ? await window.hannibal.vioClip(clipMs) : tapClip;
+        if (clip && clip.length > 44) {
+          // Short clips: Whisper's language guess goes wild, so use the conversation's language.
+          const lang = cfg.sttLanguage && cfg.sttLanguage !== 'auto' && cfg.sttLanguage !== 'follow' ? cfg.sttLanguage : (LANG_CODE[currentLanguage] || 'en');
+          const r = await fetch(`${cfg.whisperUrl}/transcribe?language=${lang}`, { method: 'POST', body: new Blob([clip], { type: 'audio/wav' }) });
+          heard = (((await r.json()) || {}).transcript || '').trim();
+        }
       } catch (e) { console.warn('[barge] whisper failed', e && e.message); }
       finally { bargeBusy--; }
-      if (bargeTimer !== mine) return;                // already stopped (another check won, or he finished)
+      if (bargeSession !== session) return;            // already stopped (another check won, or he finished)
       const d = B.decide(heard, spokenRecent, { mentionsName: window.NameGate && window.NameGate.mentionsName });
       console.warn(`[barge] heard ${JSON.stringify(heard)} → ${d.barge ? 'STOP' : 'keep talking'} (${d.why})`);
       if (!d.barge || phase !== 'speaking' || confirmInFlight) return;
@@ -2112,7 +2142,12 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
         const ask = m ? heard.slice(m.index) : heard;
         transcribeAndRespond(null, fixTranscript(ask)).catch((e) => console.warn('[barge] turn failed', e));
       }
-    }, 50);
+    };
+    if (useVio) vioFeed = onFrame;
+    else {
+      const frame = Math.floor(sr * 0.05);
+      bargeTimer = setInterval(() => { if (tap && tap.alive()) onFrame(B.rms(tap.ring.read(tap.mark() - frame))); else stopBargeWatch(); }, 50);
+    }
   }
   // Stop talking now: drop the queue, cut the sound, stop Claude's reply.
   function bargeStop() {
@@ -2124,6 +2159,7 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     speaking = false;
     try { window.hannibal.claudeInterrupt && window.hannibal.claudeInterrupt(); } catch (_) {}
     if (curSrc) { try { curSrc.stop(); } catch (_) {} }
+    if (vio) { try { window.hannibal.vioStop(); } catch (_) {} }
     brain.setAmplitude(0);
     if (lastTaskType) recordInterruption(lastTaskType);   // he learns to keep that kind of answer shorter
   }
@@ -2169,6 +2205,13 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
     const audioBuf = await audioCtx.decodeAudioData(ab);
     if (seq !== null && seq !== turnSeq) return;   // Fred cut in while this sentence was loading
+    if (vio) {
+      if (turnEndedAt) { console.warn(`[timing] you stopped talking → his first word: ${Math.round(performance.now() - turnEndedAt)} ms`); turnEndedAt = 0; }
+      const r = await window.hannibal.vioPlay(bytes);
+      brain.setAmplitude(0);
+      if (r && (r.ok || r.stopped)) return;
+      console.warn('[voice] voice helper could not play — using the page:', r && r.error);
+    }
     if (turnEndedAt) { console.warn(`[timing] you stopped talking → his first word: ${Math.round(performance.now() - turnEndedAt)} ms`); turnEndedAt = 0; }
     await playWithAmplitude(audioBuf);
   }

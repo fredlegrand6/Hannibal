@@ -35,6 +35,7 @@ const { registerProactive } = require('./services/proactive');
 const { createTelegramBridge, makeWhisperTranscriber } = require('./services/telegram');
 const { createQdrantMemory, registerMemoryIpc } = require('./services/qdrant-memory');
 const { registerInfo } = require('./services/info-handlers');
+const { createVoiceIO } = require('./services/voice-io');   // his voice + ears on Apple's echo cancelling
 const { createCameraPicker } = require('./services/camera-device');
 const { createFaceFollow, greetingFor } = require('./services/face-follow');
 installToolTap(ipcMain);
@@ -1220,7 +1221,12 @@ function startTelegram() {
   tryStart();
 }
 
+// Hannibal's mouth + ears on Apple voice processing, so Fred can talk over him.
+const voiceIO = createVoiceIO({ send: (ch, data) => { try { win && win.webContents.send(ch, data); } catch (_) {} } });
+voiceIO.register(ipcMain);
+
 app.whenReady().then(async () => {
+  voiceIO.start().catch((e) => console.warn('[voice-io] start failed', e.message));
   ensureAliasesFile();
   ensureBehaviorLogFile();
   ensurePrefsFile();
@@ -1299,6 +1305,7 @@ app.whenReady().then(async () => {
 app.on('before-quit', () => { app.isQuiting = true; });
 app.on('will-quit', () => {
   if (wakeProc) wakeProc.kill();
+  try { voiceIO.quit(); } catch (_) {}
   if (whisperProc) whisperProc.kill();
   if (telegram) telegram.stop();
   if (vadProc) { try { vadProc.kill(); } catch (_) {} }
