@@ -4,3 +4,4 @@ node_modules/
 *.bak
 __pycache__/
 native/face-follow/face-follow
+native/voice-io/voice-io
