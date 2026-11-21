@@ -36,8 +36,11 @@ if #available(macOS 14.0, *) {
 
 let player = AVAudioPlayerNode()
 engine.attach(player)
-var playFormat = AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 1)!
-engine.connect(player, to: engine.mainMixerNode, format: playFormat)
+// Straight into the output: with voice processing on, any mixer in between stops
+// the engine from starting (tested on Fred's Mac, macOS 27).
+var playFormat = engine.outputNode.inputFormat(forBus: 0)
+if playFormat.sampleRate == 0 { playFormat = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 2)! }
+engine.connect(player, to: engine.outputNode, format: playFormat)
 
 // ── ears: echo-cancelled mic → 16 kHz mono ring (last 30 s) ──
 let ringRate = 16000.0
@@ -69,7 +72,7 @@ func onMic(_ buf: AVAudioPCMBuffer) {
 // With voice processing on, the mic reports odd channel counts (x9 on a MacBook);
 // tapping in that format can stop the engine from starting. Try what works.
 let monoIn = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: inFormat.sampleRate, channels: 1, interleaved: false)
-let tapFormats: [(String, AVAudioFormat?)] = [("mono", monoIn), ("native", inFormat), ("default", nil)]
+let tapFormats: [(String, AVAudioFormat?)] = [("default", nil), ("mono", monoIn), ("native", inFormat)]
 _ = ringRatio
 // His loudness for the brain animation: per-50 ms RMS of each scheduled sentence,
 // looked up by how far the player has got (no tap on the output, which voice
@@ -107,18 +110,6 @@ for (name, fmt) in tapFormats {
   }
 }
 if !started {
-  // Last try: let the engine pick every format itself.
-  engine.disconnectNodeOutput(player)
-  engine.connect(player, to: engine.mainMixerNode, format: nil)
-  playFormat = player.outputFormat(forBus: 0)
-  input.removeTap(onBus: 0)
-  input.installTap(onBus: 0, bufferSize: 1024, format: nil) { buf, _ in onMic(buf) }
-  engine.prepare()
-  do { try engine.start(); started = true; emit(["ev": "info", "error": "engine started (all default formats)"]) } catch {
-    emit(["ev": "info", "error": "engine start, all defaults: \(error.localizedDescription)"])
-  }
-}
-if !started {
   // Diagnose: is it voice processing itself (e.g. mic and speakers at different sample rates)?
   engine.stop()
   try? input.setVoiceProcessingEnabled(false)
@@ -152,6 +143,7 @@ func load(_ path: String) throws -> AVAudioPCMBuffer {
   let src = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length))!
   try file.read(into: src)
   if file.processingFormat == playFormat { return src }
+  // mono 44.1 kHz MP3 → the output's format (e.g. stereo 48 kHz)
   let conv = AVAudioConverter(from: file.processingFormat, to: playFormat)!
   let cap = AVAudioFrameCount(Double(src.frameLength) * playFormat.sampleRate / file.processingFormat.sampleRate) + 1024
   let dst = AVAudioPCMBuffer(pcmFormat: playFormat, frameCapacity: cap)!
