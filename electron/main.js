@@ -405,6 +405,7 @@ ipcMain.handle('voice:config', () => ({
   nameGate: CONFIG.nameGate,
   nameFollowUpMs: CONFIG.nameFollowUpMs,
   bargeIn: process.env.HANNIBAL_BARGE_IN !== '0',   // talk over him to cut him off
+  bargeMinBar: Number(process.env.HANNIBAL_BARGE_BAR) || 0,   // mic level that counts as Fred talking (default 0.006)
   qdrantUrl: CONFIG.qdrantUrl,
   qdrantApiKey: process.env.QDRANT_API_KEY || '',   // Qdrant on GEX131 requires it (api-key header)
   // Chat brain: Claude first (the key stays in main), Ollama on GEX131 as fallback.

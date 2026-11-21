@@ -2062,18 +2062,23 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   function stopBargeWatch() { if (bargeTimer) { clearInterval(bargeTimer); bargeTimer = null; } }
   function startBargeWatch() {
     if (bargeTimer || cfg.bargeIn === false || !window.BargeIn || confirmInFlight) return;
-    if (!(tap && tap.alive())) return;
+    if (!(tap && tap.alive())) { console.warn('[barge] not watching: the open mic is off'); return; }
     const B = window.BargeIn;
     const sr = tap.ring.sampleRate, frame = Math.floor(sr * 0.05);
-    const w = B.createWatcher();
-    let frames = 0, onsetMark = 0;
+    const w = B.createWatcher({ minBar: Number(cfg.bargeMinBar) || 0.006 });
+    let frames = 0, onsetMark = 0, peak = 0, lastReport = performance.now();
     bargeTimer = setInterval(async () => {
       if (phase !== 'speaking' || confirmInFlight || !tap || !tap.alive()) { stopBargeWatch(); return; }
       if (bargeBusy) return;
       const level = B.rms(tap.ring.read(tap.mark() - frame));
+      peak = Math.max(peak, level);
+      if (performance.now() - lastReport > 3000) {   // tuning trace (renderer only forwards warnings)
+        console.warn(`[barge] watching: mic peak ${peak.toFixed(4)}, bar ${w.bar.toFixed(4)}`);
+        peak = 0; lastReport = performance.now();
+      }
       if (++frames <= 8) { w.learn(level); return; }      // first 0.4 s: learn the room + his echo
       const ev = w.push(level);
-      if (ev === 'onset') { onsetMark = Math.max(0, tap.mark() - Math.floor(sr * 0.6)); console.log(`[barge] sound over his voice (level ${level.toFixed(3)}, bar ${w.bar.toFixed(3)})`); return; }
+      if (ev === 'onset') { onsetMark = Math.max(0, tap.mark() - Math.floor(sr * 0.6)); console.warn(`[barge] sound over his voice (level ${level.toFixed(3)}, bar ${w.bar.toFixed(3)})`); return; }
       if (ev !== 'done' && ev !== 'long') return;
       bargeBusy = true;
       const stillTalking = ev === 'long';
