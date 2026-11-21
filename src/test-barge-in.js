@@ -47,4 +47,10 @@ t('his name or "stop" counts even buried in his own echo', () => {
 t('a stop word he says himself is not Fred', () => {
   assert.strictEqual(B.decide('the bus stop is close', ['The bus stop is close to the office.'], { mentionsName }).barge, false);
 });
+t('watcher: speech with gaps (or empty mic ticks) still counts', () => {
+  const w = B.createWatcher({ minBar: 0.01 });
+  for (let i = 0; i < 20; i++) w.push(0.002);
+  let ev = null; for (let i = 0; i < 20 && !ev; i++) ev = w.push(i % 2 ? 0 : 0.2);
+  assert.strictEqual(ev, 'onset');
+});
 console.log(`${n} passed`);
