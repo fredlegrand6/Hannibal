@@ -699,7 +699,7 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   // language Fred is speaking. The whisper-server validates ?language= against
   // its allow-list; unknown values fall back to en. Maps detected names to
   // ISO codes (the heuristic emits 'dutch'/'french'/'english').
-  const LANG_CODE = { dutch: 'nl', french: 'fr', english: 'en' };
+  const LANG_CODE = { dutch: 'nl', french: 'fr', english: 'en', spanish: 'es' };
   async function transcribeAndRespond(blob) {
     if (confirmInFlight) return;   // gate is active — this audio is not for chat
     setPhase('thinking');
@@ -4033,15 +4033,21 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // system prompt always reflects the language Fred just spoke in. ElevenLabs
 // Daniel + eleven_multilingual_v2 handles Dutch/French pronunciation natively,
 // so no voice/model swap is needed downstream — only the LLM needs the hint.
+// Spanish too (Ibiza): same voice, eleven_multilingual_v2 speaks it natively.
 const DUTCH_WORDS = /\b(het|een|niet|wat|hoe|kan|wil|moet|voor|maar|ook|nog|wel|naar|bij|deze|geen|zijn|hebben|worden|goed|graag|alsjeblieft|vandaag|morgen)\b/i;
 const FRENCH_WORDS = /\b(le|la|les|une|est|pas|pour|que|comment|avec|dans|mais|aussi|faire|cette|sont|peut|tout|bien|merci|aujourd|demain|bonjour)\b/i;
+const SPANISH_WORDS = /(?:\b(?:el|los|las|una|es|está|estoy|están|para|pero|también|hoy|mañana|dónde|donde|cuándo|cuando|cómo|qué|tengo|quiero|puedes|hacer|muy|hola|gracias|favor|buenos|buenas|necesito|ahora|aquí|vamos|del)\b|[ñ¿¡])/i;
 function detectLanguage(text) {
   const t = String(text || '');
   // Global flags via matchAll-style: use a g-version of the same character class.
   const d = (t.match(new RegExp(DUTCH_WORDS.source, 'gi')) || []).length;
   const f = (t.match(new RegExp(FRENCH_WORDS.source, 'gi')) || []).length;
-  if (d > f && d > 0) return 'dutch';
-  if (f > d && f > 0) return 'french';
+  const s = (t.match(new RegExp(SPANISH_WORDS.source, 'gi')) || []).length;
+  const top = Math.max(d, f, s);
+  if (top === 0) return 'english';
+  if (s === top && s > d && s > f) return 'spanish';
+  if (d > f && d >= s) return 'dutch';
+  if (f > d && f >= s) return 'french';
   return 'english';
 }
 
