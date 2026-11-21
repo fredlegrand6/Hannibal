@@ -118,7 +118,17 @@ if !started {
     emit(["ev": "info", "error": "engine start, all defaults: \(error.localizedDescription)"])
   }
 }
-if !started { emit(["ev": "error", "error": "audio engine would not start"]); exit(1) }
+if !started {
+  // Diagnose: is it voice processing itself (e.g. mic and speakers at different sample rates)?
+  engine.stop()
+  try? input.setVoiceProcessingEnabled(false)
+  engine.prepare()
+  let plain = (try? engine.start()) != nil
+  emit(["ev": "error", "error": plain
+    ? "voice processing would not start, the plain engine does (mic \(Int(inFormat.sampleRate)) Hz vs speakers \(Int(engine.outputNode.outputFormat(forBus: 0).sampleRate)) Hz?)"
+    : "audio engine would not start even without voice processing (microphone permission?)"])
+  exit(1)
+}
 emit(["ev": "ready", "micRate": inFormat.sampleRate, "channels": Int(inFormat.channelCount)])
 
 // levels every 50 ms while he speaks (and a second after)
