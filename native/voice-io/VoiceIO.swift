@@ -36,7 +36,7 @@ if #available(macOS 14.0, *) {
 
 let player = AVAudioPlayerNode()
 engine.attach(player)
-let playFormat = AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 1)!
+var playFormat = AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 1)!
 engine.connect(player, to: engine.mainMixerNode, format: playFormat)
 
 // ── ears: echo-cancelled mic → 16 kHz mono ring (last 30 s) ──
@@ -46,13 +46,14 @@ var ringTotal = 0
 var micLevel: Float = 0
 var lastPlayAt = Date.distantPast
 let inFormat = input.outputFormat(forBus: 0)
-input.installTap(onBus: 0, bufferSize: 1024, format: inFormat) { buf, _ in
+var ringRatio = inFormat.sampleRate / ringRate
+func onMic(_ buf: AVAudioPCMBuffer) {
   guard let ch = buf.floatChannelData?[0] else { return }
   let n = Int(buf.frameLength)
   var sum: Float = 0
   for i in 0..<n { sum += ch[i] * ch[i] }
   let rms = sqrt(sum / Float(max(1, n)))
-  let ratio = inFormat.sampleRate / ringRate
+  let ratio = buf.format.sampleRate / ringRate
   let outN = Int(Double(n) / ratio)
   lock.lock()
   micLevel = max(micLevel, rms)
@@ -65,6 +66,11 @@ input.installTap(onBus: 0, bufferSize: 1024, format: inFormat) { buf, _ in
   }
   lock.unlock()
 }
+// With voice processing on, the mic reports odd channel counts (x9 on a MacBook);
+// tapping in that format can stop the engine from starting. Try what works.
+let monoIn = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: inFormat.sampleRate, channels: 1, interleaved: false)
+let tapFormats: [(String, AVAudioFormat?)] = [("mono", monoIn), ("native", inFormat), ("default", nil)]
+_ = ringRatio
 // His loudness for the brain animation: per-50 ms RMS of each scheduled sentence,
 // looked up by how far the player has got (no tap on the output, which voice
 // processing does not like).
@@ -90,12 +96,26 @@ func currentOut() -> Float {
 
 let outFmt = engine.outputNode.inputFormat(forBus: 0)
 emit(["ev": "info", "in": "\(inFormat.sampleRate) Hz x\(inFormat.channelCount)", "out": "\(outFmt.sampleRate) Hz x\(outFmt.channelCount)"])
-engine.prepare()
 var started = false
-for attempt in 1...3 {
-  do { try engine.start(); started = true; break } catch {
-    emit(["ev": "info", "error": "audio engine start \(attempt): \(error.localizedDescription)"])
-    Thread.sleep(forTimeInterval: 0.5)
+for (name, fmt) in tapFormats {
+  input.removeTap(onBus: 0)
+  input.installTap(onBus: 0, bufferSize: 1024, format: fmt) { buf, _ in onMic(buf) }
+  engine.prepare()
+  do { try engine.start(); started = true; emit(["ev": "info", "error": "engine started (mic tap: \(name))"]); break } catch {
+    emit(["ev": "info", "error": "engine start with \(name) tap: \(error.localizedDescription)"])
+    engine.stop()
+  }
+}
+if !started {
+  // Last try: let the engine pick every format itself.
+  engine.disconnectNodeOutput(player)
+  engine.connect(player, to: engine.mainMixerNode, format: nil)
+  playFormat = player.outputFormat(forBus: 0)
+  input.removeTap(onBus: 0)
+  input.installTap(onBus: 0, bufferSize: 1024, format: nil) { buf, _ in onMic(buf) }
+  engine.prepare()
+  do { try engine.start(); started = true; emit(["ev": "info", "error": "engine started (all default formats)"]) } catch {
+    emit(["ev": "info", "error": "engine start, all defaults: \(error.localizedDescription)"])
   }
 }
 if !started { emit(["ev": "error", "error": "audio engine would not start"]); exit(1) }
