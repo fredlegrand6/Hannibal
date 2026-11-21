@@ -199,6 +199,25 @@ def cmd_triage(days, limit):
     return {"ok": True, "unread_total": total, "days": days, "messages": items}
 
 
+# Sent by a system, not typed by a person: mailing services leave their marks
+# (SES, SendGrid, Mailgun, Zoho Campaigns, Stripe...), bounces go to a robot.
+BULK_HEADERS = ("list-unsubscribe", "list-id", "feedback-id", "x-ses-outgoing", "x-sg-eid", "x-mailgun-sid",
+                "x-msfbl", "x-report-abuse", "x-transmail", "x-stripe-eid", "x-campaign", "x-mc-user", "precedence")
+ROBOT_SENDER = re.compile(r"^(no-?reply|do-?not-?reply|noreply|notifications?|notification|mailer|mailer-daemon|wordpress|billing|invoice|"
+                          r"support|info|news|newsletter|hello|team|account|accounts|security|authentication|alerts?)[^@]*@", re.I)
+
+
+def is_bulk(h):
+    keys = {k.lower() for k in h.keys()}
+    if any(k in keys for k in BULK_HEADERS) or any(k.startswith("x-mailgun") for k in keys):
+        return True
+    if h.get("Auto-Submitted", "no").lower() != "no":
+        return True
+    if "bounce" in (h.get("Return-Path", "") or "").lower():
+        return True
+    return bool(ROBOT_SENDER.match(parseaddr(h.get("From", ""))[1] or ""))
+
+
 def cmd_waiting(min_hours, max_days, limit=15):
     """Mail from real people, to Fred directly, unanswered for min_hours or more.
 
@@ -216,7 +235,7 @@ def cmd_waiting(min_hours, max_days, limit=15):
         if not raw:
             continue
         h = email.message_from_bytes(raw)
-        if h.get("List-Unsubscribe") or h.get("List-Id") or h.get("Auto-Submitted", "no").lower() != "no":
+        if is_bulk(h):
             continue
         if USER.lower() not in (h.get("To", "") or "").lower():
             continue

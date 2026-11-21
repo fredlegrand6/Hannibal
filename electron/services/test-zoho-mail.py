@@ -26,4 +26,9 @@ try:
 except ValueError:
     ok = True
 t("reply needs uid and body", ok)
+H = lambda txt: email.message_from_string(txt + "\n\nbody")
+t("a person's mail is not bulk", not zm.is_bulk(H("From: Jean-marc Langerak <jmlangerak@revalisgroup.com>\nReturn-Path: <jmlangerak@revalisgroup.com>\nX-Mailer: Zoho Mail")))
+t("SES/Stripe/SendGrid mail is bulk", zm.is_bulk(H("From: Link <notifications@email.link.com>\nFeedback-ID: 1\nX-SES-Outgoing: x")))
+t("a bounce address means a robot", zm.is_bulk(H("From: Peter Balaji <peterbalaji@eu.zohocorp.com>\nReturn-Path: <bounces+fc74@x.com>")))
+t("robot senders: wordpress@, billing@, noreply@", all(zm.is_bulk(H(f"From: X <{a}>")) for a in ("wordpress@autoupdate.siteground.com", "billing@revalisgroup.com", "noreply@zoho.eu")))
 print(f"{n} passed")
