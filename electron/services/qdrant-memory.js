@@ -41,26 +41,21 @@ const MIN_WORDS = 4;
 const MAX_SAID_CHARS = 600;      // longer than this is almost always overheard audio
 const MAX_REPLY_CHARS = 1200;    // Hannibal's side of a stored exchange, cut at a sentence end
 
-// Hannibal's reply as it should be remembered: never cut mid-sentence.
-// Too long → up to the last full sentence that fits. Stopped halfway (Fred cut
-// in) → the sentences he finished, or a plain note that he was interrupted.
+// Hannibal's reply as it should be remembered. A reply that fits is kept as
+// it is (it may well end in a link or a list, not a full stop). Too long →
+// up to the last full sentence that fits, then " …"; never mid-word.
 const SENTENCE_END = /[.!?…]["'”’)\]]*(?=\s|$)/g;
 function tidyReply(reply, max = MAX_REPLY_CHARS) {
-  const t = String(reply || '').replace(/\s+/g, ' ').trim();
-  if (!t || /…\s*(\(interrupted\))?$/.test(t)) return t;     // already tidied
-  const ends = [...t.matchAll(SENTENCE_END)].map((m) => m.index + m[0].length);
-  const complete = ends.length && ends[ends.length - 1] === t.length;
-  if (complete && t.length <= max) return t;
-  const fit = ends.filter((e) => e <= max).pop();
-  if (fit) return t.slice(0, fit) + (t.length > fit && !complete ? ' … (interrupted)' : t.length > fit ? ' …' : '');
-  if (t.length <= max && !complete) return `${t} … (interrupted)`;
-  return `${t.slice(0, max).replace(/\s+\S*$/, '')} …`;
+  const t = String(reply || '').replace(/[ \t]+/g, ' ').trim();
+  if (t.length <= max) return t;
+  const fit = [...t.matchAll(SENTENCE_END)].map((m) => m.index + m[0].length).filter((e) => e <= max).pop();
+  return `${fit ? t.slice(0, fit) : t.slice(0, max).replace(/\s+\S*$/, '')} …`;
 }
 
 // A stored exchange with Hannibal's side tidied (other texts unchanged).
-function tidyExchange(text) {
+function tidyExchange(text, max) {
   const m = /^([\s\S]*?\n\s*Hannibal (?:replied|did):\s*)([\s\S]*)$/i.exec(String(text || ''));
-  return m ? m[1] + tidyReply(m[2]) : String(text || '');
+  return m ? m[1] + tidyReply(m[2], max) : String(text || '');
 }
 
 // The part Fred said, from a stored exchange ("Fred said (Telegram): …\nHannibal replied: …").
@@ -182,9 +177,10 @@ function createQdrantMemory({
         const j = await r.json();
         for (const p of (j.result && j.result.points) || []) {
           const old = String((p.payload && p.payload.text) || '');
-          const reply = (old.split(/\nHannibal replied:\s*/)[1] || '');
-          let text = tidyExchange(old);
-          if (reply.length >= 495) text = text.replace(/ … \(interrupted\)$/, ' …');   // the old 500-character cut
+          const reply = (old.split(/\nHannibal replied:\s*/)[1] || '').trim();
+          // Only the old 500-character cut, and only when it really ended mid-sentence.
+          if (reply.length < 495 || reply.length > 500 || /([.!?…]["'”’)\]]*|…)$/.test(reply)) continue;
+          const text = tidyExchange(old, reply.length - 1);
           if (text === old) continue;
           await fetchImpl(`${base}/collections/${COLLECTION}/points/payload`, {
             method: 'POST', headers: qHeaders, signal: AbortSignal.timeout(5000),
