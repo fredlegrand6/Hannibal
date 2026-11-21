@@ -38,4 +38,13 @@ t('watcher: a short click is not an onset', () => {
   assert.strictEqual(w.push(0.3), null); assert.strictEqual(w.push(0.3), null);
   assert.strictEqual(w.push(0.01), null); assert.strictEqual(w.active, false);
 });
+t('his name or "stop" counts even buried in his own echo', () => {
+  const d = B.decide('your next meeting is at three Hannibal stop with the team', said, { mentionsName });
+  assert.ok(d.barge); assert.strictEqual(d.why, 'name');
+  assert.ok(B.decide('after that you have a call stop', said, { mentionsName }).barge);
+  assert.ok(B.decide('Hannibal stopp', said, { mentionsName }).stopOnly);
+});
+t('a stop word he says himself is not Fred', () => {
+  assert.strictEqual(B.decide('the bus stop is close', ['The bus stop is close to the office.'], { mentionsName }).barge, false);
+});
 console.log(`${n} passed`);

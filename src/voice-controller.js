@@ -402,7 +402,7 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   let turnEndedAt = 0;
   let tap = null, turnMark = 0, tapFloor = 0;   // tapFloor: never pre-roll back past this (his own voice, the last turn)
   // Barge-in (src/barge-in.js): Fred talks over Hannibal → he stops.
-  let bargeTimer = null, bargeBusy = false, bargeCount = 0, turnSeq = 0, curSrc = null;
+  let bargeTimer = null, bargeBusy = 0, bargeCount = 0, turnSeq = 0, curSrc = null;
   const spokenRecent = [];   // his last few sentences, to tell his own echo from Fred
   let lastSpokeAt = 0;
   let wokeAt = 0;
@@ -2069,7 +2069,6 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     let frames = 0, onsetMark = 0, peak = 0, lastReport = performance.now();
     bargeTimer = setInterval(async () => {
       if (phase !== 'speaking' || confirmInFlight || !tap || !tap.alive()) { stopBargeWatch(); return; }
-      if (bargeBusy) return;
       const level = B.rms(tap.ring.read(tap.mark() - frame));
       peak = Math.max(peak, level);
       if (performance.now() - lastReport > 3000) {   // tuning trace (renderer only forwards warnings)
@@ -2080,22 +2079,37 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
       const ev = w.push(level);
       if (ev === 'onset') { onsetMark = Math.max(0, tap.mark() - Math.floor(sr * 0.6)); console.warn(`[barge] sound over his voice (level ${level.toFixed(3)}, bar ${w.bar.toFixed(3)})`); return; }
       if (ev !== 'done' && ev !== 'long') return;
-      bargeBusy = true;
+      // Check this clip in the background and keep watching: his own echo makes
+      // many false candidates, and Fred's real "stop" must not wait behind them.
       const stillTalking = ev === 'long';
+      const clipMark = onsetMark;
+      const clip = tap.wav(clipMark, 0, 0);
+      w.reset();                                      // still loud → a new slice starts in 0.25 s
+      if (bargeBusy >= 2) return;                     // two checks already running
+      bargeBusy++;
+      const mine = bargeTimer;
       let heard = '';
       try {
-        const wav = tap.wav(onsetMark, 0, 0);
-        const r = await fetch(`${cfg.whisperUrl}/transcribe?language=${sttCode()}`, { method: 'POST', body: new Blob([wav], { type: 'audio/wav' }) });
+        // Short clips: Whisper's language guess goes wild ("Hann er bótt" = Icelandic),
+        // so use the language of the conversation.
+        const lang = cfg.sttLanguage && cfg.sttLanguage !== 'auto' && cfg.sttLanguage !== 'follow' ? cfg.sttLanguage : (LANG_CODE[currentLanguage] || 'en');
+        const r = await fetch(`${cfg.whisperUrl}/transcribe?language=${lang}`, { method: 'POST', body: new Blob([clip], { type: 'audio/wav' }) });
         heard = (((await r.json()) || {}).transcript || '').trim();
       } catch (e) { console.warn('[barge] whisper failed', e && e.message); }
-      w.reset(); frames = 0; bargeBusy = false;
+      finally { bargeBusy--; }
+      if (bargeTimer !== mine) return;                // already stopped (another check won, or he finished)
       const d = B.decide(heard, spokenRecent, { mentionsName: window.NameGate && window.NameGate.mentionsName });
       console.warn(`[barge] heard ${JSON.stringify(heard)} → ${d.barge ? 'STOP' : 'keep talking'} (${d.why})`);
       if (!d.barge || phase !== 'speaking' || confirmInFlight) return;
       bargeStop();
       if (d.stopOnly) { setPhase('idle'); startListening({ conversation: true }); }          // "stop" → quiet, ears open
-      else if (stillTalking) startListening({ conversation: true, fromMark: onsetMark });     // he's mid-sentence: hear him out
-      else transcribeAndRespond(null, fixTranscript(heard)).catch((e) => console.warn('[barge] turn failed', e));
+      else if (stillTalking) startListening({ conversation: true, fromMark: clipMark });      // he's mid-sentence: hear him out
+      else {
+        // Drop any of his own echo before "Hannibal, ...".
+        const m = window.NameGate && d.why === 'name' ? heard.match(window.NameGate.NAME) : null;
+        const ask = m ? heard.slice(m.index) : heard;
+        transcribeAndRespond(null, fixTranscript(ask)).catch((e) => console.warn('[barge] turn failed', e));
+      }
     }, 50);
   }
   // Stop talking now: drop the queue, cut the sound, stop Claude's reply.

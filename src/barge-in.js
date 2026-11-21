@@ -11,7 +11,7 @@
 (function (root) {
   'use strict';
 
-  const STOP = /\b(?:stop|wait|hold on|enough|quiet|shut up|be quiet|never ?mind|ok(?:ay)? ok(?:ay)?|wacht(?: even)?|stop maar|genoeg|stil|laat maar|arr[eê]te|attends|tais[- ]toi|chut|para|espera|basta|c[aá]llate|vale vale)\b/i;
+  const STOP = /\b(?:stop+(?:ping)?|wait|hold on|enough|quiet|shut up|be quiet|never ?mind|ok(?:ay)? ok(?:ay)?|wacht(?: even)?|stop maar|genoeg|stil|laat maar|arr[eê]te|attends|tais[- ]toi|chut|para|espera|basta|c[aá]llate|vale vale)\b/i;
 
   const words = (t) => String(t || '').toLowerCase().normalize('NFC')
     .replace(/[^\p{L}\p{N}\s']/gu, ' ').split(/\s+/).filter(Boolean);
@@ -30,11 +30,14 @@
     const text = String(heard || '').trim();
     const w = words(text);
     if (!w.length) return { barge: false, why: 'nothing heard' };
+    // His name or a stop word wins even inside a clip full of his own echo
+    // (unless he was saying that word himself).
+    const said = Array.isArray(spoken) ? spoken.join(' ') : String(spoken || '');
+    const named = typeof mentionsName === 'function' && mentionsName(text) && !mentionsName(said);
+    if (named) return { barge: true, why: 'name', stopOnly: STOP.test(text) && w.length <= 4 };
+    if (STOP.test(text) && !STOP.test(said)) return { barge: true, why: 'stop word', stopOnly: w.length <= 3 };
     const echo = echoShare(text, spoken);
     if (echo >= 0.6) return { barge: false, why: `own voice (${Math.round(echo * 100)}%)` };
-    const named = typeof mentionsName === 'function' && mentionsName(text);
-    if (named) return { barge: true, why: 'name', stopOnly: false };
-    if (STOP.test(text)) return { barge: true, why: 'stop word', stopOnly: w.length <= 3 };
     if (w.length >= 3 && echo < 0.35) return { barge: true, why: 'Fred talking', stopOnly: false };
     return { barge: false, why: 'too little' };
   }
@@ -42,7 +45,7 @@
   // Level watcher: feed it frames (RMS per ~50 ms). It reports 'onset' when the
   // level stays above the bar for onsetMs, then 'done' after quietMs of quiet or
   // maxMs of talking. The bar sits well above the room and his own echo.
-  function createWatcher({ frameMs = 50, onsetMs = 250, quietMs = 450, maxMs = 3500, minBar = 0.02, factor = 3 } = {}) {
+  function createWatcher({ frameMs = 50, onsetMs = 250, quietMs = 400, maxMs = 2000, minBar = 0.02, factor = 3 } = {}) {
     let floor = 0, floorN = 0, loud = 0, quiet = 0, active = false, talkMs = 0;
     const bar = () => Math.max(minBar, floor * factor);
     return {
