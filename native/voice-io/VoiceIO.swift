@@ -145,6 +145,9 @@ func load(_ path: String) throws -> AVAudioPCMBuffer {
   if file.processingFormat == playFormat { return src }
   // mono 44.1 kHz MP3 → the output's format (e.g. stereo 48 kHz)
   let conv = AVAudioConverter(from: file.processingFormat, to: playFormat)!
+  if file.processingFormat.channelCount == 1 && playFormat.channelCount > 1 {
+    conv.channelMap = [NSNumber](repeating: 0, count: Int(playFormat.channelCount))   // his voice on every speaker
+  }
   let cap = AVAudioFrameCount(Double(src.frameLength) * playFormat.sampleRate / file.processingFormat.sampleRate) + 1024
   let dst = AVAudioPCMBuffer(pcmFormat: playFormat, frameCapacity: cap)!
   var fed = false
