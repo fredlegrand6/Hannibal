@@ -55,6 +55,26 @@ const t = async (name, fn) => { await fn(); n++; console.log('  ok ', name); };
     const none = await wa_.findContacts('Mandy', { run: async () => ({ ok: false, error: 'not allowed -1743' }), whatsapp: async () => wa });
     assert.ok(none.ok && none.people.length === 2, 'WhatsApp still answers when Contacts is blocked');
   });
+  await t('nobody found by name: the chat list is tried, strictly, and the answer is honest', async () => {
+    const nobody = async () => ({ ok: true, people: [], whatsappUnreadable: true });
+    const calls = [];
+    let r = await wa_.sendWhatsApp({ contact: 'Mandy', message: 'test' }, { find: nobody, chatList: async (c, m) => { calls.push([c, m]); return { ok: true, data: 'Sent to Mandy' }; } });
+    assert.ok(r.ok && r.verified && r.via === 'chat list' && calls[0][0] === 'Mandy', JSON.stringify(r));
+    r = await wa_.sendWhatsApp({ contact: 'Mandy', message: 'test' }, { find: nobody, chatList: async () => ({ ok: false, error: "WhatsApp send not confirmed — ERROR: no chat row matched 'Mandy'" }) });
+    assert.ok(!r.ok && /nothing was sent/.test(r.error));
+    r = await wa_.sendWhatsApp({ contact: 'Mandy', message: 'test' }, { find: nobody, chatList: async () => ({ ok: false, error: 'rowMatched=yes verify=NO_TYPE' }) });
+    assert.ok(!r.ok && /could not confirm/.test(r.error) && !/nothing was sent/.test(r.error), 'unsure is not "not sent"');
+    let used = false;
+    r = await wa_.sendWhatsApp({ contact: 'Jay', message: 'x' }, { find: async () => ({ ok: true, people: [{ name: 'Jay A', number: '1' }, { name: 'Jay B', number: '2' }] }), chatList: async () => { used = true; return { ok: true }; } });
+    assert.ok(!r.ok && r.matches && !used, 'two Jays: Fred picks, no fallback guess');
+    const unread = await wa_.findContacts('Mandy', { run: async () => ({ ok: true, out: '' }), whatsapp: async () => null });
+    assert.ok(unread.ok && unread.whatsappUnreadable, 'says when WhatsApp could not be read');
+  });
+  await t('things done outside the chat ride along with the next turn', () => {
+    const brain = require('./claude-brain');
+    assert.ok(brain.noteEvent('sent a WhatsApp to Mandy: "test", done'));
+    assert.ok(!brain.noteEvent('   '));
+  });
   await t('Claude gets contacts.find and whatsapp.send; the question names the number', () => {
     const ct = require('./claude-tools');
     const names = new Set(ct.toolDefinitions().map((d) => ct.fromApiName(d.name)));
