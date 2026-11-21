@@ -77,7 +77,7 @@ async function test(name, fn) {
     });
     const m = /Hannibal server up: (\d+) tools/.exec(out);
     assert.ok(m, out);
-    assert.strictEqual(Number(m[1]), 20, out);   // incl. mail.triage/reply/write/markRead
+    assert.strictEqual(Number(m[1]), 21, out);   // incl. mail.* and memory.conversations
     assert.ok(/SIGTERM, stopping/.test(out), out);
   });
 

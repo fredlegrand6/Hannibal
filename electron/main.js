@@ -101,6 +101,21 @@ function sharedMemory() {
   if (!_memory) _memory = createQdrantMemory({ qdrantUrl: CONFIG.qdrantUrl, ollamaUrl: CONFIG.ollamaUrl });
   return _memory;
 }
+// Conversation diary: every exchange is noted; quiet spells become summarized
+// episodes in Claude's prompt. The server's diary is the master: new episodes
+// go up, and the server's come down (conversation-journal.js).
+const { createJournal, registerJournal } = require('./services/conversation-journal');
+const deskJournal = createJournal({
+  filePath: path.join(path.dirname(deskFacts.file), 'conversations.json'),
+  summarize: (t, p) => claudeBrain.summarizeForJournal(t, p),
+  onEpisode: (ep) => {
+    if (!linked()) return;
+    bodyLink.request('journal.add', { episodes: [ep] })
+      .then((r) => deskJournal.merge(r && r.episodes)).catch((e) => console.warn('[body] journal.add failed:', e.message));
+  },
+});
+registerJournal(ipcMain, deskJournal);
+claudeBrain.setJournal(deskJournal, { liveFile: path.join(path.dirname(deskFacts.file), 'conversation-live.json'), whereName: 'desk' });
 registerMemoryIpc(ipcMain, { store: (t, m) => sharedMemory().store(t, m), search: (t, l) => sharedMemory().search(t, l) });
 // Claude's memory.query tool uses the same picky search.
 require('./services/agent/executor').setShim('memory.query', async ({ text, limit = 3 } = {}) =>
@@ -1176,9 +1191,15 @@ function startBodyLink() {
         await bodyLink.request('body.register', { channels: Object.keys(installToolTap._registry || {}) });
         const r = await bodyLink.request('facts.sync', { facts: deskFacts.all(), lastSynced: lastSyncedFacts() });
         applyServerFacts(r && r.facts);
+        const j = await bodyLink.request('journal.sync', { episodes: deskJournal.all() });
+        const got = deskJournal.merge(j && j.episodes);
+        console.log(`[body] diary in sync with the server (${deskJournal.size} conversations${got ? `, ${got} new from the phone` : ''})`);
       } catch (e) { console.warn('[body] setup after link failed:', e.message); }
     })
-    .on('event', (name, data) => { if (name === 'facts') applyServerFacts(data && data.facts); })
+    .on('event', (name, data) => {
+      if (name === 'facts') applyServerFacts(data && data.facts);
+      if (name === 'journal') deskJournal.merge(data && data.episodes);
+    })
     .on('close', () => { if (wasLinked) console.warn('[body] link to the server dropped, reconnecting'); wasLinked = false; })
     .on('error', () => {});   // routine connect errors while offline; the reconnect loop handles them
   bodyLink.connect();

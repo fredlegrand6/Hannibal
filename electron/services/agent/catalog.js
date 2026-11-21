@@ -677,6 +677,16 @@ const TOOLS = [
     side_effect: SIDE_EFFECT.WRITE, confirm: false, executor: EXECUTOR.MAIN,
     via: { channel: 'facts:forget' },
     returns: '{ ok, removed:[{ id, text }] }  (refuses if more than 5 facts match)' },
+  // Past CONVERSATIONS (electron/services/conversation-journal.js): a summarized
+  // diary of every stretch of conversation, desk and phone.
+  { name: 'memory.conversations', domain: 'memory',
+    description: 'Search past conversations with Fred (desk, phone and Telegram) by person, project or topic; returns when it was, a summary, and what was left open.',
+    params: [
+      { name: 'query', type: 'string', required: true, desc: 'names, projects or topic words, e.g. "Jay Mutuele launch"' },
+      { name: 'limit', type: 'number', required: false, desc: 'default 5' },
+    ], side_effect: SIDE_EFFECT.READ, executor: EXECUTOR.MAIN,
+    via: { channel: 'journal:search' },
+    returns: '{ ok, count, conversations:[{ when, where, title, summary, people, projects, open }] }' },
   { name: 'memory.facts', domain: 'memory',
     description: 'List the saved facts, optionally one category.',
     params: [{ name: 'category', type: 'enum', required: false, enum: ['person', 'project', 'preference', 'decision', 'place', 'routine', 'other'] }],

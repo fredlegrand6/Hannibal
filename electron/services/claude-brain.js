@@ -18,6 +18,7 @@
 // If anything fails (no key, no internet, API error, refusal) we return
 // { ok:false } and the renderer falls back to Ollama on GEX131.
 // ─────────────────────────────────────────────────────────────────────────
+const fs = require('fs');
 const Anthropic = require('@anthropic-ai/sdk');
 const claudeTools = require('./claude-tools');
 const { getDefaultFactStore } = require('./memory-facts');
@@ -56,6 +57,7 @@ You can act, not just talk: the tools let you read Fred's mail and calendar, sea
 Reads run immediately. Anything that sends, deletes or changes something is confirmed with Fred by voice automatically before it runs, so do NOT ask him for permission yourself first — just call the tool and the confirmation step asks him. If he declines, accept it and don't retry.
 Eyes: you can see. If Fred asks about anything you'd have to look at — himself, what he's holding or wearing, the room, something he shows you, his screen — call vision__capture (kind "camera", or "screen") and look before answering. Never guess what you can't see; if the image is unclear, say what you can make out and ask him to hold it closer.
 Memory: the saved facts below are things you know for sure. When Fred tells you something lasting — about a person, a project or client, how he likes things done, a decision, a place, a routine — save it with memory__remember as one short self-contained fact (do it quietly, no need to announce it unless he asked you to remember). If a saved fact is wrong or outdated, forget it and save the correct one. When he says "forget that", use memory__forget. Don't save small talk, passing moods or things that only matter right now.
+Conversations: your diary of recent conversations with Fred (desk and phone) is below, with the threads left open. Use it to follow the thread: pick up where you left off, remember what you promised, and don't make him repeat himself. For anything older, or when he asks "what did we say about…", search with memory__conversations.
 You are spoken aloud: before a slow or multi-step task say one short sentence about what you're doing, and when done give the result in one or two plain sentences (no lists, no markdown).`;
 
 function nowStamp(d = new Date()) {
@@ -65,6 +67,69 @@ function nowStamp(d = new Date()) {
     + `${pad(d.getHours())}:${pad(d.getMinutes())} (${tz})`;
 }
 let factStore = getDefaultFactStore;
+
+// ── Conversation memory (conversation-journal.js). Off until setJournal() is
+// called (main.js on the Mac, hannibal-server.js on the server), so tests never
+// touch real files.
+//   • every exchange is noted in the journal; after a quiet spell it becomes a
+//     summarized episode that rides in the system prompt (and syncs to the
+//     other side);
+//   • the running conversation is saved too, so a restart resumes mid-thread;
+//     after a long break (RESUME_MS) a fresh conversation starts and the
+//     diary carries what came before.
+let journal = null;
+let livePath = null;
+let where = () => process.env.HANNIBAL_WHERE || 'desk';
+const RESUME_MS = () => parseInt(process.env.HANNIBAL_RESUME_HOURS || '6', 10) * 3600 * 1000;
+let lastTurnAt = 0;
+let journalTimer = null;
+
+function saveLive() {
+  if (!livePath) return;
+  try {
+    const tmp = `${livePath}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ savedAt: lastTurnAt, history }));
+    fs.renameSync(tmp, livePath);
+  } catch (e) { console.warn('[claude] could not save the conversation:', e.message); }
+}
+function loadLive() {
+  if (!livePath) return;
+  try {
+    const j = JSON.parse(fs.readFileSync(livePath, 'utf8'));
+    if (Array.isArray(j.history) && j.savedAt && Date.now() - j.savedAt < RESUME_MS()) {
+      history = j.history; lastTurnAt = j.savedAt;
+      console.log(`[claude] picked up the conversation where it stopped (${Math.round(history.length / 3)} turns)`);
+    }
+  } catch (_) {}
+}
+function closeEpisode() {
+  if (!journal) return Promise.resolve(null);
+  return journal.close().catch((e) => { console.warn('[journal] close failed:', e && e.message); return null; });
+}
+// Write the diary for a finished stretch: one plain Claude call, JSON back.
+async function summarizeForJournal(transcriptText, instructions) {
+  const msg = await getClient().beta.messages.create({
+    model: process.env.HANNIBAL_JOURNAL_MODEL || model(),
+    max_tokens: 2000,
+    output_config: { effort: 'low' },
+    system: instructions,
+    messages: [{ role: 'user', content: transcriptText }],
+  });
+  return (msg.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
+}
+function setJournal(j, { liveFile, whereName } = {}) {
+  journal = j || null;
+  livePath = liveFile || null;
+  if (whereName) where = () => whereName;
+  loadLive();
+  if (journalTimer) clearInterval(journalTimer);
+  journalTimer = null;
+  if (journal) {
+    journalTimer = setInterval(() => { if (journal.due()) closeEpisode(); }, 60 * 1000);
+    if (journalTimer.unref) journalTimer.unref();
+    if (journal.due()) closeEpisode();     // a stretch left over from before a restart
+  }
+}
 const MAX_IMAGES = 5;
 // Swap image blocks for a short note (also inside tool results) before a turn
 // goes into the running history, so old frames aren't re-sent every turn.
@@ -113,6 +178,15 @@ async function chatOnce(payload, onText, opts = {}) {
 async function chatTurn({ system, context, user, images }, onText, opts, me) {
   const runTool = opts.runTool || runToolImpl;
   if (!enabled()) return { ok: false, error: 'Claude disabled or ANTHROPIC_API_KEY missing' };
+  // Back after a long break: start a fresh conversation. The diary (written
+  // first, if that stretch is not in it yet) tells him what came before.
+  if (journal && lastTurnAt && Date.now() - lastTurnAt > RESUME_MS() && history.length) {
+    await Promise.race([closeEpisode(), new Promise((r) => setTimeout(r, 20000))]);
+    if (journal.pendingCount === 0) {
+      history = [];
+      console.log('[claude] new conversation after a long break (the diary carries the last one)');
+    } else console.log('[claude] diary not written yet, so the last conversation stays in context');
+  }
   const frames = (Array.isArray(images) ? images : [])
     .filter((b) => typeof b === 'string' && claudeTools.mediaType(b)).slice(0, MAX_IMAGES);
   const turn = [{ role: 'user', content: frames.length
@@ -129,7 +203,9 @@ async function chatTurn({ system, context, user, images }, onText, opts, me) {
   const tools = useTools ? claudeTools.toolDefinitions() : undefined;
   let facts = '';
   try { facts = factStore().renderForPrompt(); } catch (_) {}
-  const sys = String(system || '') + (useTools ? TOOL_GUIDE : '') + facts;
+  let diary = '';
+  try { diary = journal ? journal.renderForPrompt() : ''; } catch (_) {}
+  const sys = String(system || '') + (useTools ? TOOL_GUIDE : '') + facts + diary;
 
   let streamed = '';
   const working = [...turn];      // this turn's messages: user, note, then assistant/tool rounds
@@ -205,6 +281,7 @@ async function chatTurn({ system, context, user, images }, onText, opts, me) {
         || (Array.isArray(m.content) && !m.content.some((b) => b && b.type === 'tool_result')));
       while (history.length && !plainUser(history[0])) history.shift();
     }
+    remember(opts, user, text);
     console.log(`[claude] ${lastModel} in=${total.input} cache_read=${total.cacheRead} `
       + `cache_write=${total.cacheWrite} out=${total.output}${toolsUsed.length ? ` tools=${toolsUsed.map((t) => t.tool).join(',')}` : ''}`);
     return { ok: true, text, model: lastModel, toolsUsed, usage: total };
@@ -212,6 +289,7 @@ async function chatTurn({ system, context, user, images }, onText, opts, me) {
     if (me.cut) {
       // Keep the conversation coherent: Fred's question + what Hannibal got out.
       history.push(lightenImages(turn[0]), { role: 'assistant', content: `${streamed.trim() || '…'} [Fred cut me off here]` });
+      remember(opts, user, `${streamed.trim()} [cut off]`);
       console.log('[claude] reply cut off by Fred (barge-in)');
       return { ok: true, text: streamed.trim(), interrupted: true, toolsUsed, model: lastModel };
     }
@@ -220,6 +298,14 @@ async function chatTurn({ system, context, user, images }, onText, opts, me) {
     // If an action already ran, say so — the caller must not re-run the request elsewhere.
     return { ok: false, error, partial: streamed, toolsUsed };
   }
+}
+
+// After a finished turn: note it in the diary and save the running conversation.
+function remember(opts, user, text) {
+  lastTurnAt = Date.now();
+  if (!journal) return;
+  try { journal.note(opts.where || where(), String(user || ''), String(text || '')); } catch (_) {}
+  saveLive();
 }
 
 // opts.runTool(apiName, input) -> { content, is_error, tool, status } enables tool use.
@@ -233,8 +319,8 @@ function registerClaudeBrain(ipcMain, opts = {}) {
     });
   });
   ipcMain.handle('llm:interrupt', () => ({ ok: interrupt() }));
-  ipcMain.handle('llm:reset', () => { history = []; return { ok: true }; });
+  ipcMain.handle('llm:reset', () => { history = []; saveLive(); return { ok: true }; });
 }
 
 module.exports = { registerClaudeBrain, chat, interrupt, enabled, model, toolsEnabled: () => !!runToolImpl && claudeTools.enabled(),
-  resetHistory: () => { history = []; }, _setClient: (c) => { client = c; }, _setFactStore: (f) => { factStore = () => f; } };
+  resetHistory: () => { history = []; saveLive(); }, setJournal, summarizeForJournal, closeEpisode, _setClient: (c) => { client = c; }, _setFactStore: (f) => { factStore = () => f; } };
