@@ -512,5 +512,5 @@ function createAwareness({ ollamaUrl, visionModel, emit, log } = {}) {
 module.exports = {
   createAwareness,
   // exported for headless unit-testing of the cheap math (see scripts/awareness-selftest)
-  StruggleDetector, aHashFromBmp, hamming, normEditDist, djb2, classifyApp, CONFIG,
+  StruggleDetector, aHashFromBmp, hamming, normEditDist, djb2, classifyApp, CONFIG, frontmost,
 };

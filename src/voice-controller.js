@@ -3529,14 +3529,15 @@ RULES:
     && (phase === 'idle' || (continuousListen && restfulListen && phase === 'listening'));
   let proactiveBusy = false;
   async function runProactive(job) {
-    if (!job || job.kind !== 'morning-brief' || proactiveBusy) return;
+    if (!job || !['morning-brief', 'nudge'].includes(job.kind)) return;
+    if (proactiveBusy) { if (job.kind === 'nudge') window.hannibal.proactiveDone({ kind: 'nudge', id: job.id, ok: false }).catch(() => {}); return; }
     proactiveBusy = true;
     let ok = false;
     let briefText = '';
     try {
       for (let w = 0; !isQuiet() && w < 600; w++) await new Promise((r) => setTimeout(r, 1000)); // ≤10 min
       if (!isQuiet()) { console.log('[proactive] never got a quiet moment — main will retry'); return; }
-      console.log('[proactive] delivering morning brief');
+      console.log(`[proactive] delivering ${job.kind === 'nudge' ? 'a nudge' : 'morning brief'}`);
       if (phase === 'listening') abortListening();   // drop the open resting turn (no STT)
       if (cfg.claudeEnabled && cfg.claudeTools) {
         setPhase('thinking');
@@ -3553,7 +3554,7 @@ RULES:
         ok = !!(reply && reply.trim());
         if (ok) briefText = reply.trim();
         startListening({ conversation: true });       // he can answer the brief straight away
-      } else {
+      } else if (job.kind === 'morning-brief') {
         const res = await window.hannibal.runSkill('morning-brief', { language: currentLanguage });
         ok = !!(res && res.ok);
       }
@@ -3561,7 +3562,7 @@ RULES:
       console.warn('[proactive] brief failed', e);
     } finally {
       proactiveBusy = false;
-      try { await window.hannibal.proactiveDone({ kind: job.kind, day: job.day, ok, text: briefText }); } catch (_) {}
+      try { await window.hannibal.proactiveDone({ kind: job.kind, day: job.day, id: job.id, ok, text: briefText }); } catch (_) {}
     }
   }
   if (window.hannibal && window.hannibal.onProactiveRun) {

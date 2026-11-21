@@ -101,33 +101,66 @@ function parseICalEvents(xml, now) {
   return events
     .filter((e) => e.allDay || e.ts >= now.getTime() - 30 * 60 * 1000)   // drop past timed events (30m grace)
     .sort((a, b) => a.ts - b.ts)
-    .map((e) => ({ ...e, day: Math.floor((e.ts - todayKey.getTime()) / dayMs) <= 0 ? 'today' : 'tomorrow' }));
+    .map((e) => {
+      const n = Math.floor((e.ts - todayKey.getTime()) / dayMs);
+      const day = n <= 0 ? 'today' : n === 1 ? 'tomorrow'
+        : new Date(e.ts).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' });
+      return { ...e, day };
+    });
 }
 
-ipcMain.handle('calendar:events', async () => {
+// Nextcloud calendar settings (.env): an app password, never the main one.
+function caldav() {
   const base = (process.env.NEXTCLOUD_URL || '').replace(/\/$/, '');
   const user = process.env.NEXTCLOUD_USER, pw = process.env.NEXTCLOUD_APP_PW;
   const cal = process.env.NEXTCLOUD_CALENDAR || 'personal';
-  if (!base || !user || !pw) return { ok: false, error: 'nextcloud creds missing' };
+  if (!base || !user || !pw) return null;
+  return { url: `${base}/remote.php/dav/calendars/${encodeURIComponent(user)}/${cal}/`,
+    auth: 'Basic ' + Buffer.from(`${user}:${pw}`).toString('base64') };
+}
+
+// Events from today through `days` days ahead (default 2 = today + tomorrow, max 31).
+async function fetchCalendar(days) {
+  const dav = caldav();
+  if (!dav) return { ok: false, error: 'nextcloud creds missing' };
+  const n = Math.min(Math.max(Math.round(Number(days) || 2), 1), 31);
   const fmt = (d) => d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
   const now = new Date();
   const start = new Date(now); start.setHours(0, 0, 0, 0);
-  const end = new Date(start); end.setDate(end.getDate() + 2);
+  const end = new Date(start); end.setDate(end.getDate() + n);
   const body = `<?xml version="1.0"?><c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><c:calendar-data/></d:prop><c:filter><c:comp-filter name="VCALENDAR"><c:comp-filter name="VEVENT"><c:time-range start="${fmt(start)}" end="${fmt(end)}"/></c:comp-filter></c:comp-filter></c:filter></c:calendar-query>`;
-  const url = `${base}/remote.php/dav/calendars/${encodeURIComponent(user)}/${cal}/`;
   try {
-    const res = await fetch(url, {
+    const res = await fetch(dav.url, {
       method: 'REPORT',
-      headers: {
-        Authorization: 'Basic ' + Buffer.from(`${user}:${pw}`).toString('base64'),
-        Depth: '1', 'Content-Type': 'application/xml',
-      },
+      headers: { Authorization: dav.auth, Depth: '1', 'Content-Type': 'application/xml' },
       body, signal: AbortSignal.timeout(10000),
     });
     if (!res.ok) return { ok: false, error: `caldav ${res.status}` };
     return { ok: true, events: parseICalEvents(await res.text(), now) };
   } catch (e) {
     console.log('[calendar] caldav failed', e.message);
+    return { ok: false, error: e.message };
+  }
+}
+ipcMain.handle('calendar:events', (_e, days) => fetchCalendar(days));
+
+// Book an event. Only ever reached after Fred's yes (catalog: confirm, ceiling 'never').
+// start: local "YYYY-MM-DDTHH:MM" (or "YYYY-MM-DD" for all day).
+ipcMain.handle('calendar:add', async (_e, title, start, minutes, location, notes) => {
+  const dav = caldav();
+  if (!dav) return { ok: false, error: 'nextcloud creds missing' };
+  const ev = buildEvent({ title, start, minutes, location, notes });
+  if (!ev.ok) return ev;
+  try {
+    const res = await fetch(`${dav.url}${ev.uid}.ics`, {
+      method: 'PUT',
+      headers: { Authorization: dav.auth, 'Content-Type': 'text/calendar; charset=utf-8', 'If-None-Match': '*' },
+      body: ev.ics, signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return { ok: false, error: `caldav ${res.status}` };
+    console.log(`[calendar] booked "${ev.title}" ${ev.when}`);
+    return { ok: true, title: ev.title, when: ev.when };
+  } catch (e) {
     return { ok: false, error: e.message };
   }
 });
@@ -265,6 +298,44 @@ ipcMain.handle('mail:triage', (_e, days, limit) => zoho(['triage', String(Math.m
 ipcMain.handle('mail:reply', (_e, uid, to, body) => zoho(['reply'], { uid, to, body }));
 ipcMain.handle('mail:write', (_e, to, subject, body) => zoho(['write'], { to, subject, body }));
 ipcMain.handle('mail:seen', (_e, uid) => zoho(['seen', String(uid || '')]));
+
+// For the nudges (nudges.js): the same reads, called directly.
+return {
+  calendar: (days) => fetchCalendar(days),
+  waitingMail: (hours = 48, days = 7) => zoho(['waiting', String(hours), String(days)]),
+};
 }
 
-module.exports = { registerInfo };
+// One VEVENT, times in UTC. Pure, so it can be tested.
+function buildEvent({ title, start, minutes, location, notes, now = Date.now(), uid } = {}) {
+  const t = String(title || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+  if (!t) return { ok: false, error: 'the event needs a title' };
+  const s = String(start || '').trim();
+  const esc = (v) => String(v || '').replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
+  const utc = (ms) => new Date(ms).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+  const id = uid || `hannibal-${now.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  let dtStart, dtEnd, when;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    const [y, m, d] = s.split('-').map(Number);
+    const day = new Date(y, m - 1, d);
+    if (day.getTime() < new Date(now).setHours(0, 0, 0, 0)) return { ok: false, error: `${s} is in the past` };
+    const next = new Date(y, m - 1, d + 1);
+    const ymd = (x) => `${x.getFullYear()}${String(x.getMonth() + 1).padStart(2, '0')}${String(x.getDate()).padStart(2, '0')}`;
+    dtStart = `DTSTART;VALUE=DATE:${ymd(day)}`; dtEnd = `DTEND;VALUE=DATE:${ymd(next)}`;
+    when = day.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' }) + ' (all day)';
+  } else {
+    const ms = Date.parse(s);
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(s) || !Number.isFinite(ms)) return { ok: false, error: `could not read the time "${s}": use YYYY-MM-DDTHH:MM local time` };
+    if (ms < now - 5 * 60000) return { ok: false, error: 'that time is in the past' };
+    const mins = Math.min(Math.max(Math.round(Number(minutes) || 60), 5), 24 * 60);
+    dtStart = `DTSTART:${utc(ms)}`; dtEnd = `DTEND:${utc(ms + mins * 60000)}`;
+    when = new Date(ms).toLocaleString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' }) + ` (${mins} min)`;
+  }
+  const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Hannibal//EN', 'BEGIN:VEVENT', `UID:${id}`, `DTSTAMP:${utc(now)}`,
+    dtStart, dtEnd, `SUMMARY:${esc(t)}`,
+    ...(location ? [`LOCATION:${esc(location)}`] : []), ...(notes ? [`DESCRIPTION:${esc(notes)}`] : []),
+    'END:VEVENT', 'END:VCALENDAR'];
+  return { ok: true, uid: id, title: t, when, ics: lines.join('\r\n') + '\r\n' };
+}
+
+module.exports = { registerInfo, buildEvent };
