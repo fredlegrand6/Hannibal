@@ -4,7 +4,8 @@
 // The old sender drove WhatsApp's search box by UI scripting. When the name did
 // not match a row it pressed Return on the TOP result, so a message could go to
 // the wrong person. Now:
-//   1. contacts.find looks the person up in Fred's macOS Contacts (name → phones).
+//   1. contacts.find looks the person up in Fred's macOS Contacts and in
+//      WhatsApp's own address book and chat list (name → number).
 //   2. whatsapp.send opens whatsapp://send?phone=<number>&text=<message>, which
 //      opens exactly that person's chat with the text ready, then presses Return.
 //   3. It checks its own work: the message must show up as a sent bubble.
@@ -58,7 +59,33 @@ function pickPhone(person) {
   return ps.length === 1 ? ps[0].number : (ps[0] ? ps[0].number : '');
 }
 
-async function findContacts(query, { run = osa } = {}) {
+// WhatsApp's own address book and chat list (the Mac app keeps them in local
+// SQLite files). Read-only. Many of Fred's people are only there, not in the
+// Mac's Contacts. Returns [{ name, number, source:'whatsapp' }].
+const os = require('os');
+const path = require('path');
+const WA_DIR = path.join(os.homedir(), 'Library', 'Group Containers', 'group.net.whatsapp.WhatsApp.shared');
+const sqlite = (file, sql) => new Promise((resolve) => {
+  execFile('sqlite3', ['-readonly', '-separator', '\t', file, sql], { timeout: 10000 }, (err, stdout) => resolve(err ? null : String(stdout || '')));
+});
+async function findInWhatsApp(query, { query: q2 = sqlite, dir = WA_DIR } = {}) {
+  const like = `'%${String(query || '').replace(/'/g, "''").replace(/[%_]/g, '')}%'`;
+  const [book, chats] = await Promise.all([
+    q2(path.join(dir, 'ContactsV2.sqlite'), `select coalesce(nullif(ZFULLNAME,''), trim(coalesce(ZGIVENNAME,'')||' '||coalesce(ZLASTNAME,''))), coalesce(nullif(ZWHATSAPPID,''), ZPHONENUMBER) from ZWAADDRESSBOOKCONTACT where ZFULLNAME like ${like} or ZGIVENNAME like ${like} or ZLASTNAME like ${like} or ZBUSINESSNAME like ${like};`),
+    q2(path.join(dir, 'ChatStorage.sqlite'), `select ZPARTNERNAME, ZCONTACTJID from ZWACHATSESSION where ZSESSIONTYPE = 0 and ZCONTACTJID like '%@s.whatsapp.net' and ZPARTNERNAME like ${like};`),
+  ]);
+  if (book == null && chats == null) return null;   // WhatsApp's files could not be read
+  const out = [];
+  for (const line of `${book || ''}\n${chats || ''}`.split(/\r?\n/)) {
+    const [name, raw] = line.split('\t');
+    const number = String(raw || '').split('@')[0].replace(/[^\d+]/g, '');
+    if (!name || !number) continue;
+    out.push({ name: name.trim(), number: number.startsWith('+') ? number : `+${number}`, source: 'whatsapp' });
+  }
+  return out;
+}
+
+async function findContacts(query, { run = osa, whatsapp = findInWhatsApp } = {}) {
   const q = String(query || '').trim();
   if (!q) return { ok: false, error: 'who should I look up?' };
   const r = await run(`tell application "Contacts"
@@ -72,8 +99,15 @@ async function findContacts(query, { run = osa } = {}) {
   end repeat
   return out
 end tell`);
-  if (!r.ok) return { ok: false, error: /not allowed|-1743|authoriz/i.test(r.error) ? 'Hannibal is not allowed to read Contacts yet: allow it in System Settings → Privacy & Security → Contacts' : `Contacts: ${r.error}` };
-  const people = parseContacts(r.out).map((p) => ({ name: p.name, number: pickPhone(p), phones: p.phones }));
+  const mac = r.ok ? parseContacts(r.out).map((p) => ({ name: p.name, number: pickPhone(p), phones: p.phones, source: 'contacts' })) : [];
+  const wa = (await whatsapp(q).catch(() => null)) || [];
+  if (!r.ok && !wa.length) return { ok: false, error: /not allowed|-1743|authoriz/i.test(r.error) ? 'Hannibal is not allowed to read Contacts yet: allow it in System Settings → Privacy & Security → Contacts' : `Contacts: ${r.error}` };
+  // One entry per number: the Mac's Contacts first, then WhatsApp's own list.
+  const seen = new Set(); const people = [];
+  for (const p of [...mac, ...wa]) {
+    const key = normalizeNumber(p.number) || `name:${p.name.toLowerCase()}`;
+    if (seen.has(key)) continue; seen.add(key); people.push(p);
+  }
   return { ok: true, people };
 }
 
@@ -166,4 +200,4 @@ end tell`, 45000);
   return { ok: false, verified: false, error: 'I could not see the message in the chat after sending: check WhatsApp' };
 }
 
-module.exports = { normalizeNumber, parseContacts, pickPhone, resolveRecipient, findContacts, sendWhatsApp };
+module.exports = { normalizeNumber, parseContacts, pickPhone, resolveRecipient, findContacts, findInWhatsApp, sendWhatsApp };

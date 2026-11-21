@@ -194,11 +194,11 @@ const TOOLS = [
 
   // ═══════════════════════ MESSAGING ═══════════════════════
   { name: 'contacts.find', domain: 'messaging',
-    description: "Look someone up in Fred's Contacts: names and phone numbers. Use it before whatsapp.send to get the exact person and number.",
+    description: "Look someone up by name in Fred's Contacts and in WhatsApp's own contacts and chats: names and phone numbers. Use it before whatsapp.send to get the exact person and number.",
     params: [{ name: 'query', type: 'string', required: true, desc: 'a name or part of one, e.g. "Jay"' }],
     side_effect: SIDE_EFFECT.READ, executor: EXECUTOR.MAIN,
     via: { channel: 'contacts:find' },
-    returns: '{ ok, people:[{ name, number, phones:[{ label, number }] }] }' },
+    returns: '{ ok, people:[{ name, number, source:"contacts"|"whatsapp", phones? }] }' },
   { name: 'whatsapp.send', domain: 'messaging',
     description: "Send a WhatsApp message from Fred's Mac. Look the person up with contacts.find first and pass their full name and number. Fred always confirms first. If a name matches several people, ask Fred which one; never guess.",
     params: [

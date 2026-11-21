@@ -1,6 +1,7 @@
 'use strict';
 const assert = require('assert');
 const wa = require('./whatsapp');
+const wa_ = wa;
 let n = 0;
 const t = async (name, fn) => { await fn(); n++; console.log('  ok ', name); };
 
@@ -38,6 +39,21 @@ const t = async (name, fn) => { await fn(); n++; console.log('  ok ', name); };
     assert.ok(!r.ok && r.verified === false && /still in the text box/.test(r.error));
     r = await wa.sendWhatsApp({ contact: 'Jay', message: 'x' }, { run, find: async () => ({ ok: true, people: [{ name: 'Jay A', number: '1' }, { name: 'Jay B', number: '2' }] }) });
     assert.ok(!r.ok && r.matches, 'two Jays: nothing sent');
+  });
+  await t('people only in WhatsApp are found too, one entry per number', async () => {
+    const fakeSql = async (file, sql) => {
+      assert.ok(!/;\s*\w/.test(sql.replace(/;\s*$/, '')), 'one statement only');
+      if (/ContactsV2/.test(file)) return 'Mandy Legrand\t+31 6 5555 0000\n';
+      return 'Mandy\t31655550000@s.whatsapp.net\nMandy Gym\t31611110000@s.whatsapp.net\n';
+    };
+    const wa = await wa_.findInWhatsApp("Man'dy", { query: fakeSql, dir: '/x' });
+    assert.ok(wa.length === 3 && wa.every((p) => p.source === 'whatsapp'));
+    const r = await wa_.findContacts('Mandy', { run: async () => ({ ok: true, out: '' }), whatsapp: async () => wa });
+    assert.deepStrictEqual(r.people.map((p) => p.name), ['Mandy Legrand', 'Mandy Gym'], 'same number once');
+    const who = wa_.resolveRecipient(r.people, 'Mandy');
+    assert.ok(!who.ok && who.matches.length === 2, 'two Mandys: Fred picks');
+    const none = await wa_.findContacts('Mandy', { run: async () => ({ ok: false, error: 'not allowed -1743' }), whatsapp: async () => wa });
+    assert.ok(none.ok && none.people.length === 2, 'WhatsApp still answers when Contacts is blocked');
   });
   await t('Claude gets contacts.find and whatsapp.send; the question names the number', () => {
     const ct = require('./claude-tools');
