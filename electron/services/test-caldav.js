@@ -83,7 +83,7 @@ function fakeIcloud({ status = 207 } = {}) {
     const ipc = { handle: (ch, fn) => { handlers[ch] = fn; } };
     const account = {
       get: async () => ({ kind: 'icloud', auth: 'Basic x',
-        read: [{ url: 'https://c/home/', name: 'Home' }, { url: 'https://c/work/', name: 'Work' }],
+        read: [{ url: 'https://c/home/', name: 'Home' }, { url: 'https://c/work/', name: 'Work' }, { url: 'https://c/notification/', name: 'notification' }],
         write: { url: 'https://c/work/', name: 'Work' } }),
       forget: () => {},
     };
@@ -95,6 +95,7 @@ function fakeIcloud({ status = 207 } = {}) {
     global.fetch = async (url, o) => {
       seen.push({ url, method: o.method, body: o.body });
       if (o.method === 'PUT') return { ok: true, status: 201, text: async () => '' };
+      if (url.includes('notification')) return { ok: false, status: 403, text: async () => '' };   // iCloud's odd one
       const body = url.includes('home') ? ev('Dinner with Gaian') + ev('Shared invite') + ev('Appointment', 'a-home') : ev('Shared invite') + ev('Appointment', 'a-work');
       return { ok: false, status: 207, text: async () => ms(`<response><href>/e.ics</href><propstat><prop xmlns:cal="urn:ietf:params:xml:ns:caldav">${body}</prop></propstat></response>`) };
     };
