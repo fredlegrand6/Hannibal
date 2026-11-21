@@ -96,7 +96,10 @@ function parseICalEvents(xml, now) {
         when = new Date(+v.slice(0, 4), +v.slice(4, 6) - 1, +v.slice(6, 8), +v.slice(9, 11), +v.slice(11, 13));
         time = `${v.slice(9, 11)}:${v.slice(11, 13)}`;
       }
-      events.push({ ts: when.getTime(), time, allDay, title: (summary || '(no title)').trim(), ...(uid ? { uid } : {}) });
+      // A repeat of a recurring event (the server expanded it): keep which one it
+      // is, so delete/move can change just this one.
+      const rid = ((body.match(/(?:^|\n)RECURRENCE-ID[^:\n]*:([0-9TZ]+)/) || [])[1] || '').trim();
+      events.push({ ts: when.getTime(), time, allDay, title: (summary || '(no title)').trim(), ...(uid ? { uid } : {}), ...(rid ? { repeats: true, occurrence: rid } : {}) });
     }
   }
   const todayKey = new Date(now); todayKey.setHours(0, 0, 0, 0);
@@ -234,33 +237,71 @@ const sameTitle = (a, b) => {
   // Whole title only: "Call with Jay" must never authorize "Call with Jay and legal".
   return !!n(a) && n(a) === n(b);
 };
-async function locate(id, title) {
+async function locate(id, title, { scope } = {}) {
   const a = await calendarAccount.get();
   if (a.error) return { error: a.error };
   const ev = await findEvent(a, String(id || '').trim());
   if (!ev) return { error: 'that event is not in the calendar any more (check calendar.events for its id)' };
   if (title && !sameTitle(ev.title, title)) return { error: `that id belongs to "${ev.title}", not "${title}": nothing changed` };
-  if (ev.recurring) return { error: `"${ev.title}" repeats; Hannibal does not change repeating events yet, so Fred should change it in the Calendar app` };
+  if (ev.recurring && !scope) return { error: `"${ev.title}" repeats: say whether to change only this one (scope "this", with its occurrence from calendar.events) or the whole series (scope "all")` };
   if (ev.cal.writable === false) return { error: `"${ev.title}" is in ${ev.cal.name}, a calendar Fred can only read` };
   return { a, ev };
 }
 
-ipcMain.handle('calendar:delete', async (_e, id, title) => {
-  const { a, ev, error } = await locate(id, title);
+// PUT a changed copy of a stored event (If-Match), then read it back.
+async function putBack(a, ev, ics) {
+  const res = await fetch(ev.url, { method: 'PUT', headers: { Authorization: a.auth, 'Content-Type': 'text/calendar; charset=utf-8', ...(ev.etag ? { 'If-Match': ev.etag } : {}) }, body: ics, signal: AbortSignal.timeout(10000) });
+  if (res.status === 412) return { error: 'the event changed in the meantime: look it up again' };
+  if (!res.ok) return { error: `caldav ${res.status}` };
+  return { back: await readBack(a, ev.url) };
+}
+
+ipcMain.handle('calendar:delete', async (_e, id, title, _when, occurrence, scope) => {
+  const one = scope === 'this' || (!scope && occurrence);
+  const { a, ev, error } = await locate(id, title, { scope: one ? 'this' : scope });
   if (error) return { ok: false, error };
   try {
+    if (ev.recurring && one) {
+      // Only this repeat: skip it in the series (EXDATE); the rest stays.
+      const skip = skipOccurrence(ev.ics, occurrence);
+      if (!skip.ok) return skip;
+      const { back, error: err } = await putBack(a, ev, skip.ics);
+      if (err) return { ok: false, error: err };
+      const st = back ? occurrenceState(back.ics, occurrence) : null;
+      if (back === null || (st && st.gone)) return { ok: false, verified: false, error: `the whole "${ev.title}" series disappeared: check the Calendar app` };
+      if (st && (!st.skipped || st.override)) return { ok: false, verified: false, error: `that "${ev.title}" is still in the calendar after skipping it` };
+      console.log(`[calendar] skipped one "${ev.title}" (${occurrence})${st ? ' (checked)' : ' (could not check)'}`);
+      return { ok: true, verified: !!st, deleted: ev.title, only: 'this one', calendar: ev.cal.name };
+    }
     const res = await fetch(ev.url, { method: 'DELETE', headers: { Authorization: a.auth, ...(ev.etag ? { 'If-Match': ev.etag } : {}) }, signal: AbortSignal.timeout(10000) });
     if (!res.ok && res.status !== 404) return { ok: false, error: `caldav ${res.status}` };
     const back = await readBack(a, ev.url);
     if (back) return { ok: false, verified: false, error: `"${ev.title}" is still in the calendar after deleting it` };
-    console.log(`[calendar] deleted "${ev.title}" (${ev.cal.name})${back === null ? ' (checked)' : ' (could not check)'}`);
-    return { ok: true, verified: back === null, deleted: ev.title, calendar: ev.cal.name };
+    console.log(`[calendar] deleted "${ev.title}"${ev.recurring ? ' (whole series)' : ''} (${ev.cal.name})${back === null ? ' (checked)' : ' (could not check)'}`);
+    return { ok: true, verified: back === null, deleted: ev.title, ...(ev.recurring ? { only: 'the whole series' } : {}), calendar: ev.cal.name };
   } catch (e) { return { ok: false, error: e.message }; }
 });
 
-ipcMain.handle('calendar:move', async (_e, id, start, minutes, title) => {
-  const { a, ev, error } = await locate(id, title);
+ipcMain.handle('calendar:move', async (_e, id, start, minutes, title, occurrence, scope) => {
+  const one = scope === 'this' || (!scope && occurrence);
+  if (scope === 'all') return { ok: false, error: 'moving a whole repeating series is not something Hannibal does yet: Fred can change it in the Calendar app, or move one repeat at a time' };
+  const { a, ev, error } = await locate(id, title, { scope: one ? 'this' : undefined });
   if (error) return { ok: false, error };
+  if (ev.recurring && one) {
+    // Only this repeat: an override with RECURRENCE-ID; the series stays.
+    const mv = moveOccurrence(ev.ics, occurrence, { start, minutes });
+    if (!mv.ok) return mv;
+    try {
+      const { back, error: err } = await putBack(a, ev, mv.ics);
+      if (err) return { ok: false, error: err };
+      const want = occurrenceState(mv.ics, occurrence).override;
+      const st = back ? occurrenceState(back.ics, occurrence) : null;
+      if (back === null || (st && st.gone)) return { ok: false, verified: false, error: `the whole "${ev.title}" series disappeared: check the Calendar app` };
+      if (st && st.override !== want) return { ok: false, verified: false, error: `that "${ev.title}" still shows its old time after moving it` };
+      console.log(`[calendar] moved one "${ev.title}" to ${mv.when}${st ? ' (checked)' : ' (could not check)'}`);
+      return { ok: true, verified: !!st, title: ev.title, when: mv.when, only: 'this one', calendar: ev.cal.name };
+    } catch (e) { return { ok: false, error: e.message }; }
+  }
   const moved = moveEvent(ev.ics, { start, minutes });
   if (!moved.ok) return moved;
   try {
@@ -530,4 +571,141 @@ function moveEvent(ics, { start, minutes, now = Date.now() } = {}) {
   return { ok: true, ics: ics2, when: fresh.when };
 }
 
-module.exports = { registerInfo, buildEvent, moveEvent, parseEventObjects };
+// ── REPEATING EVENTS ────────────────────────────────────────────────────────
+// One repeat of a repeating event is changed the iCalendar way, inside the same
+// calendar object: skipping it adds an EXDATE to the series, moving it adds an
+// override VEVENT carrying RECURRENCE-ID (the slot it came from). The series
+// itself, its other repeats, alarms and invitees stay exactly as they were.
+// `occurrence` is the value calendar.events gave for that repeat
+// ("20261124T090000Z", or "20261124" for an all-day one).
+function tzOffsetMs(tz, utcMs) {
+  const f = new Intl.DateTimeFormat('en-US', { timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const p = Object.fromEntries(f.formatToParts(new Date(utcMs)).map((x) => [x.type, x.value]));
+  return Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second) - utcMs;
+}
+const pad2 = (n) => String(n).padStart(2, '0');
+const digits = (d) => `${d.getUTCFullYear()}${pad2(d.getUTCMonth() + 1)}${pad2(d.getUTCDate())}T${pad2(d.getUTCHours())}${pad2(d.getUTCMinutes())}${pad2(d.getUTCSeconds())}`;
+// A DTSTART / RECURRENCE-ID / EXDATE line → { date:true, key:"YYYYMMDD" } or { ms }.
+function lineInstant(line) {
+  const m = String(line || '').match(/^[A-Z-]+((?:;[^:]*)?):(\d{8})(?:T(\d{6})(Z?))?/);
+  if (!m) return null;
+  const [, params, d, t, z] = m;
+  if (!t) return { date: true, key: d };
+  const parts = [+d.slice(0, 4), +d.slice(4, 6) - 1, +d.slice(6, 8), +t.slice(0, 2), +t.slice(2, 4), +t.slice(4, 6)];
+  if (z) return { ms: Date.UTC(...parts) };
+  const tz = (params.match(/TZID=([^;:]+)/) || [])[1];
+  if (!tz) return { ms: new Date(...parts).getTime() };
+  try {
+    const wall = Date.UTC(...parts);
+    let ms = wall - tzOffsetMs(tz, wall);
+    ms = wall - tzOffsetMs(tz, ms);
+    return { ms };
+  } catch (_) { return { ms: new Date(...parts).getTime() }; }
+}
+const occInstant = (occ) => lineInstant(`X:${String(occ || '').trim()}`);
+const sameInstant = (a, b) => !!a && !!b && (a.date || b.date ? (a.key || '') === (b.key || '') : a.ms === b.ms);
+// The same moment written the way the series writes its DTSTART (TZID, UTC, date).
+function formatLike(dtstartLine, inst, prop) {
+  const params = (String(dtstartLine).match(/^DTSTART((?:;[^:]*)?):/) || [])[1] || '';
+  if (inst.date || /VALUE=DATE(?!-)/.test(params)) return `${prop};VALUE=DATE:${inst.key || digits(new Date(inst.ms)).slice(0, 8)}`;
+  const tz = (params.match(/TZID=([^;:]+)/) || [])[1];
+  if (tz) return `${prop};TZID=${tz}:${digits(new Date(inst.ms + tzOffsetMs(tz, inst.ms)))}`;
+  if (/Z\s*$/.test(dtstartLine)) return `${prop}:${digits(new Date(inst.ms))}Z`;
+  const l = new Date(inst.ms);
+  return `${prop}:${l.getFullYear()}${pad2(l.getMonth() + 1)}${pad2(l.getDate())}T${pad2(l.getHours())}${pad2(l.getMinutes())}${pad2(l.getSeconds())}`;
+}
+// The VEVENT blocks of a calendar object: [{ start, end, text, lines, rid }].
+function veventBlocks(text) {
+  const out = []; const re = /BEGIN:VEVENT\r?\n[\s\S]*?END:VEVENT/g; let m;
+  while ((m = re.exec(text))) {
+    const lines = m[0].split(/\r?\n/);
+    const top = topLines(lines);
+    const ridLine = top.find((l) => /^RECURRENCE-ID[;:]/.test(l));
+    out.push({ start: m.index, end: m.index + m[0].length, text: m[0], lines, top, rid: ridLine ? lineInstant(ridLine) : null });
+  }
+  return out;
+}
+function topLines(lines) {     // the VEVENT's own properties, not those of a VALARM inside it
+  const out = []; let depth = 0;
+  for (const l of lines) {
+    if (/^BEGIN:/.test(l)) { depth += 1; continue; }
+    if (/^END:/.test(l)) { depth -= 1; continue; }
+    if (depth === 1) out.push(l);
+  }
+  return out;
+}
+function seriesOf(ics) {
+  const text = String(ics || '').replace(/\r?\n[ \t]/g, '').replace(/\r?\n/g, '\r\n');
+  const blocks = veventBlocks(text);
+  const master = blocks.find((b) => !b.rid && b.top.some((l) => /^(RRULE|RDATE)[;:]/.test(l)));
+  if (!master) return { error: 'that event does not repeat' };
+  const dtstart = master.top.find((l) => /^DTSTART[;:]/.test(l));
+  return { text, blocks, master, dtstart };
+}
+// Is `occ` really one of the slots of this series? Its time of day (in the
+// series' own time zone) must be the series' time of day; a date for a date.
+function checkSlot(dtstart, inst) {
+  const start = lineInstant(dtstart);
+  if (!start || !inst) return 'could not read which repeat that is';
+  if (!!start.date !== !!inst.date) return 'that is not one of its repeats';
+  if (start.date) return inst.key >= start.key ? null : 'that is before the series starts';
+  if (inst.ms < start.ms) return 'that is before the series starts';
+  const hhmm = (x) => (formatLike(dtstart, x, 'X').match(/T(\d{4})\d{2}Z?$/) || [])[1];
+  return hhmm(start) === hhmm(inst) ? null : 'that is not one of its repeats (the time does not match the series)';
+}
+
+function skipOccurrence(ics, occurrence) {
+  const s = seriesOf(ics); if (s.error) return { ok: false, error: s.error };
+  const inst = occInstant(occurrence);
+  const bad = checkSlot(s.dtstart, inst); if (bad) return { ok: false, error: bad };
+  const ex = formatLike(s.dtstart, inst, 'EXDATE');
+  let text = s.text;
+  // drop an override of this repeat (it would otherwise keep showing), last first
+  for (const b of [...s.blocks].reverse()) if (b.rid && sameInstant(b.rid, inst)) text = text.slice(0, b.start) + text.slice(b.end).replace(/^\r\n/, '');
+  const m = seriesOf(text).master;
+  const lines = m.lines.slice();
+  if (!m.top.some((l) => /^EXDATE[;:]/.test(l) && sameInstant(lineInstant(l), inst))) {
+    const i = lines.findIndex((l) => /^DTSTART[;:]/.test(l));
+    lines.splice(i + 1, 0, ex);
+  }
+  text = text.slice(0, m.start) + lines.join('\r\n') + text.slice(m.end);
+  return { ok: true, ics: text };
+}
+
+function moveOccurrence(ics, occurrence, { start, minutes, now = Date.now() } = {}) {
+  const s = seriesOf(ics); if (s.error) return { ok: false, error: s.error };
+  const inst = occInstant(occurrence);
+  const bad = checkSlot(s.dtstart, inst); if (bad) return { ok: false, error: bad };
+  const existing = s.blocks.find((b) => b.rid && sameInstant(b.rid, inst));
+  const base = existing || s.master;
+  // the new times: reuse the one-event mover on just this block (keeps its length)
+  const one = moveEvent(`BEGIN:VCALENDAR\r\n${base.text}\r\nEND:VCALENDAR\r\n`, { start, minutes, now });
+  if (!one.ok) return one;
+  const moved = veventBlocks(one.ics)[0].lines;
+  const drop = /^(RRULE|RDATE|EXDATE|EXRULE|RECURRENCE-ID)[;:]/;
+  const out = []; let depth = 0;
+  for (const l of moved) {
+    if (/^BEGIN:/.test(l)) depth += 1;
+    if (l.trim() && !(depth === 1 && drop.test(l))) out.push(l);
+    if (l === 'BEGIN:VEVENT') out.push(formatLike(s.dtstart, inst, 'RECURRENCE-ID'));
+    if (/^END:/.test(l)) depth -= 1;
+  }
+  const block = out.join('\r\n');
+  const text = existing ? s.text.slice(0, existing.start) + block + s.text.slice(existing.end)
+    : s.text.replace(/END:VCALENDAR\s*$/, `${block}\r\nEND:VCALENDAR\r\n`);
+  return { ok: true, ics: text, when: one.when };
+}
+
+// After a change, read back: is this repeat skipped / where is it now?
+function occurrenceState(ics, occurrence) {
+  const s = seriesOf(ics); if (s.error) return { gone: true };
+  const inst = occInstant(occurrence);
+  const skipped = s.master.top.filter((l) => /^EXDATE[;:]/.test(l)).some((l) => {
+    const [, params, values] = l.match(/^EXDATE((?:;[^:]*)?):(.*)$/) || [];
+    return String(values || '').split(',').some((v) => sameInstant(lineInstant(`EXDATE${params || ''}:${v.trim()}`), inst));
+  });
+  const override = s.blocks.find((b) => b.rid && sameInstant(b.rid, inst));
+  return { skipped, override: override ? override.top.filter((l) => /^(DTSTART|DTEND|DURATION)[;:]/.test(l)).join('|') : null };
+}
+
+module.exports = { registerInfo, buildEvent, moveEvent, parseEventObjects, skipOccurrence, moveOccurrence, occurrenceState };

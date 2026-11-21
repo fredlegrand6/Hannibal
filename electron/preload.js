@@ -76,7 +76,8 @@ contextBridge.exposeInMainWorld('hannibal', {
   // persisted lists — data/reminders.json, notes.json, timers.json
   loadReminders: () => ipcRenderer.invoke('reminders:load'),             // -> { ok, reminders:[] }
   saveReminders: (list) => ipcRenderer.invoke('reminders:save', list),   // -> { ok }
-  onRemindersChanged: (cb) => ipcRenderer.on('reminders:changed', () => cb()),   // main (Claude) changed the list → reload
+  onRemindersChanged: (cb) => ipcRenderer.on('reminders:changed', () => cb()),
+  onNotesChanged: (cb) => ipcRenderer.on('notes:changed', () => cb()),          // main (Claude) changed the notes → reload   // main (Claude) changed the list → reload
   onProactiveRun: (cb) => ipcRenderer.on('proactive:run', (_e, job) => cb(job)),  // { kind:'morning-brief', day, prompt }
   proactiveDone: (r) => ipcRenderer.invoke('proactive:done', r),                 // { kind, day, ok, text }
   reminderFired: (message) => ipcRenderer.invoke('reminders:fired', message),

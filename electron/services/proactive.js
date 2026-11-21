@@ -123,6 +123,57 @@ function createReminderTools({ filePath = path.join(DATA, 'reminders.json'), not
   return { add, cancel, upcoming, recent, takeDue, markDelivered };
 }
 
+// ── notes ───────────────────────────────────────────────────────────────────
+// The same data/notes.json the voice "note that…" command uses. Claude can add,
+// find and remove notes one at a time (never replace the whole list), and every
+// change is read back before it is reported.
+function createNoteTools({ filePath = path.join(DATA, 'notes.json'), notify = () => {}, now = () => Date.now() } = {}) {
+  const read = () => {
+    try { const j = JSON.parse(fs.readFileSync(filePath, 'utf8')); return Array.isArray(j.notes) ? j.notes : []; }
+    catch (_) { return []; }
+  };
+  const write = (list) => {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    const tmp = filePath + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify({ notes: list }, null, 2));
+    fs.renameSync(tmp, filePath);
+    try { notify(); } catch (_) {}
+  };
+  const when = (ts) => new Date(ts).toLocaleString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  const show = (n) => ({ id: n.id, text: n.text, when: when(n.ts) });
+
+  function add(text) {
+    const t = String(text || '').trim();
+    if (!t) return { ok: false, error: 'what should the note say?' };
+    const n = { id: `n-${now()}-${Math.random().toString(36).slice(2, 6)}`, text: t.slice(0, 4000), ts: now(), by: 'claude' };
+    const list = read(); list.push(n); write(list);
+    return read().some((x) => x.id === n.id) ? { ok: true, verified: true, ...show(n) }
+      : { ok: false, verified: false, error: 'the note did not stick: it is not in the list after saving' };
+  }
+
+  // Newest first; with a query only the notes that contain it.
+  function find(query, limit = 20) {
+    const q = String(query || '').toLowerCase().trim();
+    const hits = read().filter((n) => !q || String(n.text || '').toLowerCase().includes(q)).sort((a, b) => b.ts - a.ts);
+    return { ok: true, total: hits.length, notes: hits.slice(0, Math.min(Number(limit) || 20, 100)).map(show) };
+  }
+
+  function remove(query) {
+    const q = String(query || '').toLowerCase().trim();
+    if (!q) return { ok: false, error: 'which note?' };
+    const list = read();
+    const exact = list.filter((n) => String(n.id).toLowerCase() === q);
+    const hit = exact.length ? exact : list.filter((n) => String(n.text || '').toLowerCase().includes(q));
+    if (!hit.length) return { ok: false, error: `no note matches "${query}"` };
+    if (hit.length > 1) return { ok: false, error: `"${query}" matches ${hit.length} notes: be more specific or use the id`, matches: hit.map(show) };
+    write(list.filter((n) => n !== hit[0]));
+    if (read().some((n) => n.id === hit[0].id)) return { ok: false, verified: false, error: 'the note is still there after removing it' };
+    return { ok: true, verified: true, removed: show(hit[0]) };
+  }
+
+  return { add, find, remove };
+}
+
 // Cancel across two lists (the server's own + the desk's, read through the
 // link) without touching either until it is clear which ONE is meant: one
 // match is cancelled where it lives; several (across both) are handed back.
@@ -199,7 +250,7 @@ function createBriefScheduler({ send, statePath = path.join(DATA, 'proactive.jso
 }
 
 // Wire both into Electron main.
-function registerProactive(ipcMain, { getWindow, onBrief, onReminder, onNudgeDone, statePath, remindersPath } = {}) {
+function registerProactive(ipcMain, { getWindow, onBrief, onReminder, onNudgeDone, statePath, remindersPath, notesPath } = {}) {
   const toRenderer = (channel, payload) => {
     const w = getWindow && getWindow();
     try { w && !w.isDestroyed() && w.webContents.send(channel, payload); } catch (_) {}
@@ -209,6 +260,10 @@ function registerProactive(ipcMain, { getWindow, onBrief, onReminder, onNudgeDon
   ipcMain.handle('reminders:cancel', (_e, query) => reminders.cancel(query));
   ipcMain.handle('reminders:upcoming', () => reminders.upcoming());
   ipcMain.handle('reminders:recent', (_e, hours) => reminders.recent(hours));
+  const notes = createNoteTools({ ...(notesPath ? { filePath: notesPath } : {}), notify: () => toRenderer('notes:changed', {}) });
+  ipcMain.handle('notes:add', (_e, text) => notes.add(text));
+  ipcMain.handle('notes:find', (_e, query, limit) => notes.find(query, limit));
+  ipcMain.handle('notes:remove', (_e, query) => notes.remove(query));
 
   const brief = createBriefScheduler({ ...(statePath ? { statePath } : {}), send: (job) => { console.log('[proactive] morning brief due → renderer'); toRenderer('proactive:run', job); } });
   ipcMain.handle('proactive:done', (_e, r) => {
@@ -229,4 +284,4 @@ function registerProactive(ipcMain, { getWindow, onBrief, onReminder, onNudgeDon
   return { reminders, brief, stop: () => { clearTimeout(first); clearInterval(timer); } };
 }
 
-module.exports = { createReminderTools, createBriefScheduler, registerProactive, cancelAcross, BRIEF_PROMPT };
+module.exports = { createReminderTools, createNoteTools, createBriefScheduler, registerProactive, cancelAcross, BRIEF_PROMPT };

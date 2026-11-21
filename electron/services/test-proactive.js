@@ -93,10 +93,32 @@ async function test(name, fn) {
     assert.deepStrictEqual(rec2.wentOff.map((x) => x.message), ['stretch']);
     assert.ok(rec2.missed.some((x) => x.message === 'call Jay' && /sending it failed/.test(x.why)));
   });
+  await test('notes: add, find and remove one at a time, each checked after saving', () => {
+    const { createNoteTools } = require('./proactive');
+    let told = 0;
+    const f = tmp('notes');
+    fs.writeFileSync(f, JSON.stringify({ notes: [{ id: 'n-1', text: 'HTS wants a demo in January', ts: NOW - 86400000 }] }));
+    const n = createNoteTools({ filePath: f, notify: () => told++, now: () => NOW });
+    const a = n.add('Mutuele launch: ask Jay about the App Store review');
+    assert.ok(a.ok && a.verified, JSON.stringify(a));
+    assert.strictEqual(n.find().total, 2);
+    assert.deepStrictEqual(n.find('hts').notes.map((x) => x.id), ['n-1']);
+    assert.strictEqual(n.find().notes[0].id, a.id, 'newest first');
+    n.add('Call HTS about the invoice');
+    const amb = n.remove('hts');
+    assert.ok(!amb.ok && amb.matches.length === 2, 'two notes match: nothing removed');
+    const r = n.remove('n-1');
+    assert.ok(r.ok && r.verified && /demo/.test(r.removed.text));
+    assert.strictEqual(n.find().total, 2);
+    assert.ok(!n.add('  ').ok);
+    assert.strictEqual(told, 3, 'the desk reloads after every change');
+    const { summarizeAction } = require('./agent/executor');
+    assert.match(summarizeAction({ tool: 'notes.remove' }, { query: 'HTS demo' }), /Remove the note “HTS demo” — remove it\?/);
+  });
   await test('the whole-list replace tools are NOT given to Claude; add/cancel/upcoming are', () => {
     const names = new Set(claudeTools.toolDefinitions().map((d) => claudeTools.fromApiName(d.name)));
     for (const n of ['reminders.save', 'timers.save', 'notes.save']) assert(!names.has(n), n);
-    for (const n of ['reminders.add', 'reminders.cancel', 'reminders.upcoming', 'reminders.recent']) assert(names.has(n), n);
+    for (const n of ['reminders.add', 'reminders.cancel', 'reminders.upcoming', 'reminders.recent', 'notes.add', 'notes.find', 'notes.remove']) assert(names.has(n), n);
   });
 
   console.log('Morning brief schedule');
