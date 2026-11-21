@@ -2413,7 +2413,7 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
 
     // Store the exchange — fire-and-forget so it never delays the next turn.
     if (qdrantReady && reply && reply.trim()) {
-      const exchange = `Fred said: ${transcript}\nHannibal replied: ${reply.slice(0, 500)}`;
+      const exchange = `Fred said: ${transcript}\nHannibal replied: ${reply}`;
       storeMemory(exchange, cfg.ollamaUrl, { type: 'conversation' }).catch(() => {});
     }
 

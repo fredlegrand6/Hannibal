@@ -228,7 +228,7 @@ function createTelegramBridge(opts = {}) {
         await send(chatId, r.text);
         if (spokenTo || voiceAlways) await sendSpoken(chatId, r.text);
         if (opts.memory) {
-          opts.memory.store(`Fred said (Telegram): ${text}\nHannibal replied: ${r.text.slice(0, 500)}`, { type: 'conversation', channel: 'telegram' }).catch(() => {});
+          opts.memory.store(`Fred said (Telegram): ${text}\nHannibal replied: ${r.text}`, { type: 'conversation', channel: 'telegram' }).catch(() => {});
         }
       }
       else if (r && r.toolsUsed && r.toolsUsed.length) await send(chatId, `I ran ${r.toolsUsed.map((t) => t.tool).join(', ')} but then lost the connection to my brain. Check before asking again.`);

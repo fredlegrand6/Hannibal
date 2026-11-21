@@ -5,7 +5,7 @@
 'use strict';
 
 const assert = require('assert');
-const { createQdrantMemory, worthRemembering } = require('./qdrant-memory');
+const { createQdrantMemory, worthRemembering, tidyReply, tidyExchange } = require('./qdrant-memory');
 
 let passed = 0;
 async function test(name, fn) {
@@ -99,8 +99,53 @@ function fakeBackend(hits = []) {
   });
 
   await test('recall is empty when nothing clears the bar', async () => {
-    const { mem } = fakeBackend([{ text: 'noise', score: 0.6 }]);
+    const { mem } = fakeBackend([{ text: 'noise', score: 0.52 }]);
     assert.strictEqual(await mem.recall('capital of Peru'), '');
+  });
+
+  const crowd = (n, score) => Array.from({ length: n }, (_, i) => ({ text: `filler ${i}`, score: score - i * 0.001 }));
+  await test('recall finds a related memory worded differently (0.6, well above the crowd)', async () => {
+    const { mem } = fakeBackend([{ text: "Fred said: I'd like you to meet a friend of mine, Max", score: 0.652 }, ...crowd(25, 0.54)]);
+    const block = await mem.recall('did you meet any of my friends');
+    assert.ok(block.includes('Max'), block);
+    assert.ok(!block.includes('filler'));
+  });
+
+  await test('recall stays quiet when the best hit does not stand out from the crowd', async () => {
+    const { mem } = fakeBackend([{ text: 'meh', score: 0.60 }, ...crowd(25, 0.575)]);
+    assert.strictEqual(await mem.recall('open Spotify'), '');
+  });
+
+  await test('replies are never stored cut off mid-sentence', async () => {
+    assert.strictEqual(tidyReply("Alright Fred, see you around half three. I'll keep an eye on thi"), 'Alright Fred, see you around half three. … (interrupted)');
+    assert.strictEqual(tidyReply("It's 1:38, Thursday afternoon."), "It's 1:38, Thursday afternoon.");
+    assert.strictEqual(tidyReply('I'), 'I … (interrupted)');
+    const long = 'This is one full sentence. '.repeat(80);
+    const t = tidyReply(long);
+    assert.ok(t.length <= 1205 && /sentence\. …$/.test(t), t.slice(-40));
+    assert.strictEqual(tidyExchange("Fred said: hi there you\nHannibal replied: Hello. I'll be"), "Fred said: hi there you\nHannibal replied: Hello. … (interrupted)");
+    const { calls, mem } = fakeBackend([]);
+    await mem.store(`Fred said: how are you feeling today then\nHannibal replied: ${long}`, { type: 'conversation' });
+    const put = calls.find((c) => c.method === 'PUT');
+    assert.ok(/sentence\. …$/.test(put.body.points[0].payload.text));
+  });
+
+  await test('old memories cut at 500 characters are trimmed back to a full sentence', async () => {
+    const calls = [];
+    const cut = `Fred said: what can I do for you\nHannibal replied: ${'Thanks, that means a lot. '.repeat(19)}Honestly, you already do the big thing: you k`.slice(0, 1000);
+    const fine = "Fred said: what time is it now\nHannibal replied: It's 1:38, Thursday afternoon.";
+    const fetchImpl = async (url, init) => {
+      calls.push({ url, body: JSON.parse(init.body) });
+      if (url.endsWith('/points/scroll')) return { json: async () => ({ result: { points: [{ id: 'a', payload: { text: cut } }, { id: 'b', payload: { text: fine } }], next_page_offset: null } }) };
+      return { json: async () => ({ status: 'ok' }) };
+    };
+    const mem = createQdrantMemory({ qdrantUrl: 'http://q', ollamaUrl: 'http://o', fetchImpl, log: () => {} });
+    assert.strictEqual(await mem.repairCutReplies(), 1);
+    const upd = calls.find((c) => c.url.endsWith('/points/payload'));
+    assert.deepStrictEqual(upd.body.points, ['a']);
+    assert.ok(/a lot\. …$/.test(upd.body.payload.text), upd.body.payload.text.slice(-30));
+    assert.strictEqual(upd.body.payload.text_was, cut);
+    assert.strictEqual(tidyExchange(upd.body.payload.text), upd.body.payload.text, 'running it again changes nothing');
   });
 
   await test('fails soft when the server is down', async () => {
