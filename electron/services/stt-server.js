@@ -39,8 +39,13 @@ const FRED_LANGS = () => String(process.env.HANNIBAL_STT_LANGS || 'en,nl,fr,es')
   .split(',').map((x) => x.trim().toLowerCase()).filter((x) => ALLOWED_LANGS.has(x) && x !== 'auto');
 
 // Which of Fred's languages to use, from Whisper's language guess. null = its own guess is fine.
+const LANG_NAMES = { english: 'en', dutch: 'nl', french: 'fr', spanish: 'es', german: 'de', italian: 'it', portuguese: 'pt' };
 function pickLanguage(detected, probs, allowed, hint) {
-  const d = String(detected || '').toLowerCase();
+  // whisper.cpp names the guess ("dutch"); the odds are keyed by code ("nl").
+  let d = String(detected || '').toLowerCase();
+  d = LANG_NAMES[d] || d;
+  const top = Object.entries(probs || {}).sort((x, y) => Number(y[1]) - Number(x[1]))[0];
+  if (d.length !== 2 && top) d = top[0];
   if (allowed.includes(d)) return null;
   let best = null; let bestP = -1;
   for (const l of allowed) { const p = Number((probs || {})[l]); if (p > bestP) { bestP = p; best = l; } }
