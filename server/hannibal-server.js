@@ -103,6 +103,19 @@ ipc.handle('reminders:upcoming', async () => {
   return mac.length ? { ok: true, reminders: [...here.reminders, ...mac.map((r) => ({ ...r, set: 'at the desk' }))] } : here;
 });
 
+ipc.handle('reminders:recent', async (_e, hours) => {
+  const here = reminders.recent(hours);
+  if (!hub || !hub.linked()) return here;
+  try {
+    const mac = await hub.invoke('reminders.recent', { hours }, 15000);
+    if (mac && mac.ok) {
+      const tag = (x) => ({ ...x, set: 'at the desk' });
+      return { ok: true, wentOff: [...here.wentOff, ...(mac.wentOff || []).map(tag)], missed: [...here.missed, ...(mac.missed || []).map(tag)] };
+    }
+  } catch (_) {}
+  return here;
+});
+
 const memory = createQdrantMemory({ qdrantUrl: CFG.qdrantUrl, ollamaUrl: CFG.ollamaUrl });
 setShim('memory.query', async ({ text, limit = 3 } = {}) =>
   ({ ok: true, results: await memory.search(String(text || ''), Math.min(Number(limit) || 3, 10)) }));

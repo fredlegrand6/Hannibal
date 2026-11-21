@@ -68,10 +68,30 @@ async function test(name, fn) {
     assert.strictEqual(out.matches.length, 2);
     assert.strictEqual(r.upcoming().reminders.length, 2);
   });
+  await test('add and cancel check their own work; recent shows what went off and what was missed', () => {
+    let t = NOW;
+    const f = tmp('rem');
+    const r = createReminderTools({ filePath: f, now: () => t });
+    const a = r.add('call Jay', '2026-11-18T09:00');
+    assert.strictEqual(a.verified, true);
+    r.add('pay Hetzner', '2026-11-18T10:00');
+    assert.strictEqual(r.cancel('hetzner').verified, true);
+    r.add('fly to Ibiza', '2026-11-18T12:00');
+    t = Date.parse('2026-11-18T09:30');
+    assert.deepStrictEqual(r.takeDue().map((x) => x.message), ['call Jay']);
+    // the desk fires its own and writes firedAt; one stays unfired past its time
+    const list = JSON.parse(fs.readFileSync(f, 'utf8')).reminders;
+    list.push({ id: 'r-desk', message: 'stretch', triggerTs: Date.parse('2026-11-18T09:00'), fired: true, firedAt: Date.parse('2026-11-18T09:00') });
+    fs.writeFileSync(f, JSON.stringify({ reminders: list }));
+    t = Date.parse('2026-11-18T13:00');
+    const rec = r.recent();
+    assert.deepStrictEqual(rec.wentOff.map((x) => x.message).sort(), ['call Jay', 'stretch']);
+    assert.deepStrictEqual(rec.missed.map((x) => x.message), ['fly to Ibiza']);
+  });
   await test('the whole-list replace tools are NOT given to Claude; add/cancel/upcoming are', () => {
     const names = new Set(claudeTools.toolDefinitions().map((d) => claudeTools.fromApiName(d.name)));
     for (const n of ['reminders.save', 'timers.save', 'notes.save']) assert(!names.has(n), n);
-    for (const n of ['reminders.add', 'reminders.cancel', 'reminders.upcoming']) assert(names.has(n), n);
+    for (const n of ['reminders.add', 'reminders.cancel', 'reminders.upcoming', 'reminders.recent']) assert(names.has(n), n);
   });
 
   console.log('Morning brief schedule');

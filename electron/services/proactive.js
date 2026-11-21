@@ -51,7 +51,10 @@ function createReminderTools({ filePath = path.join(DATA, 'reminders.json'), not
     const r = { id: `r-${now()}-${Math.random().toString(36).slice(2, 6)}`, message: msg, triggerTs: ts, createdTs: now(), fired: false, by: 'claude' };
     list.push(r);
     write(list);
-    return { ok: true, id: r.id, message: msg, when: fmt(ts) };
+    // Check our own work: read the file back, the reminder must really be there.
+    const verified = read().some((x) => x.id === r.id && !x.fired);
+    return verified ? { ok: true, verified: true, id: r.id, message: msg, when: fmt(ts) }
+      : { ok: false, verified: false, error: 'the reminder did not stick: it is not in the list after saving' };
   }
 
   function cancel(query) {
@@ -66,12 +69,28 @@ function createReminderTools({ filePath = path.join(DATA, 'reminders.json'), not
     }
     const gone = hit.length > 1 ? hit.filter((r) => r.id.toLowerCase() === q) : hit;
     write(list.filter((r) => !gone.includes(r)));
-    return { ok: true, cancelled: gone.map((r) => ({ message: r.message, when: fmt(r.triggerTs) })) };
+    const left = read().filter((r) => gone.some((g) => g.id === r.id));
+    if (left.length) return { ok: false, verified: false, error: 'the reminder is still in the list after cancelling it' };
+    return { ok: true, verified: true, cancelled: gone.map((r) => ({ message: r.message, when: fmt(r.triggerTs) })) };
   }
 
   function upcoming() {
     return { ok: true, reminders: read().filter((r) => !r.fired).sort((a, b) => a.triggerTs - b.triggerTs)
       .map((r) => ({ id: r.id, message: r.message, when: fmt(r.triggerTs) })) };
+  }
+
+  // What happened to reminders lately, so Hannibal can check his own work:
+  // the ones that went off (and when), and any that are overdue and did NOT.
+  function recent(hours = 48) {
+    const t = now(); const since = t - Math.max(1, Number(hours) || 48) * 3600000;
+    const list = read();
+    const firedAt = (r) => Number(r.firedTs || r.firedAt || 0);
+    const went = list.filter((r) => r.fired && (firedAt(r) || Number(r.triggerTs)) >= since)
+      .sort((a, b) => firedAt(b) - firedAt(a))
+      .map((r) => ({ id: r.id, message: r.message, due: fmt(r.triggerTs), wentOff: firedAt(r) ? fmt(firedAt(r)) : 'yes (time not recorded)' }));
+    const missed = list.filter((r) => !r.fired && Number(r.triggerTs) < t - 5 * 60000)
+      .map((r) => ({ id: r.id, message: r.message, due: fmt(r.triggerTs) }));
+    return { ok: true, wentOff: went, missed };
   }
 
   // Reminders that are due now, marked fired so each goes out once.
@@ -86,7 +105,7 @@ function createReminderTools({ filePath = path.join(DATA, 'reminders.json'), not
     return due.map((r) => ({ id: r.id, message: r.message, triggerTs: r.triggerTs }));
   }
 
-  return { add, cancel, upcoming, takeDue };
+  return { add, cancel, upcoming, recent, takeDue };
 }
 
 // Cancel across two lists (the server's own + the desk's, read through the
@@ -174,6 +193,7 @@ function registerProactive(ipcMain, { getWindow, onBrief, onReminder, onNudgeDon
   ipcMain.handle('reminders:add', (_e, message, at) => reminders.add(message, at));
   ipcMain.handle('reminders:cancel', (_e, query) => reminders.cancel(query));
   ipcMain.handle('reminders:upcoming', () => reminders.upcoming());
+  ipcMain.handle('reminders:recent', (_e, hours) => reminders.recent(hours));
 
   const brief = createBriefScheduler({ ...(statePath ? { statePath } : {}), send: (job) => { console.log('[proactive] morning brief due → renderer'); toRenderer('proactive:run', job); } });
   ipcMain.handle('proactive:done', (_e, r) => {

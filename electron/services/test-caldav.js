@@ -159,13 +159,15 @@ function fakeIcloud({ status = 207 } = {}) {
     const ipc = { handle: (ch, fn) => { handlers[ch] = fn; } };
     const account = { get: async () => ({ kind: 'icloud', auth: 'Basic x', read: [{ url: 'https://c/werk/', name: 'Werk', writable: true }], write: { url: 'https://c/werk/', name: 'Werk' } }), forget: () => {} };
     const obj = (uid, title, extra = '') => `BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:${uid}\r\nDTSTART:20991122T100000Z\r\nDTEND:20991122T110000Z\r\nSUMMARY:${title}\r\n${extra}END:VEVENT\r\nEND:VCALENDAR\r\n`;
-    const store = { '/werk/jay.ics': obj('jay', 'Call with Jay'), '/werk/gym.ics': obj('gym', 'Gym', 'RRULE:FREQ=WEEKLY\r\n'), '/other/x.ics': obj('x', 'Secret') };
+    const store = { '/werk/jay.ics': obj('jay', 'Call with Jay'), '/werk/lunch.ics': obj('lunch', 'Lunch with John'), '/werk/stuck.ics': obj('stuck', 'Stuck'), '/werk/gym.ics': obj('gym', 'Gym', 'RRULE:FREQ=WEEKLY\r\n'), '/other/x.ics': obj('x', 'Secret') };
     const seen = [];
     const realFetch = global.fetch;
     global.fetch = async (url, o = {}) => {
       seen.push({ url, method: o.method || 'GET', headers: o.headers || {}, body: o.body });
       const path = new URL(url).pathname;
       if (!o.method || o.method === 'GET') return store[path] ? { ok: true, status: 200, headers: { get: () => `"e-${path}"` }, text: async () => store[path] } : { ok: false, status: 404, headers: { get: () => null }, text: async () => '' };
+      // A real server: DELETE removes, PUT stores. "stuck" says yes but changes nothing.
+      if (path !== '/werk/stuck.ics') { if (o.method === 'DELETE') delete store[path]; if (o.method === 'PUT') store[path] = o.body; }
       return { ok: true, status: 204, text: async () => '' };
     };
     try {
@@ -184,14 +186,20 @@ function fakeIcloud({ status = 207 } = {}) {
       assert.ok(!r.ok, 'outside Fred\'s calendars: refused');
       assert.ok(!seen.some((x) => x.method === 'DELETE'));
       r = await handlers['calendar:delete']({}, '/werk/jay.ics', 'call with jay');
-      assert.ok(r.ok, JSON.stringify(r));
+      assert.ok(r.ok && r.verified, JSON.stringify(r));
+      assert.ok(!store['/werk/jay.ics']);
       const del = seen.find((x) => x.method === 'DELETE');
       assert.strictEqual(del.url, 'https://c/werk/jay.ics'); assert.strictEqual(del.headers['If-Match'], '"e-/werk/jay.ics"');
-      r = await handlers['calendar:move']({}, '/werk/jay.ics', '2099-11-23T15:00', undefined, 'Call with Jay');
-      assert.ok(r.ok, JSON.stringify(r));
+      r = await handlers['calendar:move']({}, '/werk/lunch.ics', '2099-11-23T15:00', undefined, 'Lunch with John');
+      assert.ok(r.ok && r.verified, JSON.stringify(r));
       const put = seen.find((x) => x.method === 'PUT');
       assert.match(put.body, /DTSTART:2099112\dT\d{6}Z\r\nDTEND:/); assert.match(put.body, /SEQUENCE:1/);
       assert.match(r.when, /\(60 min\)/);
+      // Checking his own work: the server said yes but nothing changed → Fred hears it did not work.
+      r = await handlers['calendar:delete']({}, '/werk/stuck.ics', 'Stuck');
+      assert.ok(!r.ok && r.verified === false && /still in the calendar/.test(r.error), JSON.stringify(r));
+      r = await handlers['calendar:move']({}, '/werk/stuck.ics', '2099-11-24T09:00', 30, 'Stuck');
+      assert.ok(!r.ok && r.verified === false && /old time/.test(r.error), JSON.stringify(r));
     } finally { global.fetch = realFetch; }
   });
 
