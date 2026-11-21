@@ -385,6 +385,7 @@ registerInfo(ipcMain, { python: CONFIG.pythonTTS, searxngUrl: CONFIG.searxngUrl 
 
 ipcMain.handle('voice:config', () => ({
   whisperUrl: CONFIG.whisperUrl,
+  sttLanguage: process.env.HANNIBAL_STT_LANG || 'auto',
   ollamaUrl: CONFIG.ollamaUrl,
   ollamaModel: CONFIG.ollamaModel,
   ollamaModelFast: CONFIG.ollamaModelFast,

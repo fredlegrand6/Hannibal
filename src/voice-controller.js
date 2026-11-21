@@ -704,7 +704,9 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     if (confirmInFlight) return;   // gate is active — this audio is not for chat
     setPhase('thinking');
     let transcript = '';
-    const code = LANG_CODE[currentLanguage] || 'en';
+    // The big Whisper model detects the language itself ('auto'), so switching to
+    // Dutch or French just works; HANNIBAL_STT_LANG=en|nl|fr pins one.
+    const code = cfg.sttLanguage === 'follow' ? (LANG_CODE[currentLanguage] || 'en') : (cfg.sttLanguage || 'auto');
     try {
       const r = await fetch(`${cfg.whisperUrl}/transcribe?language=${code}`, { method: 'POST', body: blob });
       const j = await r.json();

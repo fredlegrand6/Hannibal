@@ -91,10 +91,14 @@ async function waitEngine(ms = 20000) {
   return false;
 }
 
-// Any recorded format (webm/opus from the renderer, wav, ogg) → 16 kHz mono wav.
+// Any recorded format (webm/opus from the renderer, wav, ogg) → 16 kHz mono wav,
+// padded with a little silence.
 function toWav16k(buf) {
   return new Promise((resolve, reject) => {
-    const p = spawn(FFMPEG, ['-nostdin', '-loglevel', 'error', '-i', 'pipe:0', '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', '-f', 'wav', 'pipe:1']);
+    const p = spawn(FFMPEG, ['-nostdin', '-loglevel', 'error', '-i', 'pipe:0',
+      // A little silence before and after: Whisper drops a first word that starts
+      // right at 0 s (tested: 'Hannibal, what is on my calendar?' lost 'Hannibal').
+      '-af', 'adelay=400:all=1,apad=pad_dur=0.3', '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', '-f', 'wav', 'pipe:1']);
     const out = []; let err = '';
     p.stdout.on('data', (d) => out.push(d));
     p.stderr.on('data', (d) => { err += d; });
@@ -119,7 +123,7 @@ function speakerOk(wav) {
 async function transcribe(audio, language) {
   const t0 = Date.now();
   const wav = await toWav16k(audio);
-  if (wav.length < 16000) return { text: '', ms: Date.now() - t0 };     // < ~0.5 s of audio
+  if (wav.length < 16000 + 22400) return { text: '', ms: Date.now() - t0 };     // < ~0.5 s of audio
   if (!speakerOk(wav)) { log('speaker rejected (not Fred)'); return { text: '', ms: Date.now() - t0 }; }
   if (!(await waitEngine())) throw new Error('speech engine not ready');
   const form = new FormData();
