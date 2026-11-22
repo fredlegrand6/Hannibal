@@ -234,7 +234,7 @@ function createJournal({ filePath, now = () => Date.now(), summarize = null, idl
     const missing = episodes.filter((e) => !vectors[e.id]).slice(-max).reverse();
     for (const e of missing) {
       let v = null;
-      try { v = await embed(episodeText(e)); } catch (_) { v = null; }
+      try { v = await embed(`search_document: ${episodeText(e)}`); } catch (_) { v = null; }
       if (!Array.isArray(v) || !v.length) break;            // embeddings down: try again next time
       vectors[e.id] = v; vecDirty = true;
     }
@@ -245,7 +245,7 @@ function createJournal({ filePath, now = () => Date.now(), summarize = null, idl
   }
   async function queryVector(text) {
     if (!embed || !String(text || '').trim()) return null;
-    try { const v = await embed(String(text).slice(0, 2000)); return Array.isArray(v) && v.length ? v : null; } catch (_) { return null; }
+    try { const v = await embed(`search_query: ${String(text).slice(0, 2000)}`); return Array.isArray(v) && v.length ? v : null; } catch (_) { return null; }
   }
 
   // memory.conversations: by meaning AND by words. "Jay's app" finds the

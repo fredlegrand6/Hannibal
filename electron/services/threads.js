@@ -38,9 +38,9 @@ const MAX_HISTORY = 30;
 const MAX_THREADS = 2000;
 const MAX_EVENTS = 60;
 // By meaning (nomic-embed-text cosine). Tuned on Fred's own threads, Nov 2026.
-const SAME_THREAD = () => Number(process.env.THREAD_SAME_MIN) || 0.82;   // this close = the same thread (dedupe)
+const SAME_THREAD = () => Number(process.env.THREAD_SAME_MIN) || 0.72;   // this close = the same thread (dedupe; distinct ones stay under ~0.6)
 const RELEVANT = () => Number(process.env.THREAD_RELEVANT_MIN) || 0.6;   // brought into a turn unasked
-const FIND_MIN = () => Number(process.env.THREAD_FIND_MIN) || 0.5;       // memory.threads search
+const FIND_MIN = () => Number(process.env.THREAD_FIND_MIN) || 0.55;      // memory.threads search (and within 0.1 of the best)
 const CLOSED_TOPIC = () => Number(process.env.THREAD_CLOSED_MIN) || 0.72; // a nudge about a closed thread is skipped
 
 const clip = (s, n) => { const t = String(s || '').replace(/\s+/g, ' ').trim(); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
@@ -148,19 +148,21 @@ function createThreadStore({ filePath, now = () => Date.now(), embed = null, onC
     try { const tmp = `${vecFile}.tmp`; fs.writeFileSync(tmp, JSON.stringify(vectors)); fs.renameSync(tmp, vecFile); vecDirty = false; } catch (_) {}
   }
 
-  const vecKey = (t) => `${t.id}|${norm(t.title)}`;
+  const vecKey = (t) => `${t.id}|${norm(t.title)}|v2`;
   const threadText = (t) => [t.title, t.people.length ? `People: ${t.people.join(', ')}` : '', t.projects.length ? `Projects: ${t.projects.join(', ')}` : '',
     t.statusNote].filter(Boolean).join('. ');
-  async function vec(text) {
+  // nomic-embed-text ranks far better with its task prefixes (measured on
+  // Fred's threads: the right one rises from 0.41 to 0.5-0.75).
+  async function vec(text, kind = 'query') {
     if (!embed || !String(text || '').trim()) return null;
-    try { const v = await embed(String(text).slice(0, 2000)); return Array.isArray(v) && v.length ? v : null; } catch (_) { return null; }
+    try { const v = await embed(`${kind === 'doc' ? 'search_document' : 'search_query'}: ${String(text).slice(0, 2000)}`); return Array.isArray(v) && v.length ? v : null; } catch (_) { return null; }
   }
   async function ensureVectors() {
     if (!embed) return false;
     for (const t of threads) {
       const k = vecKey(t);
       if (vectors[k]) continue;
-      const v = await vec(threadText(t));
+      const v = await vec(threadText(t), 'doc');
       if (!v) return false;                   // embeddings down: words only for now
       vectors[k] = v; vecDirty = true;
     }
@@ -326,8 +328,9 @@ function createThreadStore({ filePath, now = () => Date.now(), embed = null, onC
     const pool = includeClosed ? threads : threads.filter(isActive);
     const q = String(query || '').trim();
     const scored = q
-      ? (await scoreAll(q, pool)).filter((x) => (x.byMeaning ? x.sem >= FIND_MIN() : false) || x.words >= 0.34)
-        .sort((a, b) => (b.sem + 0.2 * b.words) - (a.sem + 0.2 * a.words))
+      ? (await scoreAll(q, pool)).map((x) => ({ ...x, s: x.sem + 0.2 * x.words }))
+        .filter((x, _i, all) => ((x.byMeaning && x.sem >= FIND_MIN() && Math.max(...all.map((y) => y.sem)) - x.sem <= 0.1) || x.words >= 0.34))
+        .sort((a, b) => b.s - a.s)
       : pool.map((t) => ({ t })).sort((a, b) => b.t.updatedAt - a.t.updatedAt);
     const out = scored.slice(0, Math.min(Math.max(Number(limit) || 6, 1), 20)).map(({ t }) => ({
       id: t.id, title: t.title, status: t.status, waiting_on: t.waitingOn || undefined, until: t.until || undefined,

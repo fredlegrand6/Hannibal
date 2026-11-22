@@ -759,7 +759,7 @@ const TOOLS = [
   { name: 'memory.thread', domain: 'memory',
     description: "Update a thread's status the moment Fred says so: done (fixed, tested, sent, happened), dropped (forget it, not needed), snoozed (later, with until), waiting_on (someone else's move), in_progress or open. Fred's word wins, no proof needed. Creates the thread if nothing matches.",
     params: [
-      { name: 'thread', type: 'string', required: true, desc: 'the thread id from THREADS, or what it is about in a few words, e.g. "reminders firing"' },
+      { name: 'thread', type: 'string', required: true, desc: 'the thread id from THREADS (e.g. "t-3f9a0c1d2e"): always pass the id when the thread is listed; only for one not listed, a few words about it' },
       { name: 'status', type: 'enum', required: true, enum: ['open', 'in_progress', 'waiting_on', 'done', 'dropped', 'snoozed'] },
       { name: 'note', type: 'string', required: false, desc: 'one short line: what happened, e.g. "Fred: fixed and tested this morning"' },
       { name: 'waiting_on', type: 'string', required: false, desc: 'who, for waiting_on' },

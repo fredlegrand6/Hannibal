@@ -47,7 +47,9 @@ const handlers = (store) => { const h = {}; registerThreads({ handle: (ch, fn) =
 
   await t('1. "the reminders are fixed and tested" -> done; never suggested again', async () => {
     const h = handlers(s);
-    const r = await h['threads:update']({}, 'reminders fixed and tested', 'done', 'Fred: fixed and tested this morning');
+    // Claude sees the id in THREADS and passes it (as the tool asks).
+    const id = /\[(t-\w+)\] Reminders must actually fire/.exec(s.renderForPrompt())[1];
+    const r = await h['threads:update']({}, id, 'done', 'Fred: fixed and tested this morning');
     assert.ok(r.ok && !r.created && r.status === 'done', JSON.stringify(r));
     const p = s.renderForPrompt();
     const open = p.split('RECENTLY CLOSED')[0];

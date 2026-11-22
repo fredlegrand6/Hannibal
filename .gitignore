@@ -10,3 +10,5 @@ data/conversations.json
 data/conversation-live.json
 data/*.tmp
 data/nudges.json
+data/threads.json
+data/*.vectors.json
