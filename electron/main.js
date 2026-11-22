@@ -52,6 +52,31 @@ app.on('second-instance', () => {
   if (win) { if (win.isMinimized()) win.restore(); win.show(); win.focus(); }
 });
 
+// ── SELF-UPDATE: pull merged PRs, deploy the server, restart when Fred is away ──
+function startSelfUpdate() {
+  try {
+    const { createSelfUpdate } = require('./services/self-update');
+    const dir = path.join(__dirname, '..');
+    const updater = createSelfUpdate({
+      dir,
+      statePath: path.join(require('os').homedir(), 'Library', 'Application Support', 'Hannibal', 'self-update.json'),
+      idleSeconds: () => { try { return powerMonitor.getSystemIdleTime(); } catch (_) { return 0; } },
+      lastSpokeAt: () => lastSpokeAt,
+      // Fred hears it on his phone (through the server, else Telegram from here).
+      notify: async (text) => {
+        if (linked()) { await bodyLink.request('phone.notify', { text, voice: false }); return; }
+        if (telegram) await telegram.notify(text);
+      },
+      // Quit and reopen through the Login Item app, same as a manual restart.
+      restart: () => {
+        const sh = `sleep 2; cd ${JSON.stringify(dir)} && ./start.sh --stop >/dev/null 2>&1; sleep 2; open ~/Applications/Hannibal.app 2>/dev/null || ./start.sh`;
+        spawn('/bin/sh', ['-c', sh], { detached: true, stdio: 'ignore' }).unref();
+      },
+    });
+    updater.start();
+  } catch (e) { console.warn('[update] not started:', e.message); }
+}
+
 // Link to the always-on server (server/hannibal-server.js), when it runs Telegram.
 let bodyLink = null;
 const linked = () => !!(bodyLink && bodyLink.ready);
@@ -433,7 +458,9 @@ async function voiceNote(text) {
 }
 
 const { speakToMp3 } = require('./services/fast-tts');
+let lastSpokeAt = 0;   // self-update waits until he has been quiet a while before restarting
 ipcMain.handle('voice:tts', async (_e, text) => {
+  lastSpokeAt = Date.now();
   // Unique per call — two sentences requested in the same millisecond must not share a file.
   const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const file = `/tmp/hannibal-tts-${stamp}.mp3`;
@@ -1447,6 +1474,7 @@ app.whenReady().then(async () => {
   ensureWhisper();
   startTelegram();  // Hannibal on Fred's phone, when TELEGRAM_BOT_TOKEN is set
   startBodyLink();  // …or, with the always-on server, link this Mac to it as Hannibal's body
+  startSelfUpdate();  // a merged PR goes live by itself (services/self-update.js)
   if (process.env.HANNIBAL_CAMERA_FOLLOW !== '0') faceFollow.start();  // turn the OBSBOT to keep Fred in frame
   // Microphone: get macOS permission BEFORE starting the wake-word and VAD
   // helpers. They inherit this app's permission; started without it, opening
