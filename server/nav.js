@@ -77,7 +77,8 @@ function createNav({ phone, events, notify, statePath, now = () => Date.now(), l
       if (state.warned[k] || (nextCheck.get(k) || 0) > t) continue;
       const r = await eta(e.location);
       if (!r.ok) { nextCheck.set(k, t + 15 * 60e3); continue; }
-      if (r.minutes <= 3) { state.warned[k] = e.ts; save(); continue; }      // he's already there
+      // He's there now: no warning, but look again (he may leave before it starts).
+      if (r.minutes <= 3) { nextCheck.set(k, t + 15 * 60e3); continue; }
       const leaveAt = e.ts - r.minutes * 60e3 - SPARE_MS;
       if (t >= leaveAt) {
         const late = t + r.minutes * 60e3 > e.ts;

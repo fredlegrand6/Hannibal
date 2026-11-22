@@ -63,12 +63,13 @@ function createPhoneApp(opts = {}) {
   const token = String(opts.token || '');
   if (token.length < 16) throw new Error('PHONE_APP_TOKEN missing or too short');
   const clients = new Set();                 // open event streams
+  const nativeClients = new Set();           // …of those, the native iPhone app (routes, drive times)
   const pending = new Map();                 // confirm id → { resolve, timer }
   let busy = false;
 
-  function push(ev) {
+  function push(ev, to = clients) {
     const line = `data: ${JSON.stringify(ev)}\n\n`;
-    for (const res of clients) { try { res.write(line); } catch (_) {} }
+    for (const res of to) { try { res.write(line); } catch (_) {} }
   }
 
   // Nobody has the app open, but the native iPhone app can be reached by push.
@@ -137,8 +138,10 @@ function createPhoneApp(opts = {}) {
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
       res.write(`data: ${JSON.stringify({ type: 'hello', status: opts.status ? opts.status() : {} })}\n\n`);
       clients.add(res);
+      const native = String(req.headers['x-hannibal-client'] || '') === 'ios';
+      if (native) nativeClients.add(res);
       const ping = setInterval(() => { try { res.write(': ping\n\n'); } catch (_) {} }, 25000);
-      req.on('close', () => { clearInterval(ping); clients.delete(res); });
+      req.on('close', () => { clearInterval(ping); clients.delete(res); nativeClients.delete(res); });
       return;
     }
 
@@ -329,7 +332,8 @@ function createPhoneApp(opts = {}) {
    *  screen, else shows a tap-to-start notification. */
   function navigate(dest, url) {
     const text = `🚗 Route to ${dest}. Tap to start it in Google Maps.`;
-    if (clients.size) { push({ type: 'navigate', dest: String(dest), url: String(url), text }); return 'opened'; }
+    // Only the native app can open Google Maps; the web app in a browser can't.
+    if (nativeClients.size) { push({ type: 'navigate', dest: String(dest), url: String(url), text }, nativeClients); return 'opened'; }
     if (canPush()) { opts.push.notify({ body: text, data: { navigate: String(url) } }).catch((e) => log('push failed:', e.message)); return 'notified'; }
     return 'none';
   }
@@ -340,13 +344,14 @@ function createPhoneApp(opts = {}) {
   const asks = new Map();
   function ask(kind, params = {}, timeoutMs = 20000) {
     return new Promise((resolve) => {
-      const viaPush = !clients.size && canPush() && opts.push.wake;
-      if (!clients.size && !viaPush) { resolve(null); return; }
+      // Only the native iPhone app can answer; the web app in a browser can't.
+      const viaPush = !nativeClients.size && canPush() && opts.push.wake;
+      if (!nativeClients.size && !viaPush) { resolve(null); return; }
       const id = crypto.randomBytes(8).toString('hex');
       const timer = setTimeout(() => { asks.delete(id); resolve(null); }, timeoutMs);
       asks.set(id, { resolve, timer });
       const q = { id, kind: String(kind), ...params };
-      if (clients.size) push({ type: 'ask', ...q });
+      if (nativeClients.size) push({ type: 'ask', ...q }, nativeClients);
       else opts.push.wake({ ask: q }).catch((e) => { log('silent push failed:', e.message); });
     });
   }
