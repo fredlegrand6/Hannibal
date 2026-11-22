@@ -37,6 +37,9 @@ const EXCLUDED = new Set([
   'memory.store',
   'reminders.save', 'timers.save', 'notes.save',   // whole-list replaces: one wrong call wipes the list
   'whatsapp.debugUi',
+  // The robotic macOS voice: he reached for it when he thought his own voice
+  // was down (2026-11-22) and Fred heard a stranger. He only ever speaks as himself.
+  'mac.say',
 ]);
 // Renderer-side tools that DO have a main-side runner in the executor.
 const MAIN_SIDE_SHIMS = new Set(['memory.query', 'translate.text']);
