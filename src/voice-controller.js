@@ -407,6 +407,9 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   // Voice helper (native/voice-io, Apple echo cancelling): when it is ready he
   // speaks through it, and barge-in listens on its clean mic.
   let vio = false;
+  // Once the helper fails to play (it hung for minutes on 2026-11-22, leaving
+  // him silent and deaf), he speaks through the page for the rest of the session.
+  let vioBroken = false, vioOff = () => {};
   const spokenRecent = [];   // his last few sentences, to tell his own echo from Fred
   let lastSpokeAt = 0;
   let wokeAt = 0;
@@ -2074,7 +2077,8 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   }
 
   if (window.hannibal && window.hannibal.vioStatus) {
-    const setVio = (on, why) => { if (on !== vio) console.warn(`[voice] echo-cancelling voice helper ${on ? 'ON — he speaks through it, talk over him any time' : 'off'}${why ? ` (${why})` : ''}`); vio = on; };
+    const setVio = (on, why) => { if (vioBroken) on = false; if (on !== vio) console.warn(`[voice] echo-cancelling voice helper ${on ? 'ON — he speaks through it, talk over him any time' : 'off'}${why ? ` (${why})` : ''}`); vio = on; };
+    vioOff = (why) => { vioBroken = true; setVio(false, why); try { window.hannibal.vioRelease(); } catch (_) {} };
     window.hannibal.vioStatus().then((st) => setVio(!!(st && st.ready))).catch(() => {});
     window.hannibal.onVioReady((m) => setVio(!(m && m.ready === false)));
     window.hannibal.onVioLevel((m) => {
@@ -2219,10 +2223,12 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     if (seq !== null && seq !== turnSeq) return;   // Fred cut in while this sentence was loading
     if (vio) {
       if (turnEndedAt) { console.warn(`[timing] you stopped talking → his first word: ${Math.round(performance.now() - turnEndedAt)} ms`); turnEndedAt = 0; }
-      const r = await window.hannibal.vioPlay(bytes);
+      const r = await window.hannibal.vioPlay(bytes, Math.round(audioBuf.duration * 1000));
       brain.setAmplitude(0);
       if (r && (r.ok || r.stopped)) return;
-      console.warn('[voice] voice helper could not play — using the page:', r && r.error);
+      console.warn('[voice] voice helper could not play — using the page from now on:', r && r.error);
+      vioOff(`it could not play: ${(r && r.error) || 'no answer'}`);
+      if (seq !== null && seq !== turnSeq) return;
     }
     if (turnEndedAt) { console.warn(`[timing] you stopped talking → his first word: ${Math.round(performance.now() - turnEndedAt)} ms`); turnEndedAt = 0; }
     await playWithAmplitude(audioBuf);
