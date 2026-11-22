@@ -58,6 +58,17 @@ Open Hannibal once after installing, so iOS learns the shortcuts.
   leave the office". The phone watches the place (allow location *Always*) and rings when you arrive or
   leave. Needs a server deploy. At most 18 active places (iOS limit is 20).
 
+### Meetings, interpreter, photo memory
+
+- **Record a meeting:** the ⏺ button at the top. Put the phone on the table; it keeps recording with
+  the screen locked. Tap the red bar to stop. A few minutes later you get the write-up (summary,
+  decisions, action items), then he offers reminders / a follow-up mail (only on your yes). Later:
+  "what did we agree with HTS?". Tell the others they're being recorded.
+- **Interpreter:** ⋯ › Interpreter › the other person's language. Put the phone between you and take
+  turns; he says each sentence in the other language in his voice. Gold bar = on; tap to stop.
+- **Photo memory:** "remember where I parked" (keeps the spot), or take a photo and type "remember this
+  wine". Later "where did I park?" shows the photo and can start the route back.
+
 ### Navigation (Google Maps)
 
 - **"Take me to Ibiza airport"**: Google Maps opens with the route (app on screen), otherwise a
