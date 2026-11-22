@@ -14,24 +14,28 @@ async function test(name, fn) {
 function fakeRun(over = {}) {
   const calls = [];
   const a = { branch: 'main', head: 'aaa1111', remote: 'bbb2222', ancestor: true, files: 'server/nav.js\nios/Hannibal/Nav.swift', log: 'Merge pull request #71 from fred/x\n\nNavigation follow-up\u0000', merge: true, deploy: true, ...over };
-  const run = async (cmd, args) => {
+  run.state = a;
+  async function run(cmd, args) {
     calls.push([cmd, ...args].join(' '));
     const ok = (out = '') => ({ ok: true, out, err: '' });
     if (cmd === 'git') {
       const [sub] = args;
       if (sub === 'rev-parse' && args[1] === '--abbrev-ref') return ok(a.branch);
+      if (sub === 'rev-parse' && args[2] === '--verify') return a.stashTop ? ok(a.stashTop) : { ok: false, out: '', err: '' };
+      if (sub === 'stash' && args[1] === 'push') { if (a.iosEdits) { a.stashTop = 'new-stash'; a.merge = true; } return ok(); }
+      if (sub === 'stash' && args[1] === 'pop') { a.popped = true; return ok(); }
       if (sub === 'fetch') return ok();
       if (sub === 'rev-parse' && args[1] === 'HEAD') return ok(a.head);
       if (sub === 'rev-parse' && args[1] === 'FETCH_HEAD') return ok(a.remote);
       if (sub === 'merge-base') return { ok: a.ancestor, out: '', err: '' };
       if (sub === 'diff') return ok(a.files);
       if (sub === 'log') return ok(a.log);
-      if (sub === 'merge') return a.merge ? ok() : { ok: false, out: '', err: 'error: Your local changes would be overwritten' };
+      if (sub === 'merge') { if (a.merge) { a.head = a.remote; return ok(); } return { ok: false, out: '', err: 'error: Your local changes would be overwritten' }; }
     }
-    if (/deploy\.sh$/.test(cmd)) return a.deploy ? ok('Done') : { ok: false, out: '', err: 'ssh: connect to host GEX131: timed out' };
+    if (/deploy\.sh$/.test(cmd)) { a.deploys = (a.deploys || 0) + 1; return a.deploy ? ok('Done') : { ok: false, out: '', err: 'ssh: connect to host GEX131: timed out' }; }
     if (cmd === 'npm') return ok();
     return { ok: false, out: '', err: 'unknown' };
-  };
+  }
   return { run, calls };
 }
 
@@ -96,6 +100,27 @@ function fakeRun(over = {}) {
     const g = fakeRun({ deploy: false }); const told2 = [];
     await createSelfUpdate({ dir: '/x', run: g.run, notify: async (t) => told2.push(t), restart: () => {}, log: () => {} }).check();
     assert.match(told2[0], /server deploy failed: ssh: connect to host GEX131: timed out/);
+  });
+
+  await test('a failed deploy is retried on the next check, although git is already up to date', async () => {
+    const f = fakeRun({ deploy: false }); const told = [];
+    const u = createSelfUpdate({ dir: '/x', run: f.run, notify: async (t) => told.push(t), restart: () => {}, log: () => {} });
+    assert.strictEqual((await u.check()).ok, false);
+    f.run.state.deploy = true;                       // the server is back
+    const r = await u.check();
+    assert.ok(r.updated && r.server, JSON.stringify(r));
+    assert.strictEqual(f.run.state.deploys, 2);
+    assert.match(told[told.length - 1], /I updated myself: #71 .*The server is updated/);
+    assert.ok((await u.check()).upToDate, 'done now');
+  });
+
+  await test('no Xcode edits: nobody else\'s stash is popped', async () => {
+    const f = fakeRun({ merge: false, stashTop: 'freds-old-stash' });
+    await createSelfUpdate({ dir: '/x', run: f.run, notify: async () => {}, restart: () => {}, log: () => {} }).check();
+    assert.ok(!f.run.state.popped);
+    const g = fakeRun({ merge: false, stashTop: 'freds-old-stash', iosEdits: true });
+    const r = await createSelfUpdate({ dir: '/x', run: g.run, notify: async () => {}, restart: () => {}, log: () => {} }).check();
+    assert.ok(g.run.state.popped && r.updated);
   });
 
   console.log(process.exitCode ? 'some FAILED' : `${passed} passed`);
