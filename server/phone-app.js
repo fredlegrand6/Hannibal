@@ -180,6 +180,26 @@ function createPhoneApp(opts = {}) {
       return;
     }
 
+    // Live talk with the camera on (iPhone app): what Fred said + what the
+    // camera sees right now, in one turn. { audio: base64, mime, image: base64 jpeg }
+    if (req.method === 'POST' && url.pathname === '/api/voice-look') {
+      if (!opts.transcribe) { json(res, 501, { ok: false, reply: "I can't listen right now. Type it instead?" }); return; }
+      let body = {};
+      try { body = JSON.parse((await readBody(req, MAX_IMAGE_BODY)).toString('utf8')); } catch (_) {}
+      const image = String(body.image || '').replace(/^data:[^,]*,/, '');
+      const audio = String(body.audio || '');
+      if (!audio || !image || !/^[A-Za-z0-9+/=]+$/.test(image.slice(0, 4096))) { json(res, 400, { ok: false, reply: "That didn't come through. Try again?" }); return; }
+      if (busy) { json(res, 429, { ok: false, reply: 'One moment, still on the last one.' }); return; }
+      busy = true;
+      try {
+        const heard = String(await opts.transcribe(Buffer.from(audio, 'base64'), String(body.mime || 'audio/wav')) || '').trim();
+        if (!heard) { json(res, 200, { ok: false, heard: '', reply: "I couldn't make that out. Try again?" }); return; }
+        json(res, 200, { heard, ...(await turn(heard, { spoken: true, images: [image] })) });
+      } catch (e) { log('voice-look failed:', e.message); json(res, 500, { ok: false, reply: 'Something went wrong with that. Try again?' }); }
+      finally { busy = false; }
+      return;
+    }
+
     if (req.method === 'POST' && url.pathname === '/api/speak') {
       if (!opts.speak) { res.writeHead(501); res.end(); return; }
       try {

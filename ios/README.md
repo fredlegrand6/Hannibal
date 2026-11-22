@@ -32,6 +32,8 @@ Tailscale must be on on the iPhone, same as for the web app.
 - **Tap the orb** to stop him talking. Starting to talk also stops him.
 - Speaker icon: read every answer aloud, or only when you talked.
 - Camera button: take or choose a photo; anything typed goes with it as the question.
+- **Live camera** (video icon at the top): starts live talk with the camera on. Point and talk; when you
+  finish a sentence he sees the current frame (/api/voice-look, needs a server deploy). Tap the preview to flip.
 - Reminders, the morning brief and Yes/No questions show up live while the app is open,
   and as notifications when it's closed (No right there; Yes needs the phone unlocked and opens the app).
 

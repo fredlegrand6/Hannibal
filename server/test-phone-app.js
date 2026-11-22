@@ -76,6 +76,18 @@ const app = createPhoneApp({
     assert.strictEqual(lastPayload.images, undefined);
   });
 
+  await test('live talk with the camera: speech + frame in one turn', async () => {
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 9, 9]).toString('base64');
+    const audio = Buffer.alloc(12).toString('base64');
+    const j = await (await fetch(`${base}/api/voice-look`, { method: 'POST', headers: C, body: JSON.stringify({ audio, mime: 'audio/wav', image: jpeg }) })).json();
+    assert.strictEqual(j.heard, 'heard 12 bytes of audio/wav');
+    assert.ok(j.ok && j.spoken);
+    assert.deepStrictEqual(lastPayload.images, [jpeg]);
+    assert.strictEqual(lastPayload.user, 'heard 12 bytes of audio/wav');
+    assert.strictEqual((await fetch(`${base}/api/voice-look`, { method: 'POST', headers: C, body: JSON.stringify({ audio }) })).status, 400);
+    assert.strictEqual((await fetch(`${base}/api/voice-look`, { method: 'POST', body: JSON.stringify({ audio, image: jpeg }) })).status, 401);
+  });
+
   await test('a photo needs the key', async () => {
     assert.strictEqual((await fetch(`${base}/api/look`, { method: 'POST', body: '{"image":"abc"}' })).status, 401);
   });

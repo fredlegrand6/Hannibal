@@ -91,6 +91,11 @@ final class HannibalAPI {
         try await reply(request("api/voice", contentType: mime, body: audio))
     }
 
+    /// Live talk with the camera on: the sentence and the current frame together.
+    func voiceLook(_ audio: Data, mime: String, jpeg: Data) async throws -> Reply {
+        try await reply(request("api/voice-look", body: jsonBody(["audio": audio.base64EncodedString(), "mime": mime, "image": jpeg.base64EncodedString()])))
+    }
+
     func look(jpegBase64: String, text: String) async throws -> Reply {
         try await reply(request("api/look", body: jsonBody(["image": jpegBase64, "text": text])))
     }

@@ -30,6 +30,7 @@ final class HannibalModel {
     var live = false                 // hands-free conversation is on
     var liveHearing = false          // ...and Fred is talking right now
     var looking = false
+    var cameraOn = false             // live camera during live talk
     var waiting = 0
     var level: Float = 0
     var pulses = 0                   // bumps when something arrives; the orb flashes
@@ -73,6 +74,7 @@ final class HannibalModel {
     @ObservationIgnored private var liveActiveAt = Date()
     @ObservationIgnored private var liveWatch: Task<Void, Never>?
     @ObservationIgnored private let activity = LiveActivityController()
+    @ObservationIgnored let camera = LiveCamera()
     private static let historyKey = "history.v1"
 
     init() {
@@ -161,6 +163,29 @@ final class HannibalModel {
         }
     }
 
+    /// Camera on/off during live talk (turning it on starts live talk if needed).
+    func toggleCamera() {
+        if cameraOn { camera.stop(); cameraOn = false; return }
+        Task {
+            guard await LiveCamera.askPermission() else {
+                add(.error, "Hannibal needs the camera. Turn it on in Settings › Hannibal.")
+                return
+            }
+            do { try camera.start(front: camera.front) } catch {
+                add(.error, "The camera couldn't start: \(error.localizedDescription)")
+                return
+            }
+            cameraOn = true
+            if !live { startLive() }
+            add(.note, "Camera on. Point it and just talk: he sees what you see when you finish a sentence.")
+        }
+    }
+
+    /// iOS stops the camera when the app leaves the screen.
+    func appWentToBackground() {
+        if cameraOn { camera.stop(); cameraOn = false }
+    }
+
     func stopLive(_ note: String? = "Live talk off.") {
         guard live else { return }
         live = false
@@ -173,6 +198,7 @@ final class HannibalModel {
         speaker.clip = SimpleClipPlayer()
         UIApplication.shared.isIdleTimerDisabled = false
         activity.end()
+        if cameraOn { camera.stop(); cameraOn = false }
         if let note { add(.note, note) }
     }
 
@@ -188,10 +214,15 @@ final class HannibalModel {
                 if live { liveVoice.setAccepting(true) }
             }
             do {
-                let r = try await api.voice(wav, mime: "audio/wav")
+                let frame = cameraOn ? camera.snapshotJPEG() : nil
+                if frame != nil { looking = true }
+                defer { looking = false }
+                let r: Reply
+                if let frame { r = try await api.voiceLook(wav, mime: "audio/wav", jpeg: frame) }
+                else { r = try await api.voice(wav, mime: "audio/wav") }
                 let heard = (r.heard ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 if heard.isEmpty { return }     // a cough or a door: ignore quietly in live talk
-                add(.me, "🎙 " + heard)
+                add(.me, (frame != nil ? "📷🎙 " : "🎙 ") + heard)
                 show(r, spoken: true)
             } catch { add(.error, friendly(error)) }
         }

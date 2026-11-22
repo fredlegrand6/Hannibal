@@ -30,6 +30,7 @@ struct RootView: View {
             // Live talk keeps going with the screen locked; everything else pauses.
             if phase == .active { model.startEvents() } else if phase == .background {
                 model.stopRecording(send: false)
+                model.appWentToBackground()
                 if !model.live { model.stopEvents() }
             }
         }
@@ -118,6 +119,11 @@ struct ChatView: View {
             Circle().fill(model.online ? Color.green : Color.orange).frame(width: 8, height: 8)
             Text(model.online ? "Hannibal" : "Connecting…").font(.headline)
             Spacer()
+            Button { model.toggleCamera() } label: {
+                Image(systemName: model.cameraOn ? "video.fill" : "video")
+                    .font(.system(size: 19))
+            }
+            .accessibilityLabel(model.cameraOn ? "Turn the live camera off" : "Live talk with the camera")
             Button { model.toggleLive() } label: {
                 Image(systemName: model.live ? "waveform.circle.fill" : "waveform.circle")
                     .font(.system(size: 22))
@@ -139,8 +145,23 @@ struct ChatView: View {
 
     private var orb: some View {
         VStack(spacing: 4) {
-            OrbView(state: model.orbState, level: model.level, pulses: model.pulses)
-                .frame(height: typing ? 120 : 250)
+            ZStack(alignment: .bottomTrailing) {
+                if model.cameraOn {
+                    // Live camera: he sees this when you finish a sentence. Tap to flip.
+                    CameraPreview(session: model.camera.session)
+                        .clipShape(RoundedRectangle(cornerRadius: 18))
+                        .overlay(RoundedRectangle(cornerRadius: 18).stroke(model.orbState == "looking" ? Palette.gold : Palette.cyan.opacity(0.6), lineWidth: 2))
+                        .padding(.horizontal, 16)
+                        .onTapGesture { model.camera.flip() }
+                    OrbView(state: model.orbState, level: model.level, pulses: model.pulses)
+                        .frame(width: 90, height: 90)
+                        .padding(.trailing, 22).padding(.bottom, 6)
+                        .allowsHitTesting(false)
+                } else {
+                    OrbView(state: model.orbState, level: model.level, pulses: model.pulses)
+                }
+            }
+                .frame(height: typing ? 120 : (model.cameraOn ? 330 : 250))
                 .contentShape(Rectangle())
                 .onTapGesture {
                     // Tap while he talks = stop him; otherwise live talk on/off.
