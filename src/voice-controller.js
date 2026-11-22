@@ -3280,6 +3280,9 @@ RULES:
   async function handleConfirmRequest(req) {
     // main asks per-action and awaits each reply, so only one is ever in flight;
     // deny any overlap defensively.
+    // It waited in the queue past main's timeout: main has stopped listening, so
+    // asking now would be a question whose yes does nothing.
+    if (req.expiresAt && Date.now() > req.expiresAt) { console.warn(`[gate] "${req.summary}" expired in the queue, not asked`); return; }
     if (confirmInFlight) { console.warn('[gate] overlapping request refused'); try { window.hannibal.agentConfirmResponse(req.id, { approved: false, answer: 'unheard' }); } catch (_) {} return; }
     confirmInFlight = true;   // from here, the normal voice loop is fully suspended
     // Seize the mic: stop any in-progress normal capture so its recorder can't
@@ -3342,6 +3345,10 @@ RULES:
     }
     if (gateUI) { try { gateUI.finish(decision); } catch (_) {} }
     // The spoken line, the log and the answer to main all come from `decision`.
+    if (decision && req.expiresAt && Date.now() > req.expiresAt) {
+      console.warn(`[gate] "${req.summary}" → yes came after the time limit, not done`);
+      decision = false; heardVerdict = 'late';
+    }
     const said = decision ? 'yes' : (decidedHow === 'click' || heardVerdict === 'no' ? 'no' : 'unheard');
     try {
       if (said === 'yes') await speakLine('On it.');

@@ -1027,7 +1027,9 @@ function makeIpcConfirmer(timeoutMs = 120000) {
       console.log(`[gate] ${step.tool}: ${ans.approved ? 'YES → running it' : `${ans.answer === 'unheard' ? 'no clear answer' : 'NO'} → not done`}`);
       resolve(ans);
     });
-    target.webContents.send('agent:confirm-request', { id, step: step.step, tool: step.tool, summary });
+    // expiresAt lets a request that waited in the renderer's queue too long be
+    // skipped instead of asked (main would ignore that answer anyway).
+    target.webContents.send('agent:confirm-request', { id, step: step.step, tool: step.tool, summary, expiresAt: Date.now() + timeoutMs - 5000 });
   });
 }
 
