@@ -72,6 +72,7 @@ final class HannibalModel {
     @ObservationIgnored private var pushToken: String?
     @ObservationIgnored private var liveActiveAt = Date()
     @ObservationIgnored private var liveWatch: Task<Void, Never>?
+    @ObservationIgnored private let activity = LiveActivityController()
     private static let historyKey = "history.v1"
 
     init() {
@@ -93,6 +94,34 @@ final class HannibalModel {
         liveVoice.onUtterance = { [weak self] wav in self?.sendLive(wav) }
         liveVoice.onStopped = { [weak self] why in self?.stopLive(why) }
         if let c = ConnectionStore.load() { use(c) }
+        // Action Button / Siri / lock screen button / Dynamic Island stop.
+        NotificationCenter.default.addObserver(forName: LiveRequest.start, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.takeLiveRequest() }
+        }
+        NotificationCenter.default.addObserver(forName: LiveRequest.stop, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.stopLive() }
+        }
+        takeLiveRequest()
+    }
+
+    /// Starts live talk if a shortcut asked for it (also after a cold launch).
+    func takeLiveRequest() {
+        guard LiveRequest.pendingStart, api != nil else { return }
+        LiveRequest.pendingStart = false
+        startLive()
+    }
+
+    /// Keeps the Dynamic Island in step with the orb while live talk runs
+    /// (works with the screen locked, unlike a SwiftUI onChange).
+    private func trackActivity() {
+        guard live else { return }
+        withObservationTracking { _ = (orbState, phase) } onChange: { [weak self] in
+            Task { @MainActor in
+                guard let self, self.live else { return }
+                self.activity.update(state: self.orbState, phase: self.phase)
+                self.trackActivity()
+            }
+        }
     }
 
     // MARK: Live talk (hands-free, interruptible)
@@ -118,6 +147,8 @@ final class HannibalModel {
             UIApplication.shared.isIdleTimerDisabled = true
             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
             add(.note, "Live talk on. Just talk, and talk over him to interrupt. Tap the orb to stop.")
+            activity.start(state: orbState, phase: phase)
+            trackActivity()
             liveWatch = Task { [weak self] in
                 // Falls asleep after 3 quiet minutes, to save the battery.
                 while !Task.isCancelled {
@@ -141,6 +172,7 @@ final class HannibalModel {
         liveVoice.stop()
         speaker.clip = SimpleClipPlayer()
         UIApplication.shared.isIdleTimerDisabled = false
+        activity.end()
         if let note { add(.note, note) }
     }
 
@@ -188,6 +220,7 @@ final class HannibalModel {
         connection = c
         api = HannibalAPI(conn: c)
         if let t = pushToken, let api { Task { await api.registerPush(token: t) } }
+        takeLiveRequest()
     }
 
     // MARK: Push notifications (app closed)
