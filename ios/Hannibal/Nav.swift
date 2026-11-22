@@ -41,6 +41,8 @@ enum Nav {
         case "eta":
             let dest = (q["destination"] as? String) ?? ""
             reply.merge(await eta(to: dest)) { $1 }
+        case "here":
+            reply.merge(await here()) { $1 }
         default:
             reply["ok"] = false
             reply["error"] = "The iPhone app doesn't know that question yet (update the app)."
@@ -75,6 +77,26 @@ enum Nav {
         }
     }
 
+    /// Where the phone is now, with the street (photo memory: "remember where I parked").
+    static func here() async -> [String: Any] {
+        let m = CLLocationManager()
+        let status = m.authorizationStatus
+        guard status == .authorizedAlways || status == .authorizedWhenInUse else {
+            return ["ok": false, "error": "Hannibal has no location access on the iPhone."]
+        }
+        // A fresh fix if the cached one is old or rough (≤ 8 s).
+        var loc = m.location
+        if loc == nil || loc!.timestamp.timeIntervalSinceNow < -60 || loc!.horizontalAccuracy > 50 {
+            if let fresh = await OneFix().get(timeout: 8) { loc = fresh }
+        }
+        guard let loc else { return ["ok": false, "error": "The iPhone couldn't get its location."] }
+        var out: [String: Any] = ["ok": true, "lat": loc.coordinate.latitude, "lon": loc.coordinate.longitude, "accuracy": loc.horizontalAccuracy]
+        if let p = try? await CLGeocoder().reverseGeocodeLocation(loc).first {
+            out["address"] = [p.name, p.locality].compactMap { $0 }.joined(separator: ", ")
+        }
+        return out
+    }
+
     /// A place by name (restaurant, airport) or address, preferring ones near Fred.
     private static func find(_ dest: String) async -> MKMapItem? {
         let here = CLLocationManager().location
@@ -86,5 +108,41 @@ enum Nav {
             return MKMapItem(placemark: MKPlacemark(placemark: mark))
         }
         return nil
+    }
+}
+
+/// One location fix, with a time limit.
+@MainActor
+final class OneFix: NSObject, CLLocationManagerDelegate {
+    private let manager = CLLocationManager()
+    private var done: CheckedContinuation<CLLocation?, Never>?
+
+    func get(timeout: TimeInterval) async -> CLLocation? {
+        manager.delegate = self
+        manager.desiredAccuracy = kCLLocationAccuracyBest
+        return await withCheckedContinuation { c in
+            done = c
+            manager.requestLocation()
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                self?.finish(nil)
+            }
+        }
+    }
+
+    private func finish(_ loc: CLLocation?) {
+        guard let c = done else { return }
+        done = nil
+        manager.stopUpdatingLocation()
+        c.resume(returning: loc)
+    }
+
+    nonisolated func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        let loc = locations.last
+        Task { @MainActor in self.finish(loc) }
+    }
+
+    nonisolated func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        Task { @MainActor in self.finish(nil) }
     }
 }

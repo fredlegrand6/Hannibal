@@ -7,10 +7,14 @@
 # app to leave Telegram to the server and restarts it. Safe to run again to
 # update: the server keeps its own facts, reminders and brief state.
 #   HANNIBAL_SERVER_SSH  ssh host (default GEX131, the same one the desk uses)
+#   --auto  used by Hannibal's self-update (electron/services/self-update.js):
+#           no terminal, and the Mac app is not restarted (it does that itself).
 # ─────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 cd "$(dirname "$0")/.."
 HOST="${HANNIBAL_SERVER_SSH:-GEX131}"
+AUTO=0; [ "${1:-}" = "--auto" ] && AUTO=1
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 REMOTE_DIR='hannibal-server'
 
 [ -f .env ] || { echo "No .env here. Run this from the hannibal-v2 folder."; exit 1; }
@@ -41,7 +45,8 @@ printf ".env\ndata\nseed\n" > "$STAGE/app/.dockerignore"
 tar czf - -C "$STAGE/app" . | ssh "$HOST" "mkdir -p ~/$REMOTE_DIR/data && tar xzf - -C ~/$REMOTE_DIR && chmod 600 ~/$REMOTE_DIR/.env"
 
 echo "2/4  Building and starting the server (first time takes a few minutes) ..."
-ssh -t "$HOST" "bash ~/$REMOTE_DIR/server/remote-up.sh"
+if [ -t 0 ] && [ "$AUTO" = 0 ]; then ssh -t "$HOST" "bash ~/$REMOTE_DIR/server/remote-up.sh"
+else ssh -o BatchMode=yes "$HOST" "bash ~/$REMOTE_DIR/server/remote-up.sh"; fi
 
 echo "3/4  Handing Telegram over to the server ..."
 if grep -q '^HANNIBAL_SERVER_TELEGRAM=' .env; then
@@ -50,6 +55,7 @@ else
   printf '\nHANNIBAL_SERVER_TELEGRAM=1\n' >> .env
 fi
 
+if [ "$AUTO" = 1 ]; then echo "Done (server updated; the Mac app restarts itself when Fred is away)."; exit 0; fi
 echo "4/4  Restarting Hannibal on the Mac ..."
 ./start.sh --stop >/dev/null 2>&1 || true
 sleep 2

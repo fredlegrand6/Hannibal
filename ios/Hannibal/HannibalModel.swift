@@ -18,6 +18,7 @@ struct Line: Identifiable, Codable, Equatable {
     var expires: Date? = nil        // the server gives up on a Yes/No after 2 minutes
     var sending = false             // Yes/No answer on its way
     var url: String? = nil          // a route Fred can start (Google Maps)
+    var photoId: String? = nil      // a remembered photo to show (photo memory)
 }
 
 @MainActor
@@ -30,6 +31,10 @@ final class HannibalModel {
     var recording = false
     var speaking = false
     var live = false                 // hands-free conversation is on
+    var meetingSince: Date?          // recording a meeting since (nil = not recording)
+    var interpreter: (mine: String, theirs: String)?   // interpreter on: Fred's language ⇄ theirs
+    let meeting = MeetingRecorder()
+    private var sendingMeetings = false
     var liveHearing = false          // ...and Fred is talking right now
     var looking = false
     var cameraOn = false             // live camera during live talk
@@ -135,6 +140,7 @@ final class HannibalModel {
 
     func startLive() {
         guard api != nil, !live else { return }
+        if meetingSince != nil { add(.note, "A meeting is being recorded. Stop it first (red bar)."); return }
         Task {
             guard await AudioSession.askMicPermission() else {
                 add(.error, "Hannibal needs the microphone. Turn it on in Settings › Hannibal.")
@@ -151,7 +157,11 @@ final class HannibalModel {
             liveActiveAt = Date()
             UIApplication.shared.isIdleTimerDisabled = true
             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-            add(.note, "Live talk on. Just talk, and talk over him to interrupt. Tap the orb to stop.")
+            if let p = interpreter {
+                add(.note, "Interpreter on: \(Self.languageName(p.mine)) ⇄ \(Self.languageName(p.theirs)). Put the phone between you and take turns; he says each sentence in the other language. Tap the bar to stop.")
+            } else {
+                add(.note, "Live talk on. Just talk, and talk over him to interrupt. Tap the orb to stop.")
+            }
             activity.start(state: orbState, phase: phase)
             trackActivity()
             liveWatch = Task { [weak self] in
@@ -160,7 +170,8 @@ final class HannibalModel {
                     try? await Task.sleep(nanoseconds: 20_000_000_000)
                     guard let self, self.live else { return }
                     if self.speaking || self.waiting > 0 || self.liveHearing { self.liveActiveAt = Date(); continue }
-                    if Date().timeIntervalSince(self.liveActiveAt) > 180 { self.stopLive("Live talk went to sleep after 3 quiet minutes."); return }
+                    let limit: TimeInterval = self.interpreter != nil ? 600 : 180
+                    if Date().timeIntervalSince(self.liveActiveAt) > limit { self.stopLive(self.interpreter != nil ? "Interpreter stopped after 10 quiet minutes." : "Live talk went to sleep after 3 quiet minutes."); return }
                 }
             }
         }
@@ -184,14 +195,77 @@ final class HannibalModel {
         }
     }
 
+    // MARK: Meeting memory
+
+    /// Record button: start recording the meeting, or stop and send it.
+    func toggleMeeting() {
+        if meetingSince != nil {
+            guard let rec = meeting.stop() else { meetingSince = nil; return }
+            meetingSince = nil
+            UIApplication.shared.isIdleTimerDisabled = false
+            let mins = max(1, Int((rec.seconds / 60).rounded()))
+            add(.note, "Meeting recorded (\(mins) min). Sending it to Hannibal…")
+            Task { await sendWaitingMeetings() }
+            return
+        }
+        Task {
+            guard await AudioSession.askMicPermission() else {
+                add(.error, "Hannibal needs the microphone. Turn it on in Settings › Hannibal.")
+                return
+            }
+            if live { stopLive(nil) }
+            speaker.stop()
+            do { try meeting.start() } catch {
+                add(.error, "The recording couldn't start: \(error.localizedDescription)")
+                return
+            }
+            meetingSince = meeting.startedAt
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            add(.note, "Recording the meeting. Let the others know they're being recorded. It keeps going with the screen locked; tap the red bar to stop.")
+        }
+    }
+
+    /// Sends every recorded meeting that hasn't reached the server yet (oldest first).
+    func sendWaitingMeetings() async {
+        guard let api, !sendingMeetings else { return }
+        sendingMeetings = true
+        defer { sendingMeetings = false }
+        for (file, started) in MeetingRecorder.waiting().sorted(by: { $0.1 < $1.1 }) {
+            if meetingSince != nil, let s = meeting.startedAt, abs(s.timeIntervalSince(started)) < 1 { continue }   // still recording this one
+            let seconds = await MeetingRecorder.duration(of: file)
+            do {
+                let note = try await api.meeting(file: file, seconds: seconds, started: started)
+                try? FileManager.default.removeItem(at: file)
+                add(.note, "🎙 " + note)
+            } catch {
+                add(.error, "The meeting recording couldn't be sent yet (\(friendly(error))). It's kept; I'll send it when the connection is back.")
+                return
+            }
+        }
+    }
+
     /// iOS stops the camera when the app leaves the screen.
     func appWentToBackground() {
         if cameraOn { camera.stop(); cameraOn = false }
     }
 
+    // MARK: Interpreter
+
+    static let interpreterLanguages: [(code: String, name: String)] = [("es", "Spanish"), ("nl", "Dutch"), ("fr", "French"), ("de", "German"), ("it", "Italian"), ("pt", "Portuguese"), ("en", "English")]
+    static func languageName(_ code: String) -> String { interpreterLanguages.first { $0.code == code }?.name ?? code }
+
+    /// Interpreter with someone who speaks `theirs` (Fred speaks English; Dutch when they speak English).
+    func startInterpreter(theirs: String) {
+        if live { stopLive(nil) }
+        interpreter = (mine: theirs == "en" ? "nl" : "en", theirs: theirs)
+        startLive()
+    }
+
     func stopLive(_ note: String? = "Live talk off.") {
-        guard live else { return }
+        guard live else { interpreter = nil; return }
         live = false
+        let wasInterpreting = interpreter != nil
+        interpreter = nil
         liveHearing = false
         level = 0
         liveWatch?.cancel()
@@ -202,7 +276,7 @@ final class HannibalModel {
         UIApplication.shared.isIdleTimerDisabled = false
         activity.end()
         if cameraOn { camera.stop(); cameraOn = false }
-        if let note { add(.note, note) }
+        if let note { add(.note, wasInterpreting && note == "Live talk off." ? "Interpreter off." : note) }
     }
 
     private func sendLive(_ wav: Data) {
@@ -217,6 +291,17 @@ final class HannibalModel {
                 if live { liveVoice.setAccepting(true) }
             }
             do {
+                if let pair = interpreter {
+                    let r = try await api.interpret(wav, mime: "audio/wav", mine: pair.mine, theirs: pair.theirs)
+                    guard let heard = r.heard?.trimmingCharacters(in: .whitespacesAndNewlines), !heard.isEmpty else {
+                        if let e = r.error { add(.error, e) }
+                        return
+                    }
+                    add(.me, "🗣 " + heard)
+                    if let text = r.text { add(.him, "🔁 \(Self.languageName(r.to ?? "")): \(text)") }
+                    if let b64 = r.audio, let mp3 = Data(base64Encoded: b64) { try? await speaker.clip.play(mp3) }
+                    return
+                }
                 let frame = cameraOn ? camera.snapshotJPEG() : nil
                 if frame != nil { looking = true }
                 defer { looking = false }
@@ -338,6 +423,7 @@ final class HannibalModel {
             expireOldConfirms()          // a close may have been missed while away
             WidgetCenter.shared.reloadAllTimelines()
             Task { await PlaceWatcher.shared.sync() }
+            Task { await sendWaitingMeetings() }
         case "places":
             Task { await PlaceWatcher.shared.sync() }
         case "notify":
@@ -364,6 +450,10 @@ final class HannibalModel {
             lines.append(Line(kind: .notify, text: ev.text ?? "🚗 Route ready.", url: u))
             saveHistory()
             Nav.start(url: u, text: ev.text ?? "Tap to start the route in Google Maps.")
+        case "photo":
+            guard let id = ev.id else { return }
+            lines.append(Line(kind: .notify, text: ev.text ?? "📍", photoId: id))
+            saveHistory()
         case "ask":
             guard let id = ev.id else { return }
             var q: [String: Any] = ["id": id, "kind": ev.kind ?? ""]
@@ -372,6 +462,11 @@ final class HannibalModel {
         default:
             break
         }
+    }
+
+    func spotPhoto(_ id: String) async -> UIImage? {
+        guard let api, let d = await api.spotPhoto(id) else { return nil }
+        return UIImage(data: d)
     }
 
     func answer(_ line: Line, yes: Bool) {
@@ -428,7 +523,7 @@ final class HannibalModel {
     }
 
     func startRecording() {
-        guard api != nil, !live else { return }
+        guard api != nil, !live, meetingSince == nil else { return }
         wantRecording = true
         speaker.stop()                                  // talking over him stops him
         speaker.hold = true                             // and nothing new plays into the mic

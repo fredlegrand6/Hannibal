@@ -89,6 +89,8 @@ struct ChatView: View {
             Palette.bg.ignoresSafeArea()
             VStack(spacing: 0) {
                 header
+                if let since = model.meetingSince { meetingBar(since) }
+                if let p = model.interpreter { interpreterBar(p) }
                 orb
                 conversation
                 inputBar
@@ -119,6 +121,12 @@ struct ChatView: View {
             Circle().fill(model.online ? Color.green : Color.orange).frame(width: 8, height: 8)
             Text(model.online ? "Hannibal" : "Connecting…").font(.headline)
             Spacer()
+            Button { model.toggleMeeting() } label: {
+                Image(systemName: model.meetingSince != nil ? "record.circle.fill" : "record.circle")
+                    .font(.system(size: 20))
+                    .foregroundStyle(model.meetingSince != nil ? Color.red : Palette.cyan)
+            }
+            .accessibilityLabel(model.meetingSince != nil ? "Stop recording the meeting" : "Record a meeting")
             Button { model.toggleCamera() } label: {
                 Image(systemName: model.cameraOn ? "video.fill" : "video")
                     .font(.system(size: 19))
@@ -134,6 +142,11 @@ struct ChatView: View {
             }
             .accessibilityLabel(model.voiceAlways ? "Read every answer aloud" : "Only speak when I talk")
             Menu {
+                Menu {
+                    ForEach(HannibalModel.interpreterLanguages, id: \.code) { lang in
+                        Button(lang.code == "en" ? "English (I speak Dutch)" : lang.name) { model.startInterpreter(theirs: lang.code) }
+                    }
+                } label: { Label("Interpreter", systemImage: "character.bubble") }
                 Button("Clear conversation", role: .destructive) { model.clearChat() }
                 Button("Change server link") { model.forgetLink() }
             } label: { Image(systemName: "ellipsis.circle") }
@@ -141,6 +154,44 @@ struct ChatView: View {
         .foregroundStyle(Palette.cyan)
         .padding(.horizontal, 16)
         .padding(.top, 6)
+    }
+
+    /// While the interpreter runs: which languages; tap = stop.
+    private func interpreterBar(_ p: (mine: String, theirs: String)) -> some View {
+        Button { model.stopLive() } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "character.bubble.fill")
+                Text("Interpreter  \(HannibalModel.languageName(p.mine)) ⇄ \(HannibalModel.languageName(p.theirs))").font(.subheadline.weight(.semibold))
+                Spacer()
+                Text("Stop").font(.subheadline.bold())
+            }
+            .foregroundStyle(Palette.bg)
+            .padding(.horizontal, 14).padding(.vertical, 10)
+            .background(Palette.gold, in: RoundedRectangle(cornerRadius: 12))
+            .padding(.horizontal, 16).padding(.top, 8)
+        }
+        .accessibilityLabel("Stop the interpreter")
+    }
+
+    /// While a meeting is recorded: red bar with the time; tap = stop and send.
+    private func meetingBar(_ since: Date) -> some View {
+        Button { model.toggleMeeting() } label: {
+            HStack(spacing: 8) {
+                Circle().fill(Color.red).frame(width: 10, height: 10)
+                TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                    let s = Int(ctx.date.timeIntervalSince(since))
+                    Text("Recording meeting  \(s / 3600 > 0 ? "\(s / 3600):" : "")\(String(format: "%02d:%02d", (s / 60) % 60, s % 60))")
+                        .font(.subheadline.weight(.semibold).monospacedDigit())
+                }
+                Spacer()
+                Text("Stop").font(.subheadline.bold())
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 14).padding(.vertical, 10)
+            .background(Color.red.opacity(0.85), in: RoundedRectangle(cornerRadius: 12))
+            .padding(.horizontal, 16).padding(.top, 8)
+        }
+        .accessibilityLabel("Stop recording the meeting and send it")
     }
 
     private var orb: some View {
@@ -284,6 +335,7 @@ struct LineView: View {
         case .notify:
             VStack(alignment: .leading, spacing: 10) {
                 Text(line.text).textSelection(.enabled)
+                if let pid = line.photoId { SpotPhoto(id: pid) }
                 if let url = line.url {
                     Button { Nav.open(url) } label: { Label("Start route", systemImage: "car.fill").bold().frame(maxWidth: .infinity) }
                         .buttonStyle(.borderedProminent).tint(Palette.cyan).controlSize(.large)
@@ -319,6 +371,24 @@ struct LineView: View {
         Text(line.text).textSelection(.enabled)
             .padding(.horizontal, 12).padding(.vertical, 9)
             .background(color, in: RoundedRectangle(cornerRadius: 16))
+    }
+}
+
+/// A remembered photo, loaded from the server (with the app's key).
+struct SpotPhoto: View {
+    @Environment(HannibalModel.self) private var model
+    let id: String
+    @State private var image: UIImage?
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image).resizable().scaledToFit().clipShape(RoundedRectangle(cornerRadius: 10))
+            } else {
+                RoundedRectangle(cornerRadius: 10).fill(Palette.him).frame(height: 160).overlay(ProgressView())
+            }
+        }
+        .task(id: id) { image = await model.spotPhoto(id) }
     }
 }
 

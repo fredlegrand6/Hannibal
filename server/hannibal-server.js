@@ -115,6 +115,38 @@ const nav = createNav({
   statePath: path.join(CFG.dataDir, 'nav-warned.json'),
   tz: () => require(path.join(SERVICES, 'calendar-assist')).fredTz(),
 });
+// Meeting memory: recordings from the iPhone → transcript + write-up (server/meetings.js).
+const { createMeetings, makeMeetingTranscriber } = require('./meetings');
+const { createInterpreter } = require('./interpreter');
+const meetings = createMeetings({
+  dir: path.join(CFG.dataDir, 'meetings'),
+  transcribe: makeMeetingTranscriber({ apiKey: process.env.ELEVENLABS_API_KEY, model: process.env.ELEVENLABS_STT_MODEL || 'scribe_v1' }),
+  writeUp: (prompt) => claudeBrain.summarizeForJournal(prompt, 'You write clear, short meeting notes for Fred (Revalis Group). Plain text, no markdown tables.'),
+  followUp: (prompt) => (phoneApp ? phoneApp.think(prompt) : ''),
+  notify: (text) => tellFred(text),
+  remember: (text) => memory.store(text, { type: 'meeting', channel: 'phone-app' }),
+});
+ipc.handle('meetings:recent', (_e, limit) => meetings.recent(limit));
+ipc.handle('meetings:find', (_e, query) => meetings.find(query));
+ipc.handle('meetings:retry', (_e, query) => meetings.retry(query));
+// Photo memory: "remember where I parked / this wine" (server/spots.js).
+const { createSpots } = require('./spots');
+const spots = createSpots({
+  filePath: path.join(CFG.dataDir, 'spots.json'),
+  photoDir: path.join(CFG.dataDir, 'spots'),
+  here: () => (phoneApp ? phoneApp.ask('here', {}, 15000) : null),
+  lastPhoto: () => (phoneApp ? phoneApp.lastPhoto() : null),
+  remember: (text) => memory.store(text, { type: 'spot', channel: 'phone-app' }),
+});
+const findSpots = (query) => {
+  const r = spots.find(query);
+  const top = r.spots && r.spots[0];
+  if (top && top.photo && phoneApp) phoneApp.showPhoto(top.id, `📍 ${top.label} (${top.when})`);
+  return r;
+};
+ipc.handle('spots:save', (_e, label, note, withPhoto) => spots.add(label, note, withPhoto));
+ipc.handle('spots:find', (_e, query) => findSpots(query));
+ipc.handle('spots:forget', (_e, query) => spots.forget(query));
 ipc.handle('nav:go', (_e, destination) => nav.go(destination));
 ipc.handle('nav:eta', (_e, destination) => nav.eta(destination));
 ipc.handle('reminders:add', (_e, message, at) => reminders.add(message, at));
@@ -298,6 +330,14 @@ if (process.env.PHONE_APP_TOKEN) {
       },
       onReset: () => claudeBrain.resetHistory(),
       places,
+      meetings,
+      spots,
+      interpreter: createInterpreter({
+        transcribe: makeMeetingTranscriber({ apiKey: process.env.ELEVENLABS_API_KEY, model: process.env.ELEVENLABS_STT_MODEL || 'scribe_v1', diarize: false, timeoutMs: 60000 }),
+        // One plain Claude call (not the conversation: nothing is kept).
+        translate: (system, user) => claudeBrain.summarizeForJournal(user, system),
+        speak: voiceMp3,
+      }),
       // A place reminder fired on the phone (it showed it already), or the place wasn't found.
       onPlace: (what, r, err) => {
         if (what === 'failed') tellFred(`📍 I couldn't find "${r.place}" on the map, so I can't remind you there: ${r.message}. Tell me the address and I'll set it again.`).catch(() => {});
@@ -396,6 +436,12 @@ if (process.env.BODY_LINK_TOKEN) {
         'reminders.cancelPlace': ({ query } = {}) => places.cancel(query),
         // Navigation runs through the iPhone (the desk asks here).
         'nav.go': ({ destination } = {}) => nav.go(destination),
+        'meetings.recent': ({ limit } = {}) => meetings.recent(limit),
+        'spots.save': ({ label, note, with_photo } = {}) => spots.add(label, note, with_photo),
+        'spots.find': ({ query } = {}) => findSpots(query),
+        'spots.forget': ({ query } = {}) => spots.forget(query),
+        'meetings.find': ({ query } = {}) => meetings.find(query),
+        'meetings.retry': ({ query } = {}) => meetings.retry(query),
         'nav.eta': ({ destination } = {}) => nav.eta(destination),
         'reminders.cancelId': ({ id } = {}) => reminders.cancel(String(id || '')),
         'reminders.retime': ({ id, ts } = {}) => reminders.retime(String(id || ''), Number(ts)),

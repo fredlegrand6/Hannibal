@@ -26,7 +26,8 @@ const STATIC = path.join(__dirname, 'phone');
 const COOKIE = 'hannibal_k';
 const CONFIRM_TIMEOUT_MS = 120000;
 const MAX_BODY = 15 * 1024 * 1024;
-const MAX_IMAGE_BODY = 8 * 1024 * 1024;     // a phone photo after shrinking is ~0.3-1 MB
+const MAX_IMAGE_BODY = 8 * 1024 * 1024;
+const MAX_MEETING_BODY = 200 * 1024 * 1024;  // ~3 h of meeting at 32 kbps AAC is ~45 MB     // a phone photo after shrinking is ~0.3-1 MB
 
 const PHONE_APP_CONTEXT =
   'Fred is using the Hannibal app on his phone, not speaking at the desk. Your reply is shown as text '
@@ -93,8 +94,10 @@ function createPhoneApp(opts = {}) {
   }
 
   let glanceCache = null;
+  let lastImage = null;                      // { b64, at }: the latest photo Fred sent (photo memory)
 
   async function turn(text, { spoken = false, images } = {}) {
+    if (images && images[0]) lastImage = { b64: String(images[0]), at: Date.now() };
     let memories = '';
     if (opts.memory) { try { memories = await opts.memory.recall(text); } catch (_) {} }
     const r = await opts.chat(
@@ -108,6 +111,18 @@ function createPhoneApp(opts = {}) {
     }
     if (r && r.toolsUsed && r.toolsUsed.length) return { ok: false, reply: `I ran ${r.toolsUsed.map((t) => t.tool).join(', ')} but then lost the connection to my brain. Check before asking again.` };
     return { ok: false, reply: `I can't think right now: ${(r && r.error) || 'no answer'}.` };
+  }
+
+  /** Hannibal thinks about something Fred didn't type (a meeting write-up):
+   *  same brain and tools, writes still go through Fred's Yes/No. */
+  async function think(prompt) {
+    const r = await opts.chat(
+      { system: opts.persona, context: PHONE_APP_CONTEXT, user: prompt },
+      null,
+      { runTool: opts.runTool ? (name, input) => opts.runTool(name, input, { confirmer }) : undefined },
+    );
+    if (r && r.ok && r.text) return r.text;
+    throw new Error((r && r.error) || 'my brain gave no answer');
   }
 
   const json = (res, code, body, extra = {}) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...extra }); res.end(JSON.stringify(body)); };
@@ -288,6 +303,39 @@ function createPhoneApp(opts = {}) {
       return;
     }
 
+    // Interpreter: one sentence of audio → translated text + his voice (nothing stored).
+    if (req.method === 'POST' && url.pathname === '/api/interpret') {
+      if (!opts.interpreter) { json(res, 501, { ok: false, error: 'The interpreter is not set up on the server.' }); return; }
+      let body = {};
+      try { body = JSON.parse((await readBody(req)).toString('utf8')); } catch (_) {}
+      const audio = Buffer.from(String(body.audio || ''), 'base64');
+      if (!audio.length) { json(res, 400, { ok: false, error: 'No audio.' }); return; }
+      try { json(res, 200, await opts.interpreter.interpret(audio, String(body.mime || 'audio/wav'), { mine: body.mine, theirs: body.theirs })); }
+      catch (e) { log('interpret failed:', e.message); json(res, 500, { ok: false, error: e.message }); }
+      return;
+    }
+
+    // A remembered photo (photo memory), for the chat in the app.
+    if (req.method === 'GET' && url.pathname === '/api/spot-photo') {
+      const jpg = opts.spots ? opts.spots.photo(String(url.searchParams.get('id') || '')) : null;
+      if (!jpg) { res.writeHead(404); res.end(); return; }
+      res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Content-Length': jpg.length, 'Cache-Control': 'private, max-age=86400' });
+      res.end(jpg);
+      return;
+    }
+
+    // A recorded meeting (raw audio). Answered at once; the write-up comes as a message.
+    if (req.method === 'POST' && url.pathname === '/api/meeting') {
+      if (!opts.meetings) { json(res, 501, { ok: false, note: 'Meeting memory is not set up on the server.' }); return; }
+      let audio;
+      try { audio = await readBody(req, MAX_MEETING_BODY); } catch (e) { json(res, 413, { ok: false, note: 'That recording is too long (over about 3 hours).' }); return; }
+      if (!audio.length) { json(res, 400, { ok: false, note: 'The recording was empty.' }); return; }
+      const h = (k) => { try { return decodeURIComponent(String(req.headers[k] || '')); } catch (_) { return ''; } };
+      const { id } = opts.meetings.accept(audio, { mime: req.headers['content-type'] || 'audio/mp4', title: h('x-meeting-title'), startedAt: Number(h('x-meeting-started')) || undefined, seconds: Number(h('x-meeting-seconds')) || 0 });
+      json(res, 202, { ok: true, id, note: 'Got it. I\'m writing it up and will send it in a few minutes.' });
+      return;
+    }
+
     // The phone's answer to ask() (e.g. { id, ok, minutes, km, place }).
     if (req.method === 'POST' && url.pathname === '/api/answer') {
       let body = {};
@@ -362,7 +410,10 @@ function createPhoneApp(opts = {}) {
     if (!clients.size && canPush() && opts.push.wake) opts.push.wake({ sync: 'places' }).catch((e) => log('silent push failed:', e.message));
   }
 
-  return { start, stop, notify, navigate, ask, placesChanged, handle, _confirmer: confirmer, _pending: pending, _places: opts.places };
+  /** Show a remembered photo in the open app. */
+  function showPhoto(id, caption) { push({ type: 'photo', id: String(id), text: String(caption || '') }, nativeClients); }
+
+  return { start, stop, notify, navigate, ask, think, showPhoto, lastPhoto: () => lastImage, placesChanged, handle, _confirmer: confirmer, _pending: pending, _places: opts.places };
 }
 
 module.exports = { createPhoneApp, PHONE_APP_CONTEXT };

@@ -13,6 +13,17 @@ struct Reply: Decodable {
     var spoken: Bool?
 }
 
+/// The interpreter's answer to one sentence (/api/interpret).
+struct Interpretation: Decodable {
+    var ok: Bool?
+    var heard: String?
+    var from: String?
+    var to: String?
+    var text: String?
+    var audio: String?      // mp3, base64: his voice saying the translation
+    var error: String?
+}
+
 /// What the home / lock screen widget shows (/api/glance).
 struct Glance: Codable {
     struct Event: Codable, Hashable { var title: String; var ts: Double; var endTs: Double?; var allDay: Bool? }
@@ -119,6 +130,15 @@ final class HannibalAPI {
         try await reply(request("api/voice-look", body: jsonBody(["audio": audio.base64EncodedString(), "mime": mime, "image": jpeg.base64EncodedString()])))
     }
 
+    /// One sentence for the interpreter: translated into the other side's language.
+    func interpret(_ audio: Data, mime: String, mine: String, theirs: String) async throws -> Interpretation {
+        let (data, resp) = try await session.data(for: request("api/interpret", body: jsonBody(["audio": audio.base64EncodedString(), "mime": mime, "mine": mine, "theirs": theirs]), timeout: 60))
+        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        if code == 401 || code == 403 { throw APIError.unauthorized }
+        if let r = try? JSONDecoder().decode(Interpretation.self, from: data) { return r }
+        throw APIError.status(code)
+    }
+
     func look(jpegBase64: String, text: String) async throws -> Reply {
         try await reply(request("api/look", body: jsonBody(["image": jpegBase64, "text": text])))
     }
@@ -162,6 +182,26 @@ final class HannibalAPI {
     func placeFired(_ id: String) async -> Bool {
         guard let r = try? await session.data(for: request("api/places/fired", body: jsonBody(["id": id]), timeout: 20)) else { return false }
         return (r.1 as? HTTPURLResponse)?.statusCode == 200
+    }
+
+    /// A recorded meeting (m4a file). The server answers at once; the write-up comes later as a message.
+    func meeting(file: URL, seconds: TimeInterval, started: Date) async throws -> String {
+        var r = request("api/meeting", contentType: "audio/mp4", timeout: 600)
+        r.setValue(String(Int(seconds)), forHTTPHeaderField: "X-Meeting-Seconds")
+        r.setValue(String(Int(started.timeIntervalSince1970 * 1000)), forHTTPHeaderField: "X-Meeting-Started")
+        let (data, resp) = try await session.upload(for: r, fromFile: file)
+        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        if code == 401 || code == 403 { throw APIError.unauthorized }
+        guard code == 202 || code == 200 else { throw APIError.status(code) }
+        return ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any])?["note"] as? String ?? "Got it."
+    }
+
+    /// A remembered photo (photo memory).
+    func spotPhoto(_ id: String) async -> Data? {
+        var r = request("api/spot-photo", method: "GET", contentType: nil)
+        r.url = r.url.flatMap { URL(string: $0.absoluteString + "?id=" + (id.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? id)) }
+        guard let (data, resp) = try? await session.data(for: r), (resp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+        return data
     }
 
     /// The phone's answer to a server question (drive time…).

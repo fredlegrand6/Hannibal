@@ -18,6 +18,7 @@ let toolCalls = [];
 let lastPayload = null;
 const voiceDrops = [];
 const placeEvents = [];
+const meetingsIn = [];
 const app = createPhoneApp({
   token: TOKEN, hosts: ['127.0.0.1'], port: PORT, persona: 'P', log: () => {},
   chat: async (payload, _on, { runTool }) => {
@@ -32,6 +33,7 @@ const app = createPhoneApp({
   onVoiceDrop: (d) => voiceDrops.push(d),
   places: (() => { const { createPlaceReminders } = require('./place-reminders'); return createPlaceReminders({}); })(),
   onPlace: (what, r) => placeEvents.push([what, r.message]),
+  meetings: { accept: (audio, meta) => { meetingsIn.push([audio.length, meta]); return { id: 'm1' }; } },
   glance: async () => ({
     events: [{ title: 'Past', ts: Date.now() - 7200000, endTs: Date.now() - 3600000 },
       { title: 'Lunch with Jay', ts: Date.now() + 3600000, endTs: Date.now() + 7200000 },
@@ -118,6 +120,15 @@ const app = createPhoneApp({
     await fetch(`${base}/api/places/failed`, { method: 'POST', headers: C, body: JSON.stringify({ id: b.id, error: 'not found' }) });
     assert.deepStrictEqual(placeEvents, [['fired', 'Buy milk'], ['failed', 'Call Jay']]);
     assert.deepStrictEqual((await (await fetch(`${base}/api/places`, { headers: C })).json()).reminders, []);
+  });
+
+  await test('a meeting recording is taken in at once, with its details', async () => {
+    assert.strictEqual((await fetch(`${base}/api/meeting`, { method: 'POST', body: 'x' })).status, 401);
+    const r = await fetch(`${base}/api/meeting`, { method: 'POST', headers: { ...C, 'Content-Type': 'audio/mp4', 'X-Meeting-Seconds': '1800', 'X-Meeting-Started': '1764000000000', 'X-Meeting-Title': encodeURIComponent('HTS — prijzen') }, body: Buffer.alloc(5000) });
+    assert.strictEqual(r.status, 202);
+    assert.strictEqual((await r.json()).id, 'm1');
+    assert.deepStrictEqual(meetingsIn[0], [5000, { mime: 'audio/mp4', title: 'HTS — prijzen', startedAt: 1764000000000, seconds: 1800 }]);
+    assert.strictEqual((await fetch(`${base}/api/meeting`, { method: 'POST', headers: C, body: '' })).status, 400);
   });
 
   await test('a photo needs the key', async () => {
