@@ -335,6 +335,30 @@ async function withFetch(w, fn) {
       assert.strictEqual(up.length, 1); assert.strictEqual(A.isoLocal(up[0].triggerTs, TZ), '2026-11-24T15:45');
     });
   });
+  await t('the booked event carries its own alarms, so the phone and Mac calendar ring too (at the start and at the reminder)', async () => {
+    const w = world();
+    await withFetch(w, async () => {
+      const d = desk(w);
+      const b = await d.run('add', { title: 'Appointment with Robert', start: '2026-11-23T15:00', minutes: 60, remind_minutes: 15 });
+      assert.strictEqual(b.status, 'ok', JSON.stringify(b));
+      const ics = w.store[Object.keys(w.store).find((k) => /Robert/.test(w.store[k]))];
+      assert.strictEqual((ics.match(/BEGIN:VALARM/g) || []).length, 2, ics);
+      assert.match(ics, /TRIGGER;RELATED=START:PT0M/);
+      assert.match(ics, /TRIGGER;RELATED=START:-PT15M/);
+      assert.match(ics, /BEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:Appointment with Robert/);
+      const ev = await d.handlers['calendar:events']({}, 3);
+      assert.strictEqual(ev.events.find((e) => e.title === 'Appointment with Robert').time, '15:00', 'alarms do not confuse reading it back');
+      // moving keeps the alarms (they are relative to the start)
+      await d.run('move', { id: b.out.id, title: 'Appointment with Robert', start: '2026-11-24T16:00' });
+      const moved = w.store[Object.keys(w.store).find((k) => /Robert/.test(w.store[k]))];
+      assert.strictEqual((moved.match(/BEGIN:VALARM/g) || []).length, 2, moved);
+      assert.match(moved, /DTSTART:20261124T150000Z/);
+    });
+    const { buildEvent } = require('./info-handlers');
+    const noRem = buildEvent({ title: 'x', start: '2026-11-23T11:00', now: NOW, tz: TZ, alarms: [0] }).ics;
+    assert.strictEqual((noRem.match(/BEGIN:VALARM/g) || []).length, 1, 'no reminder chosen: still rings at the start');
+    assert.ok(!/VALARM/.test(buildEvent({ title: 'Ibiza', start: '2026-11-28', now: NOW, tz: TZ, alarms: [0, 15] }).ics), 'all-day: no midnight alarm');
+  });
   await t('the reverse: cancelling only the reminder says the event is still in the calendar', async () => {
     const w = world();
     await withFetch(w, async () => {
