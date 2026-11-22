@@ -82,6 +82,7 @@ contextBridge.exposeInMainWorld('hannibal', {
   onProactiveRun: (cb) => ipcRenderer.on('proactive:run', (_e, job) => cb(job)),  // { kind:'morning-brief', day, prompt }
   proactiveDone: (r) => ipcRenderer.invoke('proactive:done', r),                 // { kind, day, ok, text }
   reminderFired: (message) => ipcRenderer.invoke('reminders:fired', message),
+  onRemindersDue: (cb) => ipcRenderer.on('reminders:due', (_e, r) => cb(r)),     // main fired one: say it
   // long-term memory (Qdrant, in main): keep-or-skip + dedupe on store, picky recall
   memoryStore: (text, metadata) => ipcRenderer.invoke('memory:store', { text, metadata }), // -> { ok }
   memorySearch: (text, limit) => ipcRenderer.invoke('memory:search', { text, limit }),    // -> [{ text, score, ts, type }]   // → also sent to Fred's phone
