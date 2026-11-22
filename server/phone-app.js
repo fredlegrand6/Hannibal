@@ -8,7 +8,8 @@
 //   • Hannibal answers in text and, for spoken questions, in his own voice;
 //   • anything that changes something shows Yes / No buttons first (same gate
 //     as Telegram; no answer in 2 minutes = no);
-//   • reminders and the morning brief also appear here while it is open.
+//   • reminders and the morning brief also appear here while it is open;
+//   • the camera button sends a photo and he looks at it (same vision as the desk).
 //
 // Access: the first visit uses the link with ?k=<PHONE_APP_TOKEN> (deploy.sh
 // prints it); that sets a cookie, after which the plain address works.
@@ -25,6 +26,7 @@ const STATIC = path.join(__dirname, 'phone');
 const COOKIE = 'hannibal_k';
 const CONFIRM_TIMEOUT_MS = 120000;
 const MAX_BODY = 15 * 1024 * 1024;
+const MAX_IMAGE_BODY = 8 * 1024 * 1024;     // a phone photo after shrinking is ~0.3-1 MB
 
 const PHONE_APP_CONTEXT =
   'Fred is using the Hannibal app on his phone, not speaking at the desk. Your reply is shown as text '
@@ -78,16 +80,16 @@ function createPhoneApp(opts = {}) {
     });
   }
 
-  async function turn(text, { spoken = false } = {}) {
+  async function turn(text, { spoken = false, images } = {}) {
     let memories = '';
     if (opts.memory) { try { memories = await opts.memory.recall(text); } catch (_) {} }
     const r = await opts.chat(
-      { system: opts.persona, context: [PHONE_APP_CONTEXT, memories].filter(Boolean).join('\n\n'), user: text },
+      { system: opts.persona, context: [PHONE_APP_CONTEXT, memories].filter(Boolean).join('\n\n'), user: text, ...(images ? { images } : {}) },
       null,
       { runTool: opts.runTool ? (name, input) => opts.runTool(name, input, { confirmer }) : undefined },
     );
     if (r && r.ok && r.text) {
-      if (opts.memory) opts.memory.store(`Fred said (phone app): ${text}\nHannibal replied: ${r.text}`, { type: 'conversation', channel: 'phone-app' }).catch(() => {});
+      if (opts.memory) opts.memory.store(`Fred said (phone app${images ? ', with a photo' : ''}): ${text}\nHannibal replied: ${r.text}`, { type: 'conversation', channel: 'phone-app' }).catch(() => {});
       return { ok: true, reply: r.text, spoken };
     }
     if (r && r.toolsUsed && r.toolsUsed.length) return { ok: false, reply: `I ran ${r.toolsUsed.map((t) => t.tool).join(', ')} but then lost the connection to my brain. Check before asking again.` };
@@ -147,6 +149,22 @@ function createPhoneApp(opts = {}) {
         if (!heard) { json(res, 200, { ok: false, heard: '', reply: "I couldn't make that out. Try again?" }); return; }
         json(res, 200, { heard, ...(await turn(heard, { spoken: true })) });
       } catch (e) { log('voice failed:', e.message); json(res, 500, { ok: false, reply: "Something went wrong with that recording. Type it instead?" }); }
+      finally { busy = false; }
+      return;
+    }
+
+    // A photo from the phone's camera or library (the phone shrinks it to a JPEG
+    // first). He looks at it with the same vision as the desk.
+    if (req.method === 'POST' && url.pathname === '/api/look') {
+      let body = {};
+      try { body = JSON.parse((await readBody(req, MAX_IMAGE_BODY)).toString('utf8')); } catch (_) {}
+      const image = String(body.image || '').replace(/^data:[^,]*,/, '');
+      if (!image || !/^[A-Za-z0-9+/=]+$/.test(image.slice(0, 4096))) { json(res, 400, { ok: false, reply: "That photo didn't come through. Try again?" }); return; }
+      if (busy) { json(res, 429, { ok: false, reply: 'One moment, still on the last one.' }); return; }
+      const text = String(body.text || '').trim().slice(0, 4000) || 'What do you see in this photo?';
+      busy = true;
+      try { json(res, 200, await turn(text, { images: [image] })); }
+      catch (e) { log('look failed:', e.message); json(res, 500, { ok: false, reply: `Something broke: ${e.message}` }); }
       finally { busy = false; }
       return;
     }
