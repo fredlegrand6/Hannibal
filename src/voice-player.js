@@ -152,14 +152,20 @@
   // ── one sentence, stage by stage ──────────────────────────────────────────
   // tts(text) → bytes · decode(bytes) → AudioBuffer · playVio(bytes, ms) → {ok|stopped|error,retryable}
   // (used while useVio() says the helper is on)
-  // playPage(audioBuf) → playBuffer handle · recover(why) → rebuilds the output
+  // prepare() → a running output (may take a while: resume / rebuild)
+  // playPage(audioBuf, ctx) → playBuffer handle · recover(why) → rebuilds the output
   // onDrop({ stage, error, recovered, path, text }) — one entry per failure
-  function createSpeaker({ tts, decode, playVio = null, useVio = () => !!playVio, playPage, recover = async () => {}, onDrop = () => {}, ttsMs = 45000, decodeMs = 8000, timers = realTimers } = {}) {
-    let current = null, stopped = 0;
+  //
+  // Cancellation: every speak() takes the speaker's generation when it starts;
+  // stop() bumps it. After EVERY wait (voice request, decode, recovery,
+  // preparing the output, the helper) the sentence checks it and gives up
+  // without playing anything, so a "Hannibal stop" during any of them is honoured.
+  function createSpeaker({ tts, decode, playVio = null, useVio = () => !!playVio, prepare = null, playPage, recover = async () => {}, onDrop = () => {}, ttsMs = 45000, decodeMs = 8000, timers = realTimers } = {}) {
+    let current = null, generation = 0;
 
     async function speak(text, { prefetched = null, isCurrent = () => true } = {}) {
-      const myStop = stopped;
-      const cut = () => myStop !== stopped || !isCurrent();
+      const myGen = generation;
+      const cut = () => myGen !== generation || !isCurrent();
       const said = String(text || '').slice(0, 80);
       const drop = (stage, e, recovered, path = 'page') => { try { onDrop({ stage, error: (e && e.message) || String(e), recovered, path, text: said }); } catch (_) {} };
 
@@ -187,7 +193,8 @@
           const ab = bytes.buffer ? bytes.buffer.slice(bytes.byteOffset || 0, (bytes.byteOffset || 0) + bytes.byteLength) : bytes;
           audioBuf = await withTimeout(decode(ab), decodeMs, 'decode', 'decoding the voice', timers);
         } catch (e) {
-          if (attempt === 0) { await recover('decode failed'); continue; }
+          if (cut()) return { stopped: true };
+          if (attempt === 0) { await recover('decode failed'); if (cut()) return { stopped: true }; continue; }
           drop('decode', e, false); return { dropped: 'decode' };
         }
       }
@@ -209,7 +216,13 @@
         if (cut()) return { stopped: true };
         let h;
         try {
-          h = await playPage(audioBuf);
+          let ctx = null;
+          if (prepare) {
+            ctx = await prepare();               // resume / rebuild the output: can take a moment
+            if (cut()) return { stopped: true }; // stopped meanwhile: play nothing
+          }
+          h = await playPage(audioBuf, ctx);
+          if (cut()) { try { h.stop(); } catch (_) {} return { stopped: true }; }
           current = h;
           const r = await h.promise;
           if (r && r.stopped) return { stopped: true };
@@ -218,7 +231,7 @@
         } catch (e) {
           if (cut()) return { stopped: true };
           lastErr = e;
-          if (attempt === 0) await recover(e.message);
+          if (attempt === 0) { await recover(e.message); if (cut()) return { stopped: true }; }
         } finally { if (current === h) current = null; }
       }
       drop(lastErr.stage || 'play', lastErr, false);
@@ -227,19 +240,22 @@
     }
 
     // "Hannibal stop": cut the sound now, and the sentence in flight gives up.
-    function stop() { stopped++; if (current) { try { current.stop(); } catch (_) {} current = null; } }
+    function stop() { generation++; if (current) { try { current.stop(); } catch (_) {} current = null; } }
 
-    return { speak, stop, get playing() { return !!current; } };
+    return { speak, stop, get playing() { return !!current; }, get generation() { return generation; } };
   }
 
   // ── the sentence queue ────────────────────────────────────────────────────
   // next() → item | undefined · more() → may more items still come
   // A sentence that somehow exceeds itemCapMs is abandoned (stage "queue") so
   // the queue never stays locked; waiting for more text is capped by idleCapMs.
-  async function runQueue({ next, more, speak, isCurrent = () => true, onDrop = () => {}, onAbandon = () => {}, itemCapMs = 150000, idleCapMs = 120000, pollMs = 40, timers = realTimers }) {
-    let idleSince = timers.now(), played = 0, dropped = 0;
+  // generation() (the speaker's): a stop bumps it, and the queue then ends and
+  // calls clear() so nothing queued behind the stopped sentence plays.
+  async function runQueue({ next, more, speak, isCurrent = () => true, generation = () => 0, clear = () => {}, onDrop = () => {}, onAbandon = () => {}, itemCapMs = 150000, idleCapMs = 120000, pollMs = 40, timers = realTimers }) {
+    let idleSince = timers.now(), played = 0, dropped = 0, gen = generation();
     const sleep = (ms) => new Promise((r) => timers.setTimeout(r, ms));
-    while (isCurrent()) {
+    const live = () => isCurrent() && generation() === gen;
+    while (live()) {
       const item = next();
       if (!item) {
         if (!more()) break;
@@ -252,11 +268,15 @@
       } catch (e) {
         dropped++;
         try { onAbandon(); } catch (_) {}
+        gen = generation();                     // our own cut-off, not Fred's stop: carry on
         try { onDrop({ stage: 'queue', error: e.message, recovered: false, text: String((item && item.text) || '').slice(0, 80) }); } catch (_) {}
       }
       idleSince = timers.now();
     }
-    return { played, dropped };
+    const cancelled = !live();
+    // Stopped (not just a newer reply taking over, which owns the queue now): drop what was waiting.
+    if (generation() !== gen) { try { clear(); } catch (_) {} }
+    return { played, dropped, ...(cancelled ? { cancelled: true } : {}) };
   }
 
   const api = { VoiceDrop, clipLimitMs, withTimeout, createAudioOut, playBuffer, createSpeaker, runQueue, HARD_CAP_MS };

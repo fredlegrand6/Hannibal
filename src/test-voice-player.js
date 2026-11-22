@@ -44,15 +44,16 @@ function fakeDevices(label = 'MacBook Pro Speakers') {
 }
 
 // The renderer's wiring, with fakes: same calls voice-controller.js makes.
-function rig({ contexts, tts, mediaDevices = fakeDevices(), playVio = null, useVio } = {}) {
+function rig({ contexts, tts, decode, prepare, mediaDevices = fakeDevices(), playVio = null, useVio } = {}) {
   const drops = [];
   const queue = contexts.slice();
   const out = VP.createAudioOut({ makeContext: () => queue.shift() || fakeCtx(), mediaDevices, resumeMs: 60 });
   const speaker = VP.createSpeaker({
     tts: tts || (async (text) => new Uint8Array([1, 2, 3, text.length])),
-    decode: (ab) => out.current().decodeAudioData(ab),
+    decode: decode || ((ab) => out.current().decodeAudioData(ab)),
     playVio, useVio,
-    playPage: async (buf) => VP.playBuffer(await out.ensure(), buf, { startMs: 80, tickMs: 10, limitMs: 200 }),
+    prepare: prepare ? () => prepare(out) : () => out.ensure(),
+    playPage: (buf, ctx) => VP.playBuffer(ctx, buf, { startMs: 80, tickMs: 10, limitMs: 200 }),
     recover: async (why) => { out.rebuild(why); await out.ensure(); },
     onDrop: (d) => drops.push({ ...d, device: out.device() }),
     ttsMs: 150, decodeMs: 100,
@@ -183,6 +184,77 @@ function rig({ contexts, tts, mediaDevices = fakeDevices(), playVio = null, useV
     assert.deepStrictEqual(spoken, ['a long answer']);
     assert.strictEqual(r.drops.length, 0, 'a stop is not a dropout');
     assert.strictEqual(r.speaker.playing, false);
+  });
+
+  // ── stop while his voice is still getting ready (Codex review on #52) ──
+  // The reply he is about to say, the sentences queued behind it, and a stop.
+  async function stopDuring({ hold, contexts }) {
+    let release; const gate = new Promise((r) => { release = r; });
+    let started = 0;
+    const ctxs = contexts || [fakeCtx()];
+    const r = rig({
+      contexts: ctxs,
+      tts: hold === 'tts' ? async (text) => { if (text === 'first') await gate; return new Uint8Array([1, 2]); } : undefined,
+      decode: hold === 'decode' ? async (ab) => { await gate; return { duration: 0.03 }; } : undefined,
+      prepare: hold === 'prepare' ? async (out) => { await gate; return out.ensure(); } : undefined,
+    });
+    const items = [{ text: 'first' }, { text: 'second' }, { text: 'third' }];
+    const q = VP.runQueue({ next: () => items.shift(), more: () => false, generation: () => r.speaker.generation,
+      clear: () => { items.length = 0; }, speak: (it) => r.speaker.speak(it.text) });
+    await sleep(20);
+    r.speaker.stop();            // "Hannibal stop" while the first sentence is still waiting
+    release();                   // … and only now does the wait finish
+    const res = await q;
+    for (const c of ctxs) started += c.started;
+    return { r, res, items, started };
+  }
+
+  await t('stop while the audio output is still being prepared: nothing plays, queue emptied, next reply plays', async () => {
+    const { r, res, items, started } = await stopDuring({ hold: 'prepare' });
+    assert.strictEqual(started, 0, 'no audio started after the stop');
+    assert.strictEqual(items.length, 0, 'the queued sentences behind it are gone');
+    assert.strictEqual(res.cancelled, true);
+    assert.strictEqual(r.drops.length, 0);
+    const next = await r.speaker.speak('the next reply');
+    assert.deepStrictEqual(next, { ok: true, path: 'page' });
+  });
+
+  await t('stop while the output is being rebuilt from a stuck resume(): nothing plays', async () => {
+    const asleep = fakeCtx({ state: 'suspended', resumeHangs: true }), fresh = fakeCtx();
+    const r = rig({ contexts: [asleep, fresh] });
+    const p = r.speaker.speak('wake up');
+    await sleep(20);             // ensure() is waiting on the hung resume
+    r.speaker.stop();
+    assert.deepStrictEqual(await p, { stopped: true });
+    assert.strictEqual(asleep.started + fresh.started, 0);
+    assert.deepStrictEqual(await r.speaker.speak('after'), { ok: true, path: 'page' });
+  });
+
+  await t('stop during the voice request: nothing plays, queue emptied, next reply plays', async () => {
+    const { r, res, items, started } = await stopDuring({ hold: 'tts' });
+    assert.strictEqual(started, 0);
+    assert.strictEqual(items.length, 0);
+    assert.strictEqual(res.cancelled, true);
+    assert.deepStrictEqual(await r.speaker.speak('next'), { ok: true, path: 'page' });
+  });
+
+  await t('stop during decode: nothing plays, queue emptied, next reply plays', async () => {
+    const { r, res, items, started } = await stopDuring({ hold: 'decode' });
+    assert.strictEqual(started, 0);
+    assert.strictEqual(items.length, 0);
+    assert.strictEqual(res.cancelled, true);
+    assert.deepStrictEqual(await r.speaker.speak('next'), { ok: true, path: 'page' });
+  });
+
+  await t('a newer reply taking over does not wipe its own sentences', async () => {
+    let seq = 1;
+    const r = rig({ contexts: [fakeCtx()] });
+    const items = [{ text: 'old' }]; let cleared = 0;
+    const q = VP.runQueue({ next: () => items.shift(), more: () => false, isCurrent: () => seq === 1,
+      generation: () => r.speaker.generation, clear: () => cleared++, speak: (it) => r.speaker.speak(it.text, { isCurrent: () => seq === 1 }) });
+    seq = 2;                     // new turn, no stop
+    await q;
+    assert.strictEqual(cleared, 0);
   });
 
   await t('voice helper: a device change gets one more go there, a hang falls back to the page', async () => {
