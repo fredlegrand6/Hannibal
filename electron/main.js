@@ -188,8 +188,10 @@ claudeTools.setPreflight((name, params) => computer.preflight(String(name).repla
 const { createCodeJobs } = require('./services/code-jobs');
 const phoneBacklog = [];   // job news that couldn't reach the phone yet (link down)
 function jobNewsToPhone(text) {
-  if (telegram) return telegram.notify(text).then(() => true);
-  if (linked()) return bodyLink.request('phone.notify', { text, voice: false }).then(() => true);
+  // notify() can resolve { ok:false } (offline, bridge not started): that is a failure too.
+  const check = (r) => { if (r && r.ok === false) throw new Error(r.error || 'not delivered'); return true; };
+  if (telegram) return telegram.notify(text).then(check);
+  if (linked()) return bodyLink.request('phone.notify', { text, voice: false }).then(check);
   return Promise.reject(new Error('no phone link'));
 }
 const codeJobs = createCodeJobs({
@@ -200,13 +202,17 @@ const codeJobs = createCodeJobs({
   },
 });
 codeJobs.register(ipcMain);   // 'codejob' (projects / start / status / stop / followUp)
-function flushJobNews() {
-  while (phoneBacklog.length) {
-    const t = phoneBacklog.shift();
-    jobNewsToPhone(t).catch(() => { phoneBacklog.unshift(t); });
-    if (!linked() && !telegram) break;
-  }
+let flushing = false;
+async function flushJobNews() {
+  if (flushing) return;
+  flushing = true;
+  try {
+    while (phoneBacklog.length) {
+      try { await jobNewsToPhone(phoneBacklog[0]); phoneBacklog.shift(); } catch (_) { break; }   // retried on the next link / minute
+    }
+  } finally { flushing = false; }
 }
+setInterval(() => { if (phoneBacklog.length) flushJobNews(); }, 60 * 1000).unref();
 // Calendar: past times, clashes, which calendar/event, reminders, repeats are
 // sorted out before Fred is asked (services/calendar-assist.js). Set below,
 // once the calendar handlers are registered.

@@ -205,6 +205,7 @@ function createCodeJobs({
   const claude = () => claudeBin || findBin('claude', 'HANNIBAL_CLAUDE_BIN', [path.join(HOME, '.claude', 'local'), path.join(HOME, '.npm-global', 'bin')]);
   const gh = () => (ghBin !== undefined ? ghBin : findBin('gh', 'HANNIBAL_GH_BIN'));
   const finishing = new Set();
+  let reserved = 0;   // starts still setting up (fetch, worktree): they count against the limit
 
   // Git projects under the roots (the root itself, and two levels down).
   function projects() {
@@ -229,6 +230,7 @@ function createCodeJobs({
   }
 
   const running = () => jobs.filter((j) => j.state === 'running' || j.state === 'starting');
+  const busy = () => running().length + reserved;
   const pidAlive = (pid) => { if (!pid) return false; try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
   const logPath = (job) => path.join(jobsDir, job.id, `log-${job.round || 1}.jsonl`);
   const readLog = (job) => { try { return fs.readFileSync(logPath(job), 'utf8'); } catch (_) { return ''; } };
@@ -266,8 +268,13 @@ function createCodeJobs({
     const p = pickProject(list, project);
     if (p.choose) return { ok: false, ambiguous: true, options: p.choose, error: `Which project? ${p.choose.join(', ')}` };
     if (!p.pick) return { ok: false, error: `I can't find a project called "${project}".`, projects: list.map((x) => x.name) };
-    if (running().length >= maxRunning) return { ok: false, error: `${running().length} jobs are already running (max ${maxRunning}). Stop one or wait.`, running: running().map(view) };
+    if (busy() >= maxRunning) return { ok: false, error: `${busy()} jobs are already running (max ${maxRunning}). Stop one or wait.`, running: running().map(view) };
     if (!claude()) return { ok: false, error: 'Claude Code (the `claude` command) is not installed on this Mac. Install it, or set HANNIBAL_CLAUDE_BIN in .env.' };
+    reserved += 1;   // held until the job is in the list (or setup failed)
+    try { return await startReserved(p, task, title); } finally { reserved -= 1; }
+  }
+
+  async function startReserved(p, task, title) {
 
     const repo = p.pick.path;
     const id = `${new Date(now()).toISOString().slice(2, 10).replace(/-/g, '')}-${Math.random().toString(36).slice(2, 6)}`;
@@ -300,9 +307,9 @@ function createCodeJobs({
   async function followUp({ job: q, text } = {}) {
     const job = find(q);
     if (!job) return { ok: false, error: q ? `No job matches "${q}".` : 'There is no job yet.' };
-    if (job.state === 'running' || job.state === 'starting') return { ok: false, error: `"${job.title}" is still running. Wait for it to finish, or stop it first.` };
+    if (job.state === 'running' || job.state === 'starting' || finishing.has(job.id)) return { ok: false, error: `"${job.title}" is still running or wrapping up (pushing, PR). Try again in a minute.` };
     if (!fs.existsSync(job.worktree)) return { ok: false, error: `The working copy of "${job.title}" is gone; start a new job instead.` };
-    if (running().length >= maxRunning) return { ok: false, error: `${running().length} jobs are already running (max ${maxRunning}).` };
+    if (busy() >= maxRunning) return { ok: false, error: `${busy()} jobs are already running (max ${maxRunning}).` };
     text = String(text || '').trim();
     if (!text) return { ok: false, error: 'What should Claude Code do next?' };
     job.round = (job.round || 1) + 1;
@@ -351,8 +358,9 @@ function createCodeJobs({
     if (!job) return { ok: false, error: 'No job is running.' };
     if (job.state !== 'running') return { ok: false, error: `"${job.title}" is not running (${job.state}).` };
     job.stopRequested = true; save();
-    try { process.kill(-job.pid, 'SIGTERM'); } catch (_) { try { process.kill(job.pid, 'SIGTERM'); } catch (_) {} }
-    setTimeout(() => { if (pidAlive(job.pid)) { try { process.kill(-job.pid, 'SIGKILL'); } catch (_) {} } }, 8000).unref();
+    const pid = job.pid;   // this run only: a follow-up started later has another pid
+    try { process.kill(-pid, 'SIGTERM'); } catch (_) { try { process.kill(pid, 'SIGTERM'); } catch (_) {} }
+    setTimeout(() => { if (job.pid === pid && pidAlive(pid)) { try { process.kill(-pid, 'SIGKILL'); } catch (_) {} } }, 8000).unref();
     return { ok: true, message: `Stopping "${job.title}". What it already committed stays on branch ${job.branch}.` };
   }
 

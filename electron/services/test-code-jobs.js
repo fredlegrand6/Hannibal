@@ -188,9 +188,12 @@ async function waitFor(fn, ms = 15000) {
   await ok('max running jobs is honoured', async () => {
     process.env.FAKE_MODE = 'slow';
     const small = J.createCodeJobs({ roots: [root], baseDir: path.join(tmp, 'state2'), claudeBin: fake, ghBin: null, maxRunning: 1, pollMs: 100, log: () => {} });
-    assert.ok((await small.start({ project: 'housing', task: 'one' })).ok);
-    const two = await small.start({ project: 'housing', task: 'two' });
-    assert.strictEqual(two.ok, false); assert.ok(/already running/.test(two.error));
+    // two asks at the same moment: only one gets the slot
+    const [one, two] = await Promise.all([small.start({ project: 'housing', task: 'one' }), small.start({ project: 'housing', task: 'two' })]);
+    assert.strictEqual([one, two].filter((r) => r.ok).length, 1);
+    const no = one.ok ? two : one;
+    assert.ok(/already running/.test(no.error));
+    assert.strictEqual(small._jobs().length, 1);
     small.stop({});
     await sleep(300);
   });
