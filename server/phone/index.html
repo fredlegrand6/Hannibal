@@ -86,16 +86,70 @@ function silentWav() {
   v.setUint32(24, 8000, true); v.setUint32(28, 16000, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, 'data'); v.setUint32(40, n * 2, true);
   return URL.createObjectURL(new Blob([b], { type: 'audio/wav' }));
 }
-function unlock() { if (unlocked) return; unlocked = true; audio.src = silentWav(); audio.play().catch(() => {}); }
-document.addEventListener('pointerdown', unlock, { once: true });
-async function speak(t) {
-  try {
-    const r = await fetch('/api/speak', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: t }) });
-    if (!r.ok) return;
-    const url = URL.createObjectURL(await r.blob());
-    audio.src = url; await audio.play();
-  } catch (_) {}
+// His voice on the phone: one answer at a time, each with a time limit, so one
+// clip that never ends (call came in, app in the background, sound blocked)
+// can't silence the ones after it. Failures go to the dropout log on the server.
+let replay = null;           // a clip the phone blocked: it plays on the next tap
+function unlock() {
+  if (replay) { const u = replay; replay = null; unlocked = true; audio.src = u; audio.play().catch(() => {}); return; }
+  if (unlocked) return; unlocked = true; audio.src = silentWav(); audio.play().catch(() => {});
 }
+document.addEventListener('pointerdown', unlock);
+const device = () => ((navigator.userAgent.match(/iPhone|iPad|Android/) || ['phone'])[0]);
+function reportDrop(stage, error, recovered = false) {
+  fetch('/api/voice-drop', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ stage, error: String((error && error.message) || error).slice(0, 200), device: device(), recovered }) }).catch(() => {});
+}
+function playOnce(url) {
+  return new Promise((resolve, reject) => {
+    let started = false, finished = false, limit = null, startWatch = null;
+    const done = (err) => {
+      if (finished) return; finished = true;
+      clearTimeout(limit); clearTimeout(startWatch);
+      audio.onended = audio.onerror = audio.onplaying = audio.onloadedmetadata = audio.onpause = null;
+      if (err) { try { audio.pause(); } catch (_) {} reject(err); } else resolve();
+    };
+    audio.onplaying = () => {
+      started = true;
+      audio.onpause = () => { if (!audio.ended) done(new Error('the sound was interrupted (a call, or the app went to the background)')); };
+    };
+    audio.onended = () => done();
+    audio.onerror = () => done(new Error('the phone could not play the audio'));
+    audio.onloadedmetadata = () => {
+      const d = audio.duration;
+      if (isFinite(d) && d > 0) { clearTimeout(limit); limit = setTimeout(() => done(new Error('the clip never finished')), d * 1000 + Math.max(2500, d * 250)); }
+    };
+    limit = setTimeout(() => done(new Error('the clip never finished')), 60000);
+    startWatch = setTimeout(() => { if (!started) done(new Error('no sound started within 5 s')); }, 5000);
+    audio.src = url;
+    audio.play().catch((e) => done(e));
+  });
+}
+async function speakNow(t) {
+  let r;
+  try {
+    const ctl = new AbortController(); const tm = setTimeout(() => ctl.abort(), 25000);
+    try { r = await fetch('/api/speak', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: t }), signal: ctl.signal }); }
+    finally { clearTimeout(tm); }
+    if (!r.ok) throw new Error(`the server could not make the voice (${r.status})`);
+  } catch (e) { reportDrop('tts', e.name === 'AbortError' ? 'the voice request took longer than 25 s' : e); return; }
+  const url = URL.createObjectURL(await r.blob());
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try { await playOnce(url); if (attempt) reportDrop('play', 'first try failed, second worked', true); return; }
+    catch (e) {
+      if (e && e.name === 'NotAllowedError') {          // the phone wants a tap first
+        unlocked = false; replay = url;
+        add('note', 'Tap anywhere to hear me.');
+        reportDrop('play', 'the phone blocked the sound until a tap', false);
+        return;
+      }
+      if (attempt) { reportDrop('play', e, false); URL.revokeObjectURL(url); return; }
+      try { audio.load(); } catch (_) {}
+    }
+  }
+}
+let speakChain = Promise.resolve();
+function speak(t) { speakChain = speakChain.then(() => speakNow(t)).catch(() => {}); return speakChain; }
 
 function busy(on) { $('state').textContent = on ? 'thinking…' : (online ? 'online' : 'offline'); }
 

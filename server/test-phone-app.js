@@ -15,6 +15,7 @@ const base = `http://127.0.0.1:${PORT}`;
 const C = { cookie: `hannibal_k=${TOKEN}` };
 
 let toolCalls = [];
+const voiceDrops = [];
 const app = createPhoneApp({
   token: TOKEN, hosts: ['127.0.0.1'], port: PORT, persona: 'P', log: () => {},
   chat: async (payload, _on, { runTool }) => {
@@ -25,6 +26,7 @@ const app = createPhoneApp({
   transcribe: async (buf, mime) => `heard ${buf.length} bytes of ${mime}`,
   speak: async (t) => Buffer.from(`mp3:${t}`),
   status: () => ({ mac: true }),
+  onVoiceDrop: (d) => voiceDrops.push(d),
 });
 
 (async () => {
@@ -86,6 +88,13 @@ const app = createPhoneApp({
     await new Promise((r) => setTimeout(r, 50));
     const j = await (await fetch(`${base}/api/say`, { method: 'POST', headers: C, body: JSON.stringify({ text: 'trash it' }) })).json();
     assert.strictEqual(j.reply, 'Left it.');
+  });
+
+  await test('the phone reports a voice dropout and it reaches the dropout log', async () => {
+    assert.strictEqual((await fetch(`${base}/api/voice-drop`, { method: 'POST', body: '{"stage":"play"}' })).status, 401);
+    const r = await fetch(`${base}/api/voice-drop`, { method: 'POST', headers: C, body: JSON.stringify({ stage: 'play', error: 'no sound started within 5 s', device: 'iPhone', where: 'desk' }) });
+    assert.strictEqual(r.status, 200);
+    assert.deepStrictEqual(voiceDrops, [{ stage: 'play', error: 'no sound started within 5 s', device: 'iPhone', where: 'phone' }]);
   });
 
   app.stop();

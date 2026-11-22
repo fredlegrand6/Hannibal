@@ -733,6 +733,13 @@ const TOOLS = [
     side_effect: SIDE_EFFECT.READ, executor: EXECUTOR.MAIN,
     via: { channel: 'reminders:recent' },
     returns: '{ ok, wentOff:[{ id, message, due, wentOff }], missed:[{ id, message, due, why }] }' },
+  // ═══════════════════════ HIS OWN VOICE ═══════════════════════
+  { name: 'voice.dropouts', domain: 'voice',
+    description: "Check your own voice: every time your spoken voice failed (desk app or phone app), when, at which stage (tts = the voice request, decode, play, queue), the error, the speakers in use, and whether you recovered by yourself or skipped the sentence. Use it when Fred asks things like \"did your voice drop out today?\". Answer in plain words, no jargon.",
+    params: [{ name: 'hours', type: 'number', required: false, desc: 'how far back to look; default: today since midnight' }],
+    side_effect: SIDE_EFFECT.READ, executor: EXECUTOR.MAIN,
+    via: { channel: 'voice:dropouts' },
+    returns: '{ ok, count, skipped, by_stage:{tts,decode,play,queue}, summary, dropouts:[{ t, where, stage, error, device, recovered, text }] }' },
   { name: 'timers.list', domain: 'timers', description: 'Load persisted timers.', params: [],
     side_effect: SIDE_EFFECT.READ, executor: EXECUTOR.MAIN, via: { channel: 'timers:load' } },
   { name: 'timers.save', domain: 'timers', description: 'Replace the persisted timers list (data/timers.json).',
