@@ -51,6 +51,11 @@ t('a pending yes/no or the wake word lets it through', () => {
   assert.ok(decide('open Chrome', { now: NOW, wokeAt: NOW - 3000 }).answer);
 });
 
+t('Whisper\'s morning spellings count as his name', () => {
+  for (const said of ['Annable.', 'Anable?', 'Hannable, are you there', 'Annabel', 'Hanibel what time is it']) assert.ok(decide(said, { now: NOW }).answer, said);
+  for (const said of ['a table for two', 'the cable is loose', 'unable to come', 'animal planet']) assert.ok(!decide(said, { now: NOW }).answer, said);
+});
+
 t('gate off answers everything (old behaviour)', () => {
   assert.ok(decide('anything at all', { now: NOW, enabled: false }).answer);
 });
