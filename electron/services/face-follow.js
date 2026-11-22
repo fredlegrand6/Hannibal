@@ -153,6 +153,7 @@ function createFaceFollow({
   const src = path.join(root, 'native', 'face-follow', 'FaceFollow.swift');
   const bin = path.join(root, 'native', 'face-follow', 'face-follow');
   let child = null, ctl = null, sock = null, wanted = false, restartTimer = null;
+  let seen = { faces: 0, bodies: 0, at: 0 };   // last frame: how many people the camera sees
 
   function send(cmds) {
     if (!sock || !cmds.length) return;
@@ -190,6 +191,7 @@ function createFaceFollow({
         try {
           const j = JSON.parse(line);
           send(ctl.step(j.faces, Date.now(), j.bodies));
+          seen = { faces: (j.faces || []).length, bodies: (j.bodies || []).length, at: Date.now() };
           const a = arrival.see((j.faces || []).length > 0 || (j.bodies || []).length > 0);
           if (a && onArrive) { log(`Fred is back after ${Math.round(a.awayMs / 60000)} min`); try { onArrive(a); } catch (_) {} }
         } catch (_) {}
@@ -216,7 +218,14 @@ function createFaceFollow({
     return { ok: true };
   }
 
-  return { start, stop, running: () => !!child };
+  // How many people are in frame right now (a hint for "is Fred talking to
+  // someone else?"). null when the camera has not reported in the last 3 s.
+  function people(now = Date.now()) {
+    if (!child || now - seen.at > 3000) return null;
+    return { count: Math.max(seen.faces, seen.bodies), faces: seen.faces, bodies: seen.bodies, at: seen.at };
+  }
+
+  return { start, stop, people, running: () => !!child };
 }
 
 module.exports = { createFollowController, createFaceFollow, createArrivalWatch, greetingFor, DEFAULTS };

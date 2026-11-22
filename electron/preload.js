@@ -24,6 +24,9 @@ contextBridge.exposeInMainWorld('hannibal', {
   // Voice dropouts: log one (stage/error/device) · read them back · the Mac woke up.
   voiceDrop: (entry) => ipcRenderer.invoke('voice:drop', entry),
   voiceDropouts: (hours) => ipcRenderer.invoke('voice:dropouts', hours),
+  // Who is talking: recent speaker tags · how many people the camera sees (null = no camera).
+  voiceWho: (n) => ipcRenderer.invoke('voice:who', n),
+  roomPeople: () => ipcRenderer.invoke('room:people'),
   onPowerResume: (cb) => ipcRenderer.on('power:resume', (_e, m) => cb(m)),
   // Claude chat brain (runs in main; the API key never reaches the renderer).
   // payload: { system, context, user } · onToken(text) fires as the reply streams.
