@@ -7,6 +7,8 @@
 //   • a click on "Send" in Mail → the voice confirm is asked first
 //   • "Hannibal stop" mid-task → stops within 1 second (also Esc×3, wake word)
 //   • multi-display: clicking on the right-hand screen hits the right spot
+//   • a key combo that moves focus (cmd+tab, cmd+space …) never lets the next
+//     step land unchecked; focus changing between check and action aborts
 // Run:  node electron/services/computer/test-computer.js
 // ─────────────────────────────────────────────────────────────────────────
 'use strict';
@@ -322,6 +324,144 @@ test('brief test: "Hannibal stop" mid-task stops within 1 second, and nothing mo
   c.newTask();
   w.slowType = false;
   assert.strictEqual((await g.run('computer.type', { text: 'ok' })).status, 'ok', 'a new request works again');
+});
+
+test('Fred\'s test: cmd+tab then Enter into a chat app stops and goes to the yes/no (never pressed blind)', async () => {
+  const w = fakeWorld();   // Notes in front, where Enter alone is harmless
+  w.onKey = (a) => { if (a.code === keys.CODES.tab && a.mods.includes('cmd')) { w.front = { app: 'Messages', bundle: 'com.apple.MobileSMS', pid: 800 }; w.element = { role: 'AXTextArea', value: 'hi' }; } };
+  const c = makeComputer(w);
+  const g = wire(c, { confirm: false });
+  const r = await g.run('computer.key', { keys: 'cmd+tab, enter' });
+  const keysSent = () => w.calls.filter((x) => x.cmd === 'key');
+  assert.strictEqual(keysSent().length, 1, 'only cmd+tab was pressed');
+  assert.strictEqual(keysSent()[0].code, keys.CODES.tab);
+  assert.notStrictEqual(r.status, 'ok');
+  const msg = JSON.stringify(r);
+  assert.ok(/Messages/.test(msg) && /yes\/no/.test(msg), msg.slice(0, 400));
+  // Claude follows the advice: just "enter" → now the normal confirm, naming Messages
+  const r2 = await g.run('computer.key', { keys: 'enter' });
+  assert.strictEqual(g.asked.length, 1, 'Fred was asked');
+  assert.ok(/Messages/.test(g.asked[0]), g.asked[0]);
+  assert.strictEqual(r2.status, 'declined');
+  assert.strictEqual(keysSent().length, 1, 'Enter never went to Messages');
+  // the static check for the planned app alone also holds: cmd+tab into Terminal
+  const w3 = fakeWorld();
+  w3.onKey = (a) => { if (a.code === keys.CODES.tab) { w3.front = { app: 'Terminal', bundle: 'com.apple.Terminal', pid: 810 }; } };
+  const g3 = wire(makeComputer(w3), { confirm: true });
+  await g3.run('computer.key', { keys: 'cmd+tab, enter' });
+  assert.strictEqual(w3.calls.filter((x) => x.cmd === 'key').length, 1, 'Enter not run in Terminal without its own yes');
+});
+
+test('Fred\'s test: cmd+space then typing "System Settings" + Enter is refused', async () => {
+  const w = fakeWorld();
+  const c = makeComputer(w);
+  const g = wire(c, { confirm: true });
+  assert.strictEqual((await g.run('computer.key', { keys: 'cmd+space' })).status, 'ok');
+  // typed with the Enter in one go
+  const t = await g.run('computer.type', { text: 'System Settings\n' });
+  assert.notStrictEqual(t.status, 'ok', JSON.stringify(t).slice(0, 300));
+  assert.ok(!w.calls.some((x) => x.cmd === 'type' || (x.cmd === 'key' && x.code === keys.CODES.v)), 'nothing typed');
+  // typed, then Enter as its own key
+  assert.strictEqual((await g.run('computer.type', { text: 'System Settings' })).status, 'ok');
+  const k = await g.run('computer.key', { keys: 'enter' });
+  assert.notStrictEqual(k.status, 'ok', JSON.stringify(k).slice(0, 300));
+  assert.ok(!w.calls.some((x) => x.cmd === 'key' && x.code === keys.CODES.return), 'Enter not pressed');
+  // and as one sequence after typing: "cmd+space" then type then "enter" inside a sequence
+  const w2 = fakeWorld();
+  const g2 = wire(makeComputer(w2), { confirm: true });
+  await g2.run('computer.key', { keys: 'cmd+space' });
+  await g2.run('computer.type', { text: 'Keychain Access' });
+  const k2 = await g2.run('computer.key', { keys: 'down, enter' });
+  assert.notStrictEqual(k2.status, 'ok');
+  assert.ok(!w2.calls.some((x) => x.cmd === 'key' && x.code === keys.CODES.return));
+  // an ordinary app from Spotlight still opens
+  const w4 = fakeWorld();
+  const g4 = wire(makeComputer(w4), { confirm: true });
+  await g4.run('computer.key', { keys: 'cmd+space' });
+  await g4.run('computer.type', { text: 'Notes' });
+  assert.strictEqual((await g4.run('computer.key', { keys: 'enter' })).status, 'ok');
+  assert.strictEqual(g4.asked.length, 0);
+});
+
+test('Fred\'s test: a normal "cmd+a, delete" inside a text box still runs without a yes', async () => {
+  const w = fakeWorld({ front: { app: 'Safari', bundle: 'com.apple.Safari', pid: 900 }, element: { role: 'AXTextField', value: 'old text' } });
+  const c = makeComputer(w);
+  const g = wire(c, { confirm: false });
+  const r = await g.run('computer.key', { keys: 'cmd+a, delete' });
+  assert.strictEqual(r.status, 'ok', JSON.stringify(r).slice(0, 300));
+  assert.strictEqual(g.asked.length, 0);
+  assert.strictEqual(w.calls.filter((x) => x.cmd === 'key').length, 2);
+  // …but if cmd+a moved focus off the text box, Delete stops for a yes
+  const w2 = fakeWorld({ front: { app: 'Mail', bundle: 'com.apple.mail', pid: 901 }, element: { role: 'AXTextField', value: 'name' } });
+  w2.onKey = (a) => { if (a.code === keys.CODES.a) w2.element = { role: 'AXList' }; };
+  const g2 = wire(makeComputer(w2), { confirm: false });
+  const r2 = await g2.run('computer.key', { keys: 'cmd+a, delete' });
+  assert.notStrictEqual(r2.status, 'ok');
+  assert.strictEqual(w2.calls.filter((x) => x.cmd === 'key').length, 1, 'Delete not pressed on the message list');
+});
+
+test('Fred\'s test: focus changing between the check and the typing aborts (nothing typed blind)', async () => {
+  const w = fakeWorld();   // Notes checked…
+  const c = makeComputer(w);
+  const pre = await c.preflight('type', { text: 'hello' });
+  assert.ok(!pre.block && !pre.confirm);
+  w.front = { app: 'Messages', bundle: 'com.apple.MobileSMS', pid: 800 };   // …then Messages jumps in front
+  const r = await c.act('type', { text: 'hello', ...pre.extra });
+  assert.strictEqual(r.ok, false);
+  assert.ok(r.focus_changed && /Messages/.test(r.error), r.error);
+  assert.ok(!w.calls.some((x) => x.cmd === 'type'), 'nothing typed');
+  // a password field appearing in between aborts too
+  const w2 = fakeWorld();
+  const c2 = makeComputer(w2);
+  const pre2 = await c2.preflight('type', { text: 'hello' });
+  w2.element = { role: 'AXTextField', secure: true };
+  const r2 = await c2.act('type', { text: 'hello', ...pre2.extra });
+  assert.strictEqual(r2.ok, false);
+  assert.ok(!w2.calls.some((x) => x.cmd === 'type'));
+  // a click whose spot now belongs to another app aborts
+  const w3 = fakeWorld({ axAt: { found: true, role: 'AXButton', title: 'New Note', app: 'Notes' } });
+  const c3 = makeComputer(w3);
+  await c3.act('screen', { display: 'laptop', _pass: (await c3.preflight('screen', {})).extra._pass });
+  const pre3 = await c3.preflight('click', { x: 100, y: 100, display: '2' });
+  w3.axAt = { found: true, role: 'AXButton', title: 'Send', app: 'Mail' };
+  const r3 = await c3.act('click', { x: 100, y: 100, display: '2', ...pre3.extra });
+  assert.strictEqual(r3.ok, false);
+  assert.ok(!w3.calls.some((x) => x.cmd === 'click'), 'not clicked');
+});
+
+test('"Hannibal stop" freezes a multi-step key sequence in the middle', async () => {
+  const w = fakeWorld();
+  const c = makeComputer(w);
+  w.onKey = () => { if (w.calls.filter((x) => x.cmd === 'key').length === 2) c.abort('Fred said "Hannibal stop"'); };
+  const g = wire(c);
+  const r = await g.run('computer.key', { keys: 'down, down, down, down, down' });
+  assert.strictEqual(r.status, 'stopped');
+  assert.strictEqual(w.calls.filter((x) => x.cmd === 'key').length, 2, 'nothing after the stop');
+});
+
+test('stop during a paste: Cmd+V is never sent and Fred\'s clipboard is put back', async () => {
+  const w = fakeWorld();
+  let c;
+  // "Hannibal stop" arrives while the clipboard is being prepared (the 80 ms wait)
+  c = makeComputer(w, { sleep: async (ms) => { if (ms === 80) c.abort('Fred said "Hannibal stop"'); } });
+  const g = wire(c);
+  const r = await g.run('computer.type', { text: 'echo one\necho two and a long line of text that goes through the clipboard' });
+  assert.strictEqual(r.status, 'stopped', JSON.stringify(r).slice(0, 300));
+  assert.ok(!w.calls.some((x) => x.cmd === 'key'), 'no Cmd+V after the stop');
+  assert.strictEqual(w.clipboard, 'Fred\'s own clipboard');
+});
+
+test('clickText with a display only picks accessibility matches on that display', async () => {
+  const w = fakeWorld({ front: { app: 'Mail', pid: 700 },
+    axItems: [
+      { role: 'AXButton', title: 'Archive', frame: { x: 400, y: 200, w: 60, h: 24 } },          // laptop
+      { role: 'AXButton', title: 'Archive', frame: { x: 1500, y: -600, w: 60, h: 24 } },        // right Philips
+    ],
+    ocr: [] });
+  const c = makeComputer(w);
+  const f = await c.findText({ text: 'Archive', display: 'right' });
+  assert.ok(f.found, JSON.stringify(f).slice(0, 300));
+  assert.ok(f.target.center.x > 1400 && f.target.center.y < 0, JSON.stringify(f));
 });
 
 test('Esc pressed 3 times while driving stops; Esc when idle does nothing', async () => {

@@ -40,6 +40,12 @@ that to the real screen (different scaling per display is handled).
 - Clicking a **Send / Delete / Pay / Submit / Merge** button (EN/NL/FR/ES), Enter in
   a chat app, Terminal or browser, cmd+Enter, cmd+Q, Delete outside a text box,
   a new line typed into a chat app or Terminal → the normal **voice yes/no** first.
+- Focus can move mid-action (cmd+tab, cmd+space, a pop-up). Right before every key, typed text
+  and click he looks again at the front app and focused field and re-runs the safety check
+  there. A key sequence runs one step at a time; if a later step would land somewhere gated
+  (a chat app's Enter, Terminal, a protected app) he stops and that step goes through the yes/no
+  on its own. If the front app is not the one that was checked, he stops and types nothing.
+  Typing "System Settings" (or Keychain, a password manager) into Spotlight and pressing Enter is refused.
 - "Put this in Claude Code" counts as approved by Fred's own ask.
 - **Stop**: say "Hannibal stop" (or just "stop"), press **Esc 3×**, or say the wake word
   while he drives. The action is cut, Claude's turn ends, nothing more runs; he says "Stopped."
