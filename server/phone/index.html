@@ -110,7 +110,13 @@ function silentWav() {
 // can't silence the ones after it. Failures go to the dropout log on the server.
 let replay = null;           // a clip the phone blocked: it plays on the next tap
 function unlock() {
-  if (replay) { const u = replay; replay = null; unlocked = true; audio.src = u; audio.play().catch(() => {}); return; }
+  if (replay) {
+    const u = replay; replay = null; unlocked = true;
+    const end = () => { audio.onplaying = audio.onended = audio.onerror = audio.onpause = null; look.playing = false; mood(); };
+    audio.onplaying = () => { look.playing = true; mood(); };
+    audio.onended = audio.onerror = audio.onpause = end;
+    audio.src = u; audio.play().catch(end); return;
+  }
   if (unlocked) return; unlocked = true; audio.src = silentWav(); audio.play().catch(() => {});
 }
 document.addEventListener('pointerdown', unlock);
