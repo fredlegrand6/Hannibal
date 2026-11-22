@@ -48,6 +48,16 @@ Open Hannibal once after installing, so iOS learns the shortcuts.
   bottom button › *Talk to Hannibal*. In Control Center: tap + › Add a Control › Hannibal.
 - **Dynamic Island:** while live talk runs it shows listening / thinking / speaking, with Stop.
 
+### Share, widget, place reminders
+
+- **Share to Hannibal:** in any app tap Share › Hannibal (first time: scroll the app row › More › turn
+  Hannibal on). Pick a quick action (summarise, remind me, draft a reply, remember) or type your own.
+- **Widget:** long-press the home screen › + › Hannibal. Shows the next appointments, reminders and
+  whether he's waiting for a Yes/No. Also on the lock screen (Customize › widgets).
+- **Place reminders:** say "remind me to call Jay when I get home" or "…when I land in Ibiza" / "…when I
+  leave the office". The phone watches the place (allow location *Always*) and rings when you arrive or
+  leave. Needs a server deploy. At most 18 active places (iOS limit is 20).
+
 ## Notes for builders
 
 - `ios/Hannibal/orb.js` is a copy of `server/phone/orb.js`. The GitHub check
