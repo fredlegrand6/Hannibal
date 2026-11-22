@@ -746,7 +746,7 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
         followUpMs: Number(cfg.nameFollowUpMs) || 20000,
         enabled: cfg.nameGate !== false,
       });
-      if (!gate.answer) { console.log('[voice] not for me (no "Hannibal"):', JSON.stringify(transcript)); restOrRearm(); return; }
+      if (!gate.answer) { console.warn('[voice] not for me (no "Hannibal"):', JSON.stringify(transcript)); restOrRearm(); return; }
       if (gate.why === 'name' && gate.nameOnly) {
         // Just "Hannibal?" → answer like a wake word and listen for the request.
         wokeAt = Date.now();
