@@ -2,7 +2,8 @@
 // PHONE ORB — a light 2D-canvas version of the desk's neural brain
 // (src/neural-brain.js), sized for an iPhone home-screen app.
 // No libraries, nothing downloaded. States: idle, listening, thinking,
-// speaking, confirm (gold while a Yes/No is waiting).
+// speaking, looking (right side turns gold, like the desk's vision),
+// confirm (gold while a Yes/No is waiting).
 // Purely visual: if it fails to draw, the app works exactly as before.
 // The browser pauses it while the app is in the background.
 // ─────────────────────────────────────────────────────────────────────────
@@ -47,7 +48,7 @@
     const sCyan = sprite(CYAN), sGold = sprite(GOLD);
 
     let state = 'idle', stateT = 0, amp = 0, ampTarget = 0;
-    const w8 = { listening: 0, thinking: 0, speaking: 0, confirm: 0 };
+    const w8 = { listening: 0, thinking: 0, speaking: 0, looking: 0, confirm: 0 };
     let W = 0, H = 0, dpr = 1, rot = 0, breathe = 0, last = performance.now(), t = 0, fireAcc = 0;
     function size() {
       if (still) requestAnimationFrame(frame);
@@ -74,7 +75,7 @@
       breathe += dt * (Math.PI * 2 / 4) * (1 + w8.listening * 1.4 + w8.thinking * 0.8);
       const scale = 1 + 0.02 * (1 + w8.listening * 0.6 + w8.speaking * 0.3) * Math.sin(breathe);
       rot += dt * 0.12 * (calm ? 0.6 : 1) * (1 + w8.thinking * 0.8);
-      fireAcc += dt * (2.5 + w8.thinking * 6) * (calm ? 0.5 : 1);
+      fireAcc += dt * (2.5 + (w8.thinking + w8.looking) * 6) * (calm ? 0.5 : 1);
       while (fireAcc >= 1) { pts[(rnd() * N) | 0].fire = t; fireAcc -= 1; }
 
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -95,8 +96,10 @@
         const listen = w8.listening * left * (0.5 + 0.5 * Math.sin(t * 5 + rad * 2.5)) * (1.2 + amp * 1.6);
         const think = w8.thinking * (Math.exp(-Math.pow((rad - f1) * 4, 2)) + Math.exp(-Math.pow((rad - f2) * 4, 2))) * 2.6;
         const speak = w8.speaking * (0.5 + 0.5 * Math.sin(rad * 3.5 - t * 6)) * (0.6 + amp * 1.8);
+        const right = Math.min(1, Math.max(0, (x - 0.3) / 0.65));
+        const look = w8.looking * right * (1.1 + 0.4 * Math.sin(t * 3 + rad * 2));
         const fade = 0.45 + 0.55 * (z + 1.5) / 3;
-        proj[i] = { x: cx + x * R * persp, y: cy - y * R * persp, p: persp, br: (p.b * tw + fire * 2.2 + listen + think + speak) * fade, s: p.s * (1 + fire * 0.6 + think * 0.12) };
+        proj[i] = { x: cx + x * R * persp, y: cy - y * R * persp, p: persp, br: (p.b * tw + fire * 2.2 + listen + think + speak + look) * fade, gold: w8.looking * right > 0.35, s: p.s * (1 + fire * 0.6 + think * 0.12) };
       }
       ctx.lineWidth = 1.3;
       const lineRGB = w8.confirm > 0.5 ? GOLD : CYAN;
@@ -111,7 +114,7 @@
       for (let i = 0; i < N; i++) {
         const q = proj[i], d = base * q.s * q.p * 1.9;
         ctx.globalAlpha = Math.min(1, q.br * 0.75);
-        ctx.drawImage(w8.confirm > 0.5 ? sGold : sCyan, q.x - d / 2, q.y - d / 2, d, d);
+        ctx.drawImage(w8.confirm > 0.5 || q.gold ? sGold : sCyan, q.x - d / 2, q.y - d / 2, d, d);
       }
       // centre orb: core + halo, grows with the voice
       const pulse = 0.85 + 0.15 * Math.sin(t * 1.6);

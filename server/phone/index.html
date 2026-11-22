@@ -40,6 +40,9 @@
   footer { display:flex; gap:8px; align-items:flex-end; padding:10px 12px calc(10px + env(safe-area-inset-bottom)); background:transparent; }
   textarea { flex:1; resize:none; max-height:120px; min-height:44px; padding:11px 14px; border-radius:22px; border:1px solid var(--line); background:var(--panel); color:var(--text); font:inherit; outline:none; }
   #send { width:44px; height:44px; border-radius:50%; border:0; background:var(--accent); color:#03131c; font-size:20px; font-weight:700; }
+  #cam { width:44px; height:44px; border-radius:50%; border:1px solid var(--line); background:var(--panel); color:var(--dim); flex:none; display:flex; align-items:center; justify-content:center; padding:0; }
+  #cam svg { width:22px; height:22px; }
+  .msg img { display:block; max-width:100%; max-height:240px; border-radius:10px; margin-bottom:6px; }
   #mic { width:64px; height:64px; border-radius:50%; border:2px solid var(--accent); background:transparent; color:var(--accent); flex:none; touch-action:none; user-select:none; -webkit-user-select:none; }
   #mic svg { width:28px; height:28px; }
   #mic.rec { background:var(--no); border-color:var(--no); color:#fff; transform:scale(1.08); }
@@ -56,6 +59,8 @@
 <div id="log"></div>
 <div class="hint" id="hint"></div>
 <footer>
+  <button id="cam" aria-label="Show Hannibal a photo"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M9 4 7.2 6H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-3.2L15 4H9zm3 4.5a4.5 4.5 0 1 1 0 9 4.5 4.5 0 0 1 0-9zm0 2a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z"/></svg></button>
+  <input id="photo" type="file" accept="image/*" hidden>
   <textarea id="text" rows="1" placeholder="Message Hannibal"></textarea>
   <button id="send" aria-label="Send" hidden>↑</button>
   <button id="mic" aria-label="Hold to talk"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-2.08A7 7 0 0 0 19 12h-2z"/></svg></button>
@@ -73,10 +78,10 @@ $('voiceBtn').onclick = () => { voiceAlways = !voiceAlways; try { localStorage.s
 // The living orb. Purely visual: if it can't draw, everything else still works.
 let orb = { setState() {}, setAmplitude() {}, pulse() {} };
 try { if (window.initOrb) orb = window.initOrb($('orb')); } catch (_) {}
-const look = { recording: false, playing: false, waiting: 0, confirms: 0 };
-const PHASE = { idle: 'Ready', listening: 'Listening', thinking: 'Thinking', speaking: 'Speaking', confirm: 'Waiting for your yes' };
+const look = { recording: false, playing: false, waiting: 0, confirms: 0, looking: false };
+const PHASE = { idle: 'Ready', listening: 'Listening', thinking: 'Thinking', speaking: 'Speaking', looking: 'Looking', confirm: 'Waiting for your yes' };
 function mood() {
-  const s = look.recording ? 'listening' : look.playing ? 'speaking' : look.confirms ? 'confirm' : look.waiting ? 'thinking' : 'idle';
+  const s = look.recording ? 'listening' : look.playing ? 'speaking' : look.confirms ? 'confirm' : look.looking ? 'looking' : look.waiting ? 'thinking' : 'idle';
   try { orb.setState(s); } catch (_) {}
   $('phase').textContent = PHASE[s];
   $('phase').classList.toggle('gold', s === 'confirm');
@@ -206,6 +211,42 @@ function resize() { text.style.height = 'auto'; text.style.height = Math.min(120
 text.addEventListener('input', resize);
 text.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !/iPhone|Android/i.test(navigator.userAgent)) { e.preventDefault(); say(text.value); } });
 send.onclick = () => say(text.value);
+
+// Show him a photo: camera or library (the phone asks which). Shrunk to a JPEG
+// here first so it uploads fast; the typed text, if any, is the question.
+const cam = $('cam'), photo = $('photo');
+cam.onclick = () => { unlock(); photo.value = ''; photo.click(); };
+function shrink(file, max = 1568) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file), img = new Image();
+    img.onload = () => {
+      const k = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+      const c = document.createElement('canvas'); c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url); resolve(c.toDataURL('image/jpeg', 0.85));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('could not open that photo')); };
+    img.src = url;
+  });
+}
+photo.onchange = async () => {
+  const file = photo.files && photo.files[0]; if (!file) return;
+  let dataUrl;
+  try { dataUrl = await shrink(file); } catch (e) { add('note', 'I could not open that photo. Try another one?'); return; }
+  const q = text.value.trim(); text.value = ''; resize();
+  const el = add('me', '📷 ' + (q || 'Photo'));
+  const im = document.createElement('img'); im.onload = () => { log.scrollTop = log.scrollHeight; }; im.src = dataUrl; im.alt = ''; el.prepend(im);
+  log.scrollTop = log.scrollHeight; save();
+  const wait = add('him thinking', 'Looking…'); busy(true, 1); look.looking = true; mood();
+  try {
+    const r = await fetch('/api/look', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image: dataUrl, text: q }) });
+    const j = await answer(r);
+    look.looking = false; mood();
+    wait.remove(); add('him', j.reply || '…'); save();
+    if (voiceAlways && j.ok) speak(j.reply);
+  } catch (_) { wait.remove(); add('note', 'Could not reach Hannibal. Are you on Tailscale?'); }
+  look.looking = false; busy(false, 1);
+};
 
 // Hold to talk
 let rec = null, chunks = [], started = 0;

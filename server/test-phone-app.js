@@ -15,10 +15,12 @@ const base = `http://127.0.0.1:${PORT}`;
 const C = { cookie: `hannibal_k=${TOKEN}` };
 
 let toolCalls = [];
+let lastPayload = null;
 const voiceDrops = [];
 const app = createPhoneApp({
   token: TOKEN, hosts: ['127.0.0.1'], port: PORT, persona: 'P', log: () => {},
   chat: async (payload, _on, { runTool }) => {
+    lastPayload = payload;
     if (/trash/.test(payload.user)) { const ok = await runTool('mail_trash', { id: 1 }); return { ok: true, text: ok ? 'Trashed.' : 'Left it.' }; }
     return { ok: true, text: `You said: ${payload.user}` };
   },
@@ -58,6 +60,24 @@ const app = createPhoneApp({
     const j = await (await fetch(`${base}/api/voice`, { method: 'POST', headers: { ...C, 'Content-Type': 'audio/mp4' }, body: Buffer.alloc(10) })).json();
     assert.strictEqual(j.heard, 'heard 10 bytes of audio/mp4');
     assert.ok(j.ok && j.spoken);
+  });
+
+  await test('a photo is passed to his vision with the question', async () => {
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 4]).toString('base64');
+    const j = await (await fetch(`${base}/api/look`, { method: 'POST', headers: C, body: JSON.stringify({ image: 'data:image/jpeg;base64,' + jpeg, text: 'what is this?' }) })).json();
+    assert.ok(j.ok);
+    assert.deepStrictEqual(lastPayload.images, [jpeg]);
+    assert.strictEqual(lastPayload.user, 'what is this?');
+    await (await fetch(`${base}/api/look`, { method: 'POST', headers: C, body: JSON.stringify({ image: jpeg }) })).json();
+    assert.strictEqual(lastPayload.user, 'What do you see in this photo?');
+    const bad = await fetch(`${base}/api/look`, { method: 'POST', headers: C, body: JSON.stringify({ image: '' }) });
+    assert.strictEqual(bad.status, 400);
+    await (await fetch(`${base}/api/say`, { method: 'POST', headers: C, body: JSON.stringify({ text: 'plain' }) })).json();
+    assert.strictEqual(lastPayload.images, undefined);
+  });
+
+  await test('a photo needs the key', async () => {
+    assert.strictEqual((await fetch(`${base}/api/look`, { method: 'POST', body: '{"image":"abc"}' })).status, 401);
   });
 
   await test('speak returns Hannibal\'s voice as mp3', async () => {
