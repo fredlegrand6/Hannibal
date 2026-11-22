@@ -5,8 +5,9 @@
 //
 // Reads the recent conversations in data/conversations.json, lets Claude turn
 // their open items into threads with a status (by meaning, merging duplicates),
-// then applies the optional housekeeping file: a JSON list of
-// { "thread": "words or id", "status": "done|dropped|...", "note": "..." }.
+// with the optional housekeeping file: a JSON list of things Fred says now
+// ("the reminders are fixed and tested", "forget the passwords"), which win
+// over the diary. Claude matches them to the threads by meaning.
 // Run it with Hannibal stopped (the app keeps threads.json in memory).
 'use strict';
 
@@ -33,21 +34,15 @@ const brain = require('../electron/services/claude-brain');
   try { episodes = JSON.parse(fs.readFileSync(path.join(DATA, 'conversations.json'), 'utf8')).episodes || []; } catch (_) {}
   const recent = episodes.slice(-14);
   console.log(`${recent.length} recent conversations, ${store.size} threads already`);
-  if (recent.length) {
+  const hk = process.argv[2] ? JSON.parse(fs.readFileSync(process.argv[2], 'utf8')) : [];
+  if (recent.length || hk.length) {
     const transcript = recent.map((e) => `[${String(e.start).slice(0, 16)}] ${e.title}. ${e.summary}${(e.open || []).length ? `\nLeft open: ${e.open.join('; ')}` : ''}`).join('\n\n');
+    const now = hk.length ? `\n\nFRED SAYS NOW (${new Date().toISOString().slice(0, 10)}; his word wins over everything above):\n${hk.map((x) => `- ${x}`).join('\n')}` : '';
     const r = await store.reconcile({
-      transcript: `(Summaries of recent conversations, oldest first. Later ones can close what earlier ones left open.)\n\n${transcript}`,
+      transcript: `(Summaries of recent conversations, oldest first. Later ones can close what earlier ones left open.)\n\n${transcript}${now}`,
       summarize: (t, p) => brain.summarizeForJournal(t, p),
     });
     console.log(r.ok ? `from the diary: ${r.updated.length} threads` : `diary pass failed: ${r.error}`);
-  }
-  const hk = process.argv[2];
-  if (hk) {
-    for (const u of JSON.parse(fs.readFileSync(hk, 'utf8'))) {
-      const hit = await store.match(u.thread, { min: 0.62 });
-      const r = await store.upsert({ id: hit ? hit.id : undefined, title: hit ? hit.title : u.thread, status: u.status, note: u.note, source: 'fred' }, { minMatch: 0.62 });
-      console.log(`${r.ok ? (r.created ? 'new' : 'set') : 'skip'}: ${r.thread ? r.thread.title : u.thread} -> ${u.status}`);
-    }
   }
   for (const t of store.all()) console.log(`  ${t.status.padEnd(11)} ${t.title}`);
   process.exit(0);

@@ -38,7 +38,7 @@ const MAX_HISTORY = 30;
 const MAX_THREADS = 2000;
 const MAX_EVENTS = 60;
 // By meaning (nomic-embed-text cosine). Tuned on Fred's own threads, Nov 2026.
-const SAME_THREAD = () => Number(process.env.THREAD_SAME_MIN) || 0.72;   // this close = the same thread (dedupe; distinct ones stay under ~0.6)
+const SAME_THREAD = () => Number(process.env.THREAD_SAME_MIN) || 0.8;    // this close = surely the same thread; merging by meaning is Claude's job (the pass sees the ids)
 const RELEVANT = () => Number(process.env.THREAD_RELEVANT_MIN) || 0.6;   // brought into a turn unasked
 const FIND_MIN = () => Number(process.env.THREAD_FIND_MIN) || 0.55;      // memory.threads search (and within 0.1 of the best)
 const CLOSED_TOPIC = () => Number(process.env.THREAD_CLOSED_MIN) || 0.72; // a nudge about a closed thread is skipped
@@ -378,8 +378,8 @@ function registerThreads(ipcMain, store) {
     if (status && !normStatus(status)) return { ok: false, error: `status must be one of ${STATUSES.join(', ')}` };
     // Fred is almost always talking about something already open: look there
     // first (a little more generous), then at everything, and only then create.
-    const open = await store.match(thread, { min: 0.65, statuses: ['open', 'in_progress', 'waiting_on', 'snoozed'] });
-    const r = await store.upsert({ title: thread, id: open ? open.id : thread, status, note, waiting_on: waitingOn, until, source: 'fred' }, { minMatch: 0.72 });
+    const open = await store.match(thread, { min: 0.75, statuses: ['open', 'in_progress', 'waiting_on', 'snoozed'] });
+    const r = await store.upsert({ title: thread, id: open ? open.id : thread, status, note, waiting_on: waitingOn, until, source: 'fred' }, { minMatch: 0.8 });
     return r.ok ? { ok: true, created: !!r.created, title: r.thread.title, status: r.thread.status } : r;
   });
 }
