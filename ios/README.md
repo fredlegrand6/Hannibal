@@ -58,6 +58,16 @@ Open Hannibal once after installing, so iOS learns the shortcuts.
   leave the office". The phone watches the place (allow location *Always*) and rings when you arrive or
   leave. Needs a server deploy. At most 18 active places (iOS limit is 20).
 
+### Navigation (Google Maps)
+
+- **"Take me to Ibiza airport"**: Google Maps opens with the route (app on screen), otherwise a
+  notification: tap it to start. "Start route" button in the chat too.
+- **"How long to get home?"**: drive time by car from where the phone is, with live traffic.
+- **Time to leave**: for appointments with an address in the next 3 hours he tells you once when
+  to leave (10 minutes spare), or that you'll be late. Works best when the app was opened recently;
+  iOS can delay waking a closed app.
+- **"Tell my wife when I'll be home"**: drive time, then a WhatsApp after your yes.
+
 ## Notes for builders
 
 - `ios/Hannibal/orb.js` is a copy of `server/phone/orb.js`. The GitHub check
