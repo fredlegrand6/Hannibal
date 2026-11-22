@@ -274,8 +274,9 @@ async function pasteToClaudeCode(deps, { text, session, wait_seconds: waitS } = 
       const val = String(v || '');
       const markers = (val.match(/\[pasted text/gi) || []).length;
       const p = norm(probe(body)).slice(0, 24);
-      const hits = p ? norm(val).split(p).length - 1 : 0;
-      return markers > 1 || hits > 1;
+      const count = (h) => (p ? norm(h).split(p).length - 1 : 0);
+      // more copies than the brief itself holds (its opening may repeat inside it)
+      return markers > 1 || count(val) > Math.max(1, count(body));
     };
 
     let err = await activate();
@@ -285,12 +286,17 @@ async function pasteToClaudeCode(deps, { text, session, wait_seconds: waitS } = 
     if (err === 'stopped') return stoppedNow();
     if (err) return fail('focus', err);
 
+    // What the conversation looked like before pasting: only NEW evidence counts as "sent".
+    const base = await read();
+    const baseText = String(base.text || '');
+    const sentSince = (st) => !!(st.composer && ((st.composer.busy && !(base.composer && base.composer.busy))
+      || (appears(st.text, body) && !appears(baseText, body) && st.text !== baseText)));
     let landed = null;
     for (let attempt = 1; attempt <= 2 && !landed; attempt++) {
       if (attempt === 2) {
         // Before trying again: make sure the first try did not send it already…
         const st = await read();
-        if (st.composer && (st.composer.busy || appears(st.text, body)) && !appears(st.composer.box.value, body)) {
+        if (sentSince(st) && !appears(st.composer.box.value, body)) {
           step('verify', true, 'the first paste had already been sent');
           return { ok: true, verified: true, where: c.where, session: c.label, steps, message: `Sent to Claude Code (${c.label}); checked: it is already in the conversation (not sent twice).` };
         }
@@ -303,7 +309,9 @@ async function pasteToClaudeCode(deps, { text, session, wait_seconds: waitS } = 
         if (err) return fail('focus', err);
         err = await guard('clearing the box');
         if (err) return fail('focus', err);
+        if (deps.aborted()) return stoppedNow();
         await deps.hands.call('key', { code: 0, mods: ['cmd'] });        // cmd+a
+        if (deps.aborted()) return stoppedNow('the box may be selected but nothing was deleted or sent');
         await deps.hands.call('key', { code: 51, mods: [] });            // delete
         await deps.sleep(150);
         step('clear', true, 'emptied the prompt box for a second try');
@@ -327,6 +335,7 @@ async function pasteToClaudeCode(deps, { text, session, wait_seconds: waitS } = 
     // 5. send (once) and verify
     err = await guard('send');
     if (err) return fail('send', err);
+    if (deps.aborted()) return stoppedNow('the text is in the prompt box but was not sent');
     if (sent) return fail('send', 'already sent once');
     sent = true;
     await deps.hands.call('key', { code: 36, mods: [] });
@@ -367,6 +376,7 @@ async function pasteToClaudeCode(deps, { text, session, wait_seconds: waitS } = 
   if (!landed) return fail('verify', 'The text did not show up in the Claude Code prompt (tried twice), so it was NOT sent. Look at the screen (computer.screen) before trying again.');
   if (deps.aborted()) return stoppedNow('the text is in the prompt but was not sent');
   if (!(await termFront())) { step('guard:send', false, `${c.app} is no longer in front`); return fail('send', `Stopped before sending: ${c.app} is no longer in front.`); }
+  if (deps.aborted()) return stoppedNow('the text is in the prompt but was not sent');
   sent = true;
   await deps.hands.call('key', { code: 36, mods: [] });
   step('send', true, 'pressed Enter once');

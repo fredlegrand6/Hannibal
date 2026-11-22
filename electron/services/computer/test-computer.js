@@ -709,6 +709,31 @@ test('Fred\'s test: retry never double-sends', async () => {
   assert.strictEqual(enters(w4), 0);
 });
 
+test('Claude Code paste: Codex review cases (stop during the send check, repeated opening, old history)', async () => {
+  // "Hannibal stop" arrives while the last focus check before Enter is running → no Enter
+  const w = slowClaude();
+  let c;
+  c = makeComputer(w);
+  const hcall = w.hands.call;
+  w.hands.call = async (cmd, a) => { const r = await hcall(cmd, a); if (cmd === 'focused' && w.st.box) c.abort('Fred said "Hannibal stop"'); return r; };
+  const r = await wire(c).run('computer.pasteToClaudeCode', { text: BRIEF2 });
+  assert.strictEqual(r.status, 'stopped', r.content);
+  assert.strictEqual(enters(w), 0, 'Enter not pressed after stop');
+  // a brief whose opening repeats inside it is still sent once
+  const REP = 'Fix the regression\nDetails: Fix the regression by adding a test.';
+  const w2 = slowClaude();
+  const r2 = await wire(makeComputer(w2)).run('computer.pasteToClaudeCode', { text: REP });
+  assert.strictEqual(r2.status, 'ok', r2.content);
+  assert.strictEqual(enters(w2), 1);
+  // the brief already in the conversation from earlier + a lost first paste → retried, not "already sent"
+  const w3 = slowClaude({ lostPastes: 1 });
+  w3.st.convo = BRIEF2.split('\n')[0];
+  const r3 = await wire(makeComputer(w3)).run('computer.pasteToClaudeCode', { text: BRIEF2 });
+  assert.strictEqual(r3.status, 'ok', r3.content);
+  assert.strictEqual(w3.st.pastes, 2, 'pasted again');
+  assert.strictEqual(enters(w3), 1, 'and sent once');
+});
+
 test('paste into Claude Code keeps the focus re-check: focus moved away before Enter → not sent', async () => {
   const w = slowClaude();
   const orig = w.onKey;
