@@ -10,7 +10,31 @@ import UIKit
 import UserNotifications
 
 final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
-    weak var model: HannibalModel?
+    /// A notification tap can arrive before the screen (and the model) is up,
+    /// e.g. when it cold-launches the app: keep it and show it once attached.
+    weak var model: HannibalModel? {
+        didSet {
+            guard let model, !pending.isEmpty else { return }
+            let queued = pending; pending = []
+            Task { @MainActor in queued.forEach { $0(model) } }
+        }
+    }
+    private var pending: [@MainActor (HannibalModel) -> Void] = []
+
+    @MainActor private func withModel(_ work: @escaping @MainActor (HannibalModel) -> Void) {
+        if let model { work(model) } else { pending.append(work) }
+    }
+
+    /// Puts a notification's content into the conversation (deduplicated
+    /// against the live stream by text / confirm id).
+    @MainActor private func show(_ content: UNNotificationContent) {
+        let body = content.body
+        if let id = content.userInfo["confirmId"] as? String {
+            withModel { $0.showPushedConfirm(id: id, text: body) }
+        } else {
+            withModel { $0.showPushed(body) }
+        }
+    }
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         let center = UNUserNotificationCenter.current()
@@ -40,9 +64,12 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         Task { @MainActor in self.model?.add(.error, "Notifications couldn't be set up: \(error.localizedDescription)") }
     }
 
-    // While the app is open the conversation already shows it: no banner on top.
+    // App open: put it in the conversation instead of a banner on top. Normally
+    // the live stream already has it (deduplicated), but a push can slip in
+    // while the stream is reconnecting.
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
-        []
+        await MainActor.run { self.show(notification.request.content) }
+        return []
     }
 
     // Yes / No from the lock screen, or a tap that opens the app.
@@ -50,7 +77,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         let info = response.notification.request.content.userInfo
         let body = response.notification.request.content.body
         guard let id = info["confirmId"] as? String else {
-            await MainActor.run { self.model?.showPushed(body) }
+            await MainActor.run { self.show(response.notification.request.content) }
             return
         }
         switch response.actionIdentifier {
@@ -61,7 +88,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                 // Answered from the lock screen before the app's screen was up.
                 _ = await HannibalAPI(conn: conn).confirm(id: id, yes: yes)
             }
-        default: await MainActor.run { self.model?.showPushedConfirm(id: id, text: body) }   // opened: ask in the app
+        default: await MainActor.run { self.show(response.notification.request.content) }   // opened: ask in the app
         }
     }
 }

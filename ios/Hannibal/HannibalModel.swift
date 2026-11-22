@@ -205,14 +205,16 @@ final class HannibalModel {
     /// A reminder or the brief that came in as a notification while the app was closed.
     func showPushed(_ text: String) {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !t.isEmpty, lines.last?.text != t else { return }
+        guard !t.isEmpty, !lines.suffix(5).contains(where: { $0.kind == .notify && $0.text == t }) else { return }
         add(.notify, t)
+        pulses += 1
     }
 
     /// Fred tapped a Yes/No notification: ask again in the app (the server still waits ~2 min).
     func showPushedConfirm(id: String, text: String) {
         guard !lines.contains(where: { $0.confirmId == id }) else { return }
         lines.append(Line(kind: .confirm, text: Self.stripAsk(text), confirmId: id, expires: Date().addingTimeInterval(110)))
+        pulses += 1
         scheduleExpiry()
     }
 
@@ -274,7 +276,7 @@ final class HannibalModel {
             UINotificationFeedbackGenerator().notificationOccurred(.success)
             speaker.say(t)
         case "confirm":
-            guard let id = ev.id else { return }
+            guard let id = ev.id, !lines.contains(where: { $0.confirmId == id }) else { return }
             lines.append(Line(kind: .confirm, text: (ev.summary ?? "Shall I go ahead?"), confirmId: id, expires: Date().addingTimeInterval(120)))
             pulses += 1
             scheduleExpiry()
