@@ -24,6 +24,10 @@ Tailscale must be on on the iPhone, same as for the web app.
 
 ## Using it
 
+- **Live talk** (step 2): tap the orb, or the waveform button at the top. Then just talk:
+  he answers in his voice, and you can talk over him to interrupt. It keeps going with
+  the screen locked. Tap the orb or the red stop button to end it; it also sleeps after
+  3 quiet minutes. Echo cancellation keeps him from hearing himself.
 - **Hold the mic** and talk, let go to send. Slide up to cancel.
 - **Tap the orb** to stop him talking. Starting to talk also stops him.
 - Speaker icon: read every answer aloud, or only when you talked.
@@ -37,4 +41,6 @@ Tailscale must be on on the iPhone, same as for the web app.
   when the orb changes.
 - Auth: the link's key is kept in the Keychain and sent as the same
   `hannibal_k` cookie the web app uses.
-- Next steps: live interruptible voice, push notifications, Siri / Action Button.
+- Long answers are spoken sentence by sentence (the next one loads while one plays).
+- Live talk sends each sentence as a 16 kHz WAV to /api/voice; no server change.
+- Next steps: push notifications, Siri / Action Button.
