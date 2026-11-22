@@ -564,9 +564,11 @@ async function execute(plan, opts = {}) {
           else emit({ type: 'gate:remember-refused', ...base, decision: ans.remember, reason: res.reason }); // e.g. ceiling 'never'
         }
 
-        if (!ans.approved) {
-          emit({ type: 'step:skipped', ...base, reason: 'declined' });
-          record.push({ step: step.step, tool: step.tool, skipped: true, reason: 'declined' });
+        if (ans.approved !== true) {
+          // Not heard is not the same as no: Claude should ask again, not give up.
+          const reason = ans.answer === 'unheard' ? 'declined: no clear answer' : 'declined';
+          emit({ type: 'step:skipped', ...base, reason });
+          record.push({ step: step.step, tool: step.tool, skipped: true, reason });
           i += 1; continue; // decline is a clean skip, reads + remaining steps still run
         }
         emit({ type: 'step:confirmed', ...base });

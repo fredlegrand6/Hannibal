@@ -15,7 +15,7 @@ fakeSdk.APIError = class extends Error {};
 const origLoad = Module._load;
 Module._load = function (req, ...rest) { return req === '@anthropic-ai/sdk' ? fakeSdk : origLoad.call(this, req, ...rest); };
 
-const { createReminderTools, createBriefScheduler } = require('./proactive');
+const { createReminderTools, createBriefScheduler, createReminderFirer, registerProactive } = require('./proactive');
 const claudeTools = require('./claude-tools');
 const brain = require('./claude-brain');
 
@@ -123,17 +123,17 @@ async function test(name, fn) {
 
   console.log('Morning brief schedule');
   const at = (hhmm, day = '2026-11-18') => () => new Date(`${day}T${hhmm}:00`);
-  await test('nothing before 08:00 or after 12:00; one send inside the window', () => {
+  await test('nothing before 08:00; one send from 08:00 on, catch-up later that day', () => {
     const sent = [];
     let clock = at('07:59');
     const b = createBriefScheduler({ send: (j) => sent.push(j), statePath: tmp('st'), now: () => clock(), env: {} });
-    assert.strictEqual(b.tick(), 'outside-window');
+    assert.strictEqual(b.tick(), 'too-early');
     clock = at('08:00');
     assert.strictEqual(b.tick(), 'sent');
     assert.strictEqual(sent[0].kind, 'morning-brief');
     assert(/read-only/.test(sent[0].prompt));
-    clock = at('12:00');
-    assert.strictEqual(b.tick(), 'outside-window');
+    const late = createBriefScheduler({ send: () => {}, statePath: tmp('st'), now: at('18:30'), env: {} });
+    assert.strictEqual(late.tick(), 'sent', 'Mac was off at 08:00: still once that day');
   });
   await test('waits for the renderer; only a spoken brief marks the day done', () => {
     const sent = [];
@@ -143,7 +143,9 @@ async function test(name, fn) {
     b.tick();
     clock = at('08:06');
     assert.strictEqual(b.tick(), 'waiting');
-    b.done({ kind: 'morning-brief', day: '2026-11-18', ok: false });   // not quiet → retry
+    b.done({ kind: 'morning-brief', day: '2026-11-18', ok: false });   // not quiet → retry, after 15 min
+    assert.strictEqual(b.tick(), 'waiting');
+    clock = at('08:21');
     assert.strictEqual(b.tick(), 'sent');
     b.done({ kind: 'morning-brief', day: '2026-11-18', ok: true });
     assert.strictEqual(b.tick(), 'done-today');
@@ -184,19 +186,71 @@ async function test(name, fn) {
     assert(/mood: fine/.test(note.content));
   });
 
-  await test('morning brief: once a day, even across restarts', () => {
+  await test("Fred's brief rules: 08:00 local, once a day on disk, restarts and reloads never repeat it", () => {
     const statePath = tmp('brief');
-    const at = new Date('2026-11-22T09:00:00');
-    const mk = () => createBriefScheduler({ statePath, now: () => at, env: {}, send: () => sent++ });
+    const day = (t, d = '2026-11-22') => () => new Date(`${d}T${t}:00`);
     let sent = 0;
-    let b = mk(); assert.strictEqual(b.tick(), 'sent');
-    b = mk(); assert.strictEqual(b.tick(), 'sent', 'restart: one retry');
-    b = mk(); assert.strictEqual(b.tick(), 'gave-up-today', 'no third brief');
+    const mk = (clock) => createBriefScheduler({ statePath, now: clock, env: {}, send: () => sent++ });
+    // nothing before 08:00, even though Fred is up at 06:00
+    assert.strictEqual(mk(day('06:00')).tick(), 'too-early');
+    assert.strictEqual(mk(day('07:59')).tick(), 'too-early');
+    // 1. lastBrief = yesterday, start after 08:00 -> runs once (catch-up, even at 15:00)
+    fs.writeFileSync(statePath, JSON.stringify({ lastBrief: '2026-11-21' }));
+    let b = mk(day('15:00'));
+    assert.strictEqual(b.tick(), 'sent');
+    assert.strictEqual(b.tick(), 'waiting', 'no second copy while the page waits for a quiet moment');
+    b.done({ kind: 'morning-brief', day: '2026-11-22', started: true });
+    assert.strictEqual(JSON.parse(fs.readFileSync(statePath, 'utf8')).lastBrief, '2026-11-22', 'written to disk when he starts speaking');
+    // 2. restart -> no brief
+    assert.strictEqual(mk(day('15:05')).tick(), 'done-today');
+    // 3. renderer reload: the page asks nothing itself, and main stays done
+    b.done({ kind: 'morning-brief', day: '2026-11-22', ok: false });
+    assert.strictEqual(b.tick(), 'done-today');
+    // 4. next day 08:00 -> runs once
+    const next = mk(day('08:00', '2026-11-23'));
+    assert.strictEqual(next.tick(), 'sent');
+    next.done({ kind: 'morning-brief', day: '2026-11-23', started: true });
+    assert.strictEqual(mk(day('08:01', '2026-11-23')).tick(), 'done-today');
     assert.strictEqual(sent, 2);
-    const s2 = tmp('brief');
-    const c = createBriefScheduler({ statePath: s2, now: () => at, env: {}, send: () => {} });
-    c.tick(); c.done({ kind: 'morning-brief', day: c.state.briefTries.day, started: true });
-    assert.strictEqual(createBriefScheduler({ statePath: s2, now: () => at, env: {}, send: () => {} }).tick(), 'done-today', 'started counts');
+  });
+  await test('a restart before he started speaking does bring it (it was never heard)', () => {
+    const statePath = tmp('brief');
+    const clock = () => new Date('2026-11-22T09:00:00');
+    assert.strictEqual(createBriefScheduler({ statePath, now: clock, env: {}, send: () => {} }).tick(), 'sent');
+    assert.strictEqual(createBriefScheduler({ statePath, now: clock, env: {}, send: () => {} }).tick(), 'sent');
+  });
+  await test('only one scheduler per app run', () => {
+    const handlers = new Map();
+    const ipc = { handle: (ch, fn) => { if (handlers.has(ch)) throw new Error(`second handler for ${ch}`); handlers.set(ch, fn); } };
+    const quiet = console.warn; console.warn = () => {};
+    const opts = { getWindow: () => null, statePath: tmp('st'), remindersPath: tmp('rem'), notesPath: tmp('notes') };
+    try {
+      const one = registerProactive(ipc, opts);
+      const two = registerProactive(ipc, opts);
+      assert.strictEqual(one, two);
+      one.stop();
+    } finally { console.warn = quiet; }
+  });
+  await test('main fires due reminders itself: banner, page, phone, once, late ones marked', async () => {
+    let t = Date.parse('2026-11-18T07:00:00');
+    const file = tmp('fire');
+    const r = createReminderTools({ filePath: file, now: () => t });
+    r.add('check GEX131', '2026-11-18T08:00');
+    r.add('call Jay', '2026-11-22T10:00');
+    const banners = [], page = [], phone = [];
+    const fire = createReminderFirer({ reminders: r, now: () => t,
+      banner: (title, body) => banners.push(body), toRenderer: (ch, x) => page.push([ch, x.message]), onReminder: async (m) => { phone.push(m); return true; } });
+    assert.strictEqual(fire().length, 0, 'nothing due yet');
+    t = Date.parse('2026-11-22T09:00:00');
+    const quiet = console.log; console.log = () => {};
+    try { assert.strictEqual(fire().length, 1); assert.strictEqual(fire().length, 0, 'only once'); } finally { console.log = quiet; }
+    await new Promise((res) => setTimeout(res, 10));
+    assert(/check GEX131 \(this was due .*I missed it\)/.test(banners[0]), banners[0]);
+    assert.deepStrictEqual(page[0][0], 'reminders:due');
+    assert.strictEqual(phone.length, 1);
+    const rec = r.recent(200);
+    assert.strictEqual(rec.wentOff.length, 1, JSON.stringify(rec));
+    assert.strictEqual(rec.missed.length, 0);
   });
 
   console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ''}`);

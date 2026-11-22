@@ -100,6 +100,23 @@ function harness({ answer = true, invokeImpl } = {}) {
     assert.strictEqual(r.status, 'declined');
     assert(/did NOT approve/.test(r.content));
   });
+  await test('an unheard answer does NOT run, and Claude is told to ask again (not "declined")', async () => {
+    const h = harness({ answer: { approved: false, answer: 'unheard' } });
+    const r = await claudeTools.runTool('calendar__add', { title: 'Call John', start: '2026-11-23T14:00' }, h.opts);
+    assert.strictEqual(h.calls.invoke.length, 0, 'must not book without a yes');
+    assert.strictEqual(r.status, 'unheard');
+    assert(/not heard clearly/.test(r.content) && /did not say no/.test(r.content));
+  });
+  await test('only approved === true runs: a truthy non-yes object never books', async () => {
+    for (const answer of [{ approved: 'false' }, { approved: 1 }, { answer: 'yes' }, {}, null]) {
+      const h = harness({ answer });
+      await claudeTools.runTool('calendar__add', { title: 'Call John', start: '2026-11-23T14:00' }, h.opts);
+      assert.strictEqual(h.calls.invoke.length, 0, `ran on ${JSON.stringify(answer)}`);
+    }
+    const h = harness({ answer: { approved: true, answer: 'yes' } });
+    const r = await claudeTools.runTool('calendar__add', { title: 'Call John', start: '2026-11-23T14:00' }, h.opts);
+    assert.strictEqual(h.calls.invoke.length, 1); assert.strictEqual(r.status, 'ok');
+  });
   await test('a failing tool goes back to Claude once — no retries, no replans', async () => {
     const h = harness({ invokeImpl: () => { throw new Error('IMAP down'); } });
     const r = await claudeTools.runTool('mail__inbox', {}, h.opts);

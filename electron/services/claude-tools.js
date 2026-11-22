@@ -37,6 +37,9 @@ const EXCLUDED = new Set([
   'memory.store',
   'reminders.save', 'timers.save', 'notes.save',   // whole-list replaces: one wrong call wipes the list
   'whatsapp.debugUi',
+  // The robotic macOS voice: he reached for it when he thought his own voice
+  // was down (2026-11-22) and Fred heard a stranger. He only ever speaks as himself.
+  'mac.say',
 ]);
 // Renderer-side tools that DO have a main-side runner in the executor.
 const MAIN_SIDE_SHIMS = new Set(['memory.query', 'translate.text']);
@@ -192,6 +195,10 @@ async function runTool(apiName, input, opts = {}) {
 
   const rec = (res.record || []).find((r) => r.step === 1) || {};
   if (rec.ok) return { tool: name, status: 'ok', is_error: false, content: toolResultContent(rec.output) };
+  if (rec.skipped && /no clear answer/.test(rec.reason || '')) {
+    return { tool: name, status: 'unheard', is_error: false,
+      content: "Fred's answer to the yes/no question was not heard clearly (silence or noise), so it was NOT done. He did not say no. Tell him in one short line that you didn't catch his answer and ask whether to do it; if he then says yes, call this tool again." };
+  }
   if (rec.skipped && /declined|auto-denied|cancel-beat/.test(rec.reason || '')) {
     return { tool: name, status: 'declined', is_error: false,
       content: 'Fred did NOT approve this action, so it was not done. Do not retry it unless he asks again.' };

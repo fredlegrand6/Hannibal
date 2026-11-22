@@ -60,11 +60,14 @@ registerProactive(ipcMain, {
   // always-on server, it sends its own morning brief; desk reminders go via it.
   onBrief: (text) => { if (telegram) telegram.notify(`☀️ Morning brief\n\n${text}`, { voice: true }).catch(() => {}); },
   onNudgeDone: (r) => { const done = pendingNudges.get(r.id); if (done) { pendingNudges.delete(r.id); done(r.ok); } },
+  // Returns a promise so the reminder is marked delivered (or not) for reminders.recent.
   onReminder: (message) => {
     const text = `⏰ Reminder: ${message}`;
-    if (telegram) telegram.notify(text).catch(() => {});
-    else if (linked()) bodyLink.request('phone.notify', { text, voice: true }).catch((e) => console.warn('[body] reminder to phone failed:', e.message));
+    if (telegram) return telegram.notify(text).then(() => true);
+    if (linked()) return bodyLink.request('phone.notify', { text, voice: true }).then(() => true);
+    return undefined;   // no phone reachable: the banner and his voice still carry it
   },
+  banner: (title, body) => { const { Notification } = require('electron'); if (Notification.isSupported()) new Notification({ title, body }).show(); },
 });   // morning brief + reminders.add/cancel/upcoming
 
 // Saved facts: while linked, the server's copy is the master. A change made at
@@ -1011,8 +1014,19 @@ function makeIpcConfirmer(timeoutMs = 120000) {
     if (!target) { resolve(false); return; }
     const id = `cf_${step.step}_${Date.now()}`;
     const channel = `agent:confirm-response:${id}`;
-    const timer = setTimeout(() => { ipcMain.removeAllListeners(channel); resolve(false); }, timeoutMs);
-    ipcMain.once(channel, (_e, ok) => { clearTimeout(timer); resolve(!!ok); });
+    const timer = setTimeout(() => {
+      ipcMain.removeAllListeners(channel);
+      console.warn(`[gate] ${step.tool}: no answer in ${timeoutMs / 1000}s → not done`);
+      resolve({ approved: false, answer: 'unheard' });
+    }, timeoutMs);
+    // The renderer answers { approved, answer:'yes'|'no'|'unheard' } (or a bare
+    // boolean from older code). Only approved === true runs the action.
+    ipcMain.once(channel, (_e, ok) => {
+      clearTimeout(timer);
+      const ans = (ok && typeof ok === 'object') ? { approved: ok.approved === true, answer: ok.answer } : { approved: ok === true };
+      console.log(`[gate] ${step.tool}: ${ans.approved ? 'YES → running it' : `${ans.answer === 'unheard' ? 'no clear answer' : 'NO'} → not done`}`);
+      resolve(ans);
+    });
     target.webContents.send('agent:confirm-request', { id, step: step.step, tool: step.tool, summary });
   });
 }
