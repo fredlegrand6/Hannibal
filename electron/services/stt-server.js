@@ -10,9 +10,11 @@
 //     per sentence, loading the model from disk every time.
 //   • The best model on disk is used: large-v3-turbo when present (much better
 //     at "Hannibal", Dutch and French), otherwise the old small model.
-//   • No per-sentence Python VAD: Hannibal's live silero VAD already decided
-//     there was speech. Whisper's own non-speech suppression drops the
-//     "*Multiple people talking*" / "[BLANK_AUDIO]" style lines.
+//   • A quick loudness check drops (near) silent clips before Whisper, and
+//     Whisper's answer goes through stt-filter.js: its own scores, the phantom
+//     lines in stt-blocklist.txt, and a high/medium/low confidence that is sent
+//     back with the transcript. Whisper's non-speech suppression still drops
+//     the "*Multiple people talking*" / "[BLANK_AUDIO]" style lines.
 //   • The prompt (Hannibal and the names Fred says most) nudges Whisper to spell them right.
 //
 // Run: node electron/services/stt-server.js   (main.js starts it)
@@ -30,9 +32,13 @@ const ENGINE_PORT = Number(process.env.STT_ENGINE_PORT || 8767);
 const BIN = process.env.WHISPER_SERVER_BIN || '/opt/homebrew/bin/whisper-server';
 const FFMPEG = process.env.FFMPEG || '/opt/homebrew/bin/ffmpeg';
 const MODEL_DIR = '/Users/Shared/HoloAssistant/models/whisper';
-// The names Fred says most, so Whisper spells them right ("Mandy", not "Monday").
-// Kept short: a long prompt makes Whisper invent those words in a quiet clip.
-const PROMPT = process.env.HANNIBAL_STT_PROMPT || 'Hannibal, Mandy, Jay, Gaian, WhatsApp, Revalis.';
+// The names and commands Fred says most, so Whisper spells them right ("Mandy",
+// not "Monday"; "press play", not "pleasure day"). A long prompt used to make
+// Whisper invent these words in a quiet clip; now silent clips never reach it
+// (stt-filter.js), and a line that is only these words echoed back is dropped.
+const PROMPT = process.env.HANNIBAL_STT_PROMPT ||
+  'Hannibal, Fred, Mandy, Gaian, Jay, Robert, Jean-Marc, Revalis, Spotify, play, pause, volume, reminder, calendar, WhatsApp, Claude Code.';
+const filter = require('./stt-filter');
 const ALLOWED_LANGS = new Set(['auto', 'en', 'nl', 'fr', 'de', 'es', 'it', 'pt']);
 // The languages Fred speaks. On 'auto', Whisper may only pick one of these: a
 // guess outside them (Icelandic, Chinese, Korean... from an accent or a noisy
@@ -155,25 +161,37 @@ async function inference(wav, language, verbose) {
   return j;
 }
 
-async function transcribe(audio, language, hint) {
+// One clip → {text, confidence, dropped}. Silent clips stop before Whisper;
+// Whisper's answer then goes through stt-filter's judge (its own scores, the
+// phantom-line list). deps lets the tests run without ffmpeg or Whisper.
+async function transcribe(audio, language, hint, deps = {}) {
+  const toWav = deps.toWav || toWav16k;
+  const infer = deps.inference || inference;
+  const drop = deps.logDrop || filter.logDrop;
   const t0 = Date.now();
-  const wav = await toWav16k(audio);
+  const wav = await toWav(audio);
   if (wav.length < 16000 + 22400) return { text: '', ms: Date.now() - t0 };     // < ~0.5 s of audio
-  if (!speakerOk(wav)) { log('speaker rejected (not Fred)'); return { text: '', ms: Date.now() - t0 }; }
-  if (!(await waitEngine())) throw new Error('speech engine not ready');
+  const heard = filter.audioVerdict(wav);
+  if (!heard.keep) { drop({ reason: 'silence', detail: heard.detail }); return { text: '', ms: Date.now() - t0, dropped: 'silence' }; }
+  if (!deps.inference && !speakerOk(wav)) { log('speaker rejected (not Fred)'); return { text: '', ms: Date.now() - t0 }; }
+  if (!deps.inference && !(await waitEngine())) throw new Error('speech engine not ready');
+  let j; let used = language;
   if (language !== 'auto') {
-    const j = await inference(wav, language, false);
-    return { text: cleanTranscript(j.text), ms: Date.now() - t0, language };
+    j = await infer(wav, language, true);
+  } else {
+    const allowed = FRED_LANGS();
+    j = await infer(wav, 'auto', true);
+    const detected = j.detected_language || j.language;
+    const redo = allowed.length ? pickLanguage(detected, j.language_probabilities, allowed, hint) : null;
+    if (redo) {
+      log(`heard as "${detected}", not one of Fred's languages: redoing in ${redo}`);
+      j = await infer(wav, redo, true);
+    }
+    used = redo || detected || 'auto';
   }
-  const allowed = FRED_LANGS();
-  let j = await inference(wav, 'auto', true);
-  const detected = j.detected_language || j.language;
-  const redo = allowed.length ? pickLanguage(detected, j.language_probabilities, allowed, hint) : null;
-  if (redo) {
-    log(`heard as "${detected}", not one of Fred's languages: redoing in ${redo}`);
-    j = await inference(wav, redo, false);
-  }
-  return { text: cleanTranscript(j.text), ms: Date.now() - t0, language: redo || detected || 'auto' };
+  const v = filter.judge(j, { clean: cleanTranscript, prompt: PROMPT });
+  for (const d of v.dropped) drop(d);
+  return { text: v.text, confidence: v.confidence, ms: Date.now() - t0, language: used, dropped: !v.text && v.dropped.length ? v.dropped[0].reason : undefined };
 }
 
 function createServer() {
@@ -193,9 +211,9 @@ function createServer() {
     req.on('data', (c) => chunks.push(c));
     req.on('end', async () => {
       try {
-        const { text, ms, language: used } = await transcribe(Buffer.concat(chunks), language, hint);
-        log(`✅ Transcript (${ms} ms, ${used || language}): "${text}"`);
-        send(200, { success: true, transcript: text });
+        const { text, ms, language: used, confidence, dropped } = await transcribe(Buffer.concat(chunks), language, hint);
+        log(`✅ Transcript (${ms} ms, ${used || language}, ${confidence || dropped || 'empty'}): "${text}"`);
+        send(200, { success: true, transcript: text, confidence: confidence || null, dropped: dropped || null });
       } catch (e) {
         log('❌', e.message);
         send(500, { success: false, error: e.message });
@@ -212,4 +230,4 @@ if (require.main === module) {
   process.stdout.on('error', () => {}); process.stderr.on('error', () => {});
 }
 
-module.exports = { pickModel, cleanTranscript, pickLanguage };
+module.exports = { pickModel, cleanTranscript, pickLanguage, transcribe, PROMPT };

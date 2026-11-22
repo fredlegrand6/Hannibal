@@ -27,7 +27,16 @@ const SYSTEM_PROMPT =
   "You are Hannibal, Fred's personal AI assistant. Be concise, direct, and " +
   "natural — you're spoken aloud, so keep replies short and conversational. " +
   "You have long-term memory — if relevant memories are provided below, use them " +
-  "naturally without mentioning the memory system.";
+  "naturally without mentioning the memory system. " +
+  // Ask, don't guess: Fred talks by voice and speech-to-text mishears.
+  "Fred talks to you by voice and the speech-to-text sometimes mishears or invents words; " +
+  "each turn's notes say how sure it was (high, medium or low). If it was low, or the line " +
+  "makes no sense in context, say what you heard and ask once, briefly, e.g. \"I heard " +
+  "'pleasure day', did you mean press play?\" For a harmless media command (play, pause, " +
+  "volume up or down, next) you may just do it, but say what you understood. Never read a " +
+  "mood or feeling into a short, garbled or unsure fragment: ask a neutral question first. " +
+  "Never send, delete, book or change anything from an unsure line without first saying " +
+  "back what you understood.";
 
 // ── Qdrant vector memory ────────────────────────────────────────────────────
 // GEX131 runs Qdrant with the hannibal_memory collection (768-dim, nomic-embed-text).
@@ -382,6 +391,9 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   let vadTurnActive = false;     // a listening turn is recording and should honor VAD events
   let vadHeardThisTurn = false;  // silero confirmed speech began during this turn
   let levelHeardThisTurn = false;   // same, from the level detector (no silero)
+  let turnConfidence = null;        // how sure the ears were about the current turn (high/medium/low, null = typed/unknown)
+  let lastHeard = null;             // { text, confidence, at } of Fred's last spoken turn, for the write gate
+  let turnPrev = { heard: null, task: null };   // the line and task before this turn
   let lastHeardAnyAt = 0;           // last time ANY speech was transcribed (to Hannibal or not)
   let nudgeQuiet = false;           // "stay quiet" / "we're busy": no nudges until Fred speaks to him again
   // Fred is mid-sentence right now (the mic latched real speech this turn).
@@ -729,10 +741,11 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   // ISO codes (the heuristic emits 'dutch'/'french'/'english').
   const LANG_CODE = { dutch: 'nl', french: 'fr', english: 'en', spanish: 'es' };
   const sttCode = () => (cfg.sttLanguage === 'follow' ? (LANG_CODE[currentLanguage] || 'en') : (cfg.sttLanguage || 'auto'));
-  async function transcribeAndRespond(blob, heardText = null) {
+  async function transcribeAndRespond(blob, heardText = null, heardConfidence = null) {
     if (confirmInFlight) return;   // gate is active — this audio is not for chat
     setPhase('thinking');
     let transcript = heardText || '';
+    let confidence = heardConfidence;
     // The big Whisper model detects the language itself ('auto'), so switching to
     // Dutch or French just works; HANNIBAL_STT_LANG=en|nl|fr pins one.
     const code = cfg.sttLanguage === 'follow' ? (LANG_CODE[currentLanguage] || 'en') : (cfg.sttLanguage || 'auto');
@@ -740,6 +753,7 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
       const r = await fetch(`${cfg.whisperUrl}/transcribe?language=${code}&hint=${LANG_CODE[currentLanguage] || 'en'}`, { method: 'POST', body: blob });
       const j = await r.json();
       transcript = ((j && j.transcript) || '').trim();
+      confidence = (j && j.confidence) || null;
     } catch (e) {
       console.warn('[voice] whisper failed', e);
     }
@@ -775,7 +789,10 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
       nudgeQuiet = false;
       console.warn('[nudge] quiet mode off: Fred is talking to me again');
     }
-    console.log('[voice] heard' + (continuousListen ? ' (always-listen, no wake word)' : '') + ':', JSON.stringify(transcript));
+    turnConfidence = confidence;
+    turnPrev = { heard: lastHeard, task: lastTaskType };   // what came before, for the brain's note
+    lastHeard = { text: transcript, confidence, at: Date.now() };
+    console.log('[voice] heard' + (continuousListen ? ' (always-listen, no wake word)' : '') + (confidence ? ` [${confidence}]` : '') + ':', JSON.stringify(transcript));
     emitUser(transcript);
     // Capture teach-mode state BEFORE handleCommand — if a teach step
     // consumes this utterance, we don't want to log "terminal" or a raw
@@ -930,7 +947,8 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     // Cheap heuristic — runs on every utterance so the system prompt has the
     // freshest read on Fred's mood when downstream LLM calls fire. Saved to
     // disk on transition (no-op writes for stable neutral state).
-    updateMood(transcript);
+    // ...but never from a garbled, unsure or tiny line ("Mm", "No, there's no way").
+    if (!window.SttGuard || window.SttGuard.shouldReadMood(transcript, turnConfidence)) updateMood(transcript);
     // Same idea for language — detect on every utterance so ctxPreamble can
     // tell the LLM which language to reply in. No disk persistence: language
     // is a per-utterance signal, not a learned preference.
@@ -973,6 +991,19 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     }
 
     const cmd = parseCommand(transcript);
+    // Unsure ears: a harmless command runs but says what it understood; any
+    // other command waits for Fred to say it again (src/stt-guard.js).
+    if (cmd && window.SttGuard && turnConfidence === 'low') {
+      const plan = window.SttGuard.commandPlan(cmd, transcript, turnConfidence);
+      console.warn(`[stt] unsure command ${cmd.action || cmd.kind}: ${plan.run ? 'running, saying what I heard' : 'not running, asking again'}`);
+      if (!plan.run) {
+        emitModel('system');
+        await speakLine(plan.say);
+        startListening({ conversation: true });
+        return true;
+      }
+      cmd.reply = plan.reply;
+    }
     if (!cmd) {
       // No instant command matched — classify: computer-control task or pure chat?
       const intent = classifyIntent(transcript);
@@ -2148,14 +2179,16 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
       w.reset();
       if (bargeBusy >= 2) return;
       bargeBusy++;
-      let heard = '';
+      let heard = ''; let heardConf = null;
       try {
         const clip = useVio ? await window.hannibal.vioClip(clipMs) : tapClip;
         if (clip && clip.length > 44) {
           // Short clips: Whisper's language guess goes wild, so use the conversation's language.
           const lang = cfg.sttLanguage && cfg.sttLanguage !== 'auto' && cfg.sttLanguage !== 'follow' ? cfg.sttLanguage : (LANG_CODE[currentLanguage] || 'en');
           const r = await fetch(`${cfg.whisperUrl}/transcribe?language=${lang}`, { method: 'POST', body: new Blob([clip], { type: 'audio/wav' }) });
-          heard = (((await r.json()) || {}).transcript || '').trim();
+          const bj = (await r.json()) || {};
+          heard = (bj.transcript || '').trim();
+          heardConf = bj.confidence || null;
         }
       } catch (e) { console.warn('[barge] whisper failed', e && e.message); }
       finally { bargeBusy--; }
@@ -2170,7 +2203,7 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
         // Drop any of his own echo before "Hannibal, ...".
         const m = window.NameGate && d.why === 'name' ? heard.match(window.NameGate.NAME) : null;
         const ask = m ? heard.slice(m.index) : heard;
-        transcribeAndRespond(null, fixTranscript(ask)).catch((e) => console.warn('[barge] turn failed', e));
+        transcribeAndRespond(null, fixTranscript(ask), heardConf).catch((e) => console.warn('[barge] turn failed', e));
       }
     };
     if (useVio) vioFeed = onFrame;
@@ -2404,6 +2437,15 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     emitModel(cfg.claudeEnabled ? cfg.claudeModel : model);
     console.log(`[voice] model=${cfg.claudeEnabled ? cfg.claudeModel + ' (fallback ' + model + ')' : model} (${classifyTurn(transcript)}) for: ${transcript.slice(0, 60)}`);
 
+    // How sure the ears were (and, if unsure, what exactly was heard) for the brain.
+    const confidence = turnConfidence;
+    const sttNote = window.SttGuard ? window.SttGuard.brainNote({
+      text: transcript, confidence,
+      prevLine: turnPrev.heard && Date.now() - turnPrev.heard.at < 5 * 60000 ? turnPrev.heard.text : '',
+      lastTask: turnPrev.task && turnPrev.task !== 'chat' ? turnPrev.task : '',
+    }) : '';
+    if (sttNote && confidence !== 'high') console.warn('[stt] brain note:', sttNote.trim());
+
     // Pull relevant long-term memories (best-effort) and inject as system context.
     let memoryContext = '';
     if (qdrantReady) {
@@ -2419,14 +2461,14 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     }
 
     const messages = [
-      { role: 'system', content: ctxPreamble() + SYSTEM_PROMPT + memoryContext },
+      { role: 'system', content: ctxPreamble() + SYSTEM_PROMPT + memoryContext + sttNote },
       { role: 'user', content: transcript },
     ];
     // For Claude the persona stays fixed (cacheable) and this turn's context +
     // memories travel as a separate note; main keeps the running conversation.
     const claude = {
       system: SYSTEM_PROMPT + ' Notes about the current situation and any relevant memories arrive as system messages during the conversation.',
-      context: ctxPreamble() + memoryContext,
+      context: ctxPreamble() + memoryContext + sttNote,
       user: transcript,
     };
     const reply = await streamChatAndSpeak({ model, messages, claude,
@@ -2441,7 +2483,8 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     if (bargeCount !== barges) return;         // Fred cut in: his new turn is already running
 
     // Store the exchange — fire-and-forget so it never delays the next turn.
-    if (qdrantReady && reply && reply.trim()) {
+    // (not when the ears were unsure: a misheard line must not become a memory)
+    if (qdrantReady && reply && reply.trim() && (!window.SttGuard || window.SttGuard.shouldRemember(confidence))) {
       const exchange = `Fred said: ${transcript}\nHannibal replied: ${reply}`;
       storeMemory(exchange, cfg.ollamaUrl, { type: 'conversation' }).catch(() => {});
     }
@@ -3328,9 +3371,11 @@ RULES:
           (v) => finalize(v, 'click'),
         )) || null;
       } catch (_) {}
-      // 2) speak the summary
+      // 2) speak the summary — after saying back what he heard, if that line was unsure
       emitModel('system');
-      try { await speakLine(req.summary); } catch (_) {}
+      const echo = window.SttGuard ? window.SttGuard.writeEcho(lastHeard) : '';
+      if (echo) console.warn('[stt] unsure line before a write, stating it back:', echo);
+      try { await speakLine(echo ? `${echo} ${req.summary}` : req.summary); } catch (_) {}
       // 3) take a spoken answer. Capture starts only AFTER the TTS finishes (so we
       //    don't record Hannibal's own voice tail, which VAD discards as noise),
       //    with a short settle lead-in. If the mic/VAD hands back nothing clean,
@@ -4887,7 +4932,7 @@ function parseCommand(text) {
   if (vis) return { ...vis, prompt: text.trim() };
 
   // Instant media controls — nobody wants LLM latency to pause a song.
-  if (/^(play|resume)( music| spotify)?$/.test(t)) return { kind: 'mac', action: 'spotify-play', reply: 'Playing.' };
+  if (/^(play|resume|press play)( music| spotify)?$/.test(t)) return { kind: 'mac', action: 'spotify-play', reply: 'Playing.' };
   if (/^(pause|stop)( music| spotify)?$/.test(t)) return { kind: 'mac', action: 'spotify-pause', reply: 'Paused.' };
   if (/^(next|skip)( track| song)?$/.test(t)) return { kind: 'mac', action: 'spotify-next', reply: 'Skipping.' };
   if (/^mute$/.test(t)) return { kind: 'mac', action: 'volume-mute', reply: 'Muted.' };

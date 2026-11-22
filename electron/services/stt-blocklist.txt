@@ -1,0 +1,14 @@
+# Lines Whisper makes up from silence or noise. One per line, any case.
+# A plain line: a sentence that (nearly) matches it is dropped, and a
+#   phrase of 3+ words is also cut out of a longer line.
+# A line starting with ^: any sentence that STARTS with it is dropped.
+# Lines starting with # are notes. Add new ones at the bottom.
+this is a production of wgbh
+thanks for watching
+thank you for watching
+please subscribe
+^subtitles by
+^amara.org
+^ondertiteling
+^sous-titres
+^copyright
