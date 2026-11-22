@@ -89,7 +89,7 @@ const { createThreadStore, registerThreads } = require(path.join(SERVICES, 'thre
 const threads = createThreadStore({
   filePath: path.join(CFG.dataDir, 'threads.json'),
   embed: (t) => memory.embed(t),
-  onChange: (all) => { if (hub) hub.notify('threads', { threads: all }); },
+  onChange: (all, gone) => { if (hub) hub.notify('threads', { threads: all, gone }); },
 });
 registerThreads(ipc, threads);
 claudeBrain.setThreads(threads);
@@ -304,7 +304,7 @@ if (process.env.BODY_LINK_TOKEN) {
         },
         'journal.add': ({ episodes } = {}) => { journal.merge(episodes); return { ok: true }; },
         // Threads: by id, the newer update wins; the desk gets them all back.
-        'threads.sync': ({ threads: list } = {}) => { const n = threads.merge(list); if (n) console.log(`[body] threads: ${n} from the desk`); return { threads: threads.all() }; },
+        'threads.sync': ({ threads: list, gone } = {}) => { const n = threads.merge(list, gone); if (n) console.log(`[body] threads: ${n} from the desk`); return { threads: threads.all(), gone: threads.gone() }; },
         // Nudges: which ones were already said, on either side.
         'nudge.said': ({ keys } = {}) => ({ added: nudger.markSaid(keys) }),
         'nudge.sync': ({ keys } = {}) => { nudger.markSaid(keys); return { keys: nudger.said() }; },

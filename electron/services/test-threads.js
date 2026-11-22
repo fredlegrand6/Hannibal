@@ -149,6 +149,45 @@ const handlers = (store) => { const h = {}; registerThreads({ handle: (ch, fn) =
     assert.strictEqual((await a.find('ibiza flight')).threads[0].status, 'done', 'still searchable');
   });
 
+  await t("Fred's closure holds even after a later note without the word done (Codex)", async () => {
+    const st = createThreadStore({ filePath: file(), embed, now: () => clock, log: quiet });
+    const { thread } = await st.upsert({ title: 'Reminders fire on time', status: 'open' });
+    await st.upsert({ id: thread.id, status: 'done', note: 'fixed', source: 'fred' });
+    await st.upsert({ id: thread.id, status: 'done', note: 'PR #44 merged', source: 'fred' });
+    await st.upsert({ id: thread.id, status: 'open', note: 'test again?', source: 'hannibal' });
+    assert.strictEqual(st.all()[0].status, 'done');
+    await st.upsert({ id: thread.id, status: 'open', note: 'broke again', source: 'fred' });
+    assert.strictEqual(st.all()[0].status, 'open', 'Fred can reopen it');
+  });
+
+  await t('a new snooze date or a new "waiting on" is saved and survives a restart (Codex)', async () => {
+    const f2 = file();
+    const st = createThreadStore({ filePath: f2, embed, now: () => clock, log: quiet });
+    const { thread } = await st.upsert({ title: 'Call the notary', status: 'snoozed', until: '2026-11-30' });
+    const r = await st.upsert({ id: thread.id, status: 'snoozed', until: '2026-12-15', source: 'fred' });
+    assert.ok(r.changed);
+    await st.upsert({ title: 'HTS contract', status: 'waiting_on', waiting_on: 'Jean-Marc' });
+    const h = st.all().find((x) => x.title === 'HTS contract');
+    assert.ok((await st.upsert({ id: h.id, status: 'waiting_on', waiting_on: 'Robert', source: 'fred' })).changed);
+    const again = createThreadStore({ filePath: f2, embed, now: () => clock, log: quiet });
+    assert.strictEqual(again.all().find((x) => x.id === thread.id).until, '2026-12-15');
+    assert.strictEqual(again.all().find((x) => x.id === h.id).waitingOn, 'Robert');
+  });
+
+  await t('a thread merged away on one side stays gone after syncing (Codex)', async () => {
+    const desk = createThreadStore({ filePath: file(), embed, now: () => clock, log: quiet });
+    const server = createThreadStore({ filePath: file(), embed, now: () => clock, log: quiet });
+    const a = (await desk.upsert({ title: 'Nudges wait for a gap', status: 'open' })).thread;
+    const b = (await desk.upsert({ title: 'Stop interrupting with proactive remarks', status: 'open' })).thread;
+    server.merge(desk.all(), desk.gone());
+    await desk.upsert({ id: b.id, merge_into: a.id });
+    // the server still has both; a sync must not bring b back to the desk
+    desk.merge(server.all(), server.gone());
+    assert.deepStrictEqual(desk.all().map((x) => x.id), [a.id]);
+    server.merge(desk.all(), desk.gone());
+    assert.deepStrictEqual(server.all().map((x) => x.id), [a.id], 'and the server drops it too');
+  });
+
   await t('works by words when embeddings are down', async () => {
     const st = createThreadStore({ filePath: file(), embed: async () => null, now: () => clock, log: quiet });
     await st.upsert({ title: 'Morning brief once a day', status: 'open' });

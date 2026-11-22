@@ -131,8 +131,8 @@ const deskThreads = createThreadStore({
     if (threadsUpTimer) clearTimeout(threadsUpTimer);
     threadsUpTimer = setTimeout(() => {
       if (!linked()) return;
-      bodyLink.request('threads.sync', { threads: deskThreads.all() })
-        .then((r) => deskThreads.merge(r && r.threads)).catch((e) => console.warn('[body] threads.sync failed:', e.message));
+      bodyLink.request('threads.sync', { threads: deskThreads.all(), gone: deskThreads.gone() })
+        .then((r) => deskThreads.merge(r && r.threads, r && r.gone)).catch((e) => console.warn('[body] threads.sync failed:', e.message));
     }, 3000);
   },
 });
@@ -1279,15 +1279,15 @@ function startBodyLink() {
         if (ns && ns.keys) nudger.markSaid(ns.keys);
         const j = await bodyLink.request('journal.sync', { episodes: deskJournal.all() });
         const got = deskJournal.merge(j && j.episodes);
-        const th = await bodyLink.request('threads.sync', { threads: deskThreads.all() }).catch(() => null);
-        if (th && th.threads) deskThreads.merge(th.threads);
+        const th = await bodyLink.request('threads.sync', { threads: deskThreads.all(), gone: deskThreads.gone() }).catch(() => null);
+        if (th && th.threads) deskThreads.merge(th.threads, th.gone);
         console.log(`[body] diary in sync with the server (${deskJournal.size} conversations${got ? `, ${got} new from the phone` : ''})`);
       } catch (e) { console.warn('[body] setup after link failed:', e.message); }
     })
     .on('event', (name, data) => {
       if (name === 'facts') applyServerFacts(data && data.facts);
       if (name === 'journal') deskJournal.merge(data && data.episodes);
-      if (name === 'threads') deskThreads.merge(data && data.threads);
+      if (name === 'threads') deskThreads.merge(data && data.threads, data && data.gone);
     })
     .on('close', () => { if (wasLinked) console.warn('[body] link to the server dropped, reconnecting'); wasLinked = false; })
     .on('error', () => {});   // routine connect errors while offline; the reconnect loop handles them

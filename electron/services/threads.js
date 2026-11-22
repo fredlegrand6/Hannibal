@@ -90,6 +90,7 @@ function cleanThread(t) {
     createdAt: Number(t.createdAt) || Date.parse(t.createdAt) || at,
     updatedAt: at,
     lastMentionedAt: Number(t.lastMentionedAt) || 0,
+    closedBy: t.closedBy === 'fred' ? 'fred' : '',   // Fred closed it himself: only Fred reopens it
     history: (Array.isArray(t.history) ? t.history : []).filter((h) => h && h.event)
       .map((h) => ({ when: Number(h.when) || Date.parse(h.when) || at, event: clip(h.event, 300), source: clip(h.source || 'hannibal', 30) }))
       .slice(-MAX_HISTORY),
@@ -119,6 +120,7 @@ function createThreadStore({ filePath, now = () => Date.now(), embed = null, onC
   const vecFile = file.replace(/\.json$/, '') + '.vectors.json';
   let threads = [];
   let events = [];          // [{ when, text, source }] waiting for the next pass
+  let gone = {};            // id -> { into, at }: merged away; the other side must not bring it back
   let vectors = {};         // key (id|title) -> vector
   let vecDirty = false;
   let existed = false;
@@ -128,8 +130,9 @@ function createThreadStore({ filePath, now = () => Date.now(), embed = null, onC
       const j = JSON.parse(fs.readFileSync(file, 'utf8'));
       threads = (Array.isArray(j.threads) ? j.threads : []).map(cleanThread).filter(Boolean);
       events = Array.isArray(j.events) ? j.events.slice(-MAX_EVENTS) : [];
+      gone = (j.gone && typeof j.gone === 'object') ? j.gone : {};
       existed = true;
-    } catch (_) { threads = []; events = []; existed = false; }
+    } catch (_) { threads = []; events = []; gone = {}; existed = false; }
     try { vectors = JSON.parse(fs.readFileSync(vecFile, 'utf8')) || {}; } catch (_) { vectors = {}; }
   }
   function save(changed = true) {
@@ -137,11 +140,13 @@ function createThreadStore({ filePath, now = () => Date.now(), embed = null, onC
       fs.mkdirSync(path.dirname(file), { recursive: true });
       if (threads.length > MAX_THREADS) threads = threads.sort((a, b) => a.updatedAt - b.updatedAt).slice(-MAX_THREADS);
       const tmp = `${file}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify({ version: 1, threads, events }, null, 1));
+      const cut = now() - 90 * DAY;
+      for (const [id, g] of Object.entries(gone)) if (!g || g.at < cut) delete gone[id];
+      fs.writeFileSync(tmp, JSON.stringify({ version: 1, threads, events, gone }, null, 1));
       fs.renameSync(tmp, file);
       existed = true;
     } catch (e) { console.warn('[threads] save failed:', e.message); }
-    if (changed) { try { onChange && onChange(threads.map((t) => ({ ...t }))); } catch (_) {} }
+    if (changed) { try { onChange && onChange(threads.map((t) => ({ ...t })), { ...gone }); } catch (_) {} }
   }
   function saveVectors() {
     if (!vecDirty) return;
@@ -196,11 +201,12 @@ function createThreadStore({ filePath, now = () => Date.now(), embed = null, onC
   function applyTo(t, u) {
     const status = normStatus(u.status);
     const src = u.source || 'hannibal';
-    const lastFred = [...t.history].reverse().find((h) => h.source === 'fred');
-    if (status && status !== t.status && CLOSED.has(t.status) && src !== 'fred' && lastFred && /done|dropped/.test(lastFred.event) && !CLOSED.has(status)) {
+    if (status && !CLOSED.has(status) && CLOSED.has(t.status) && t.closedBy === 'fred' && src !== 'fred') {
       return false;   // Fred closed it himself; only Fred reopens it
     }
     let changed = false;
+    if (status && CLOSED.has(status) && src === 'fred' && t.closedBy !== 'fred') { t.closedBy = 'fred'; changed = true; }
+    if (status && !CLOSED.has(status) && src === 'fred' && t.closedBy) { t.closedBy = ''; changed = true; }
     if (status && status !== t.status) {
       t.status = status; changed = true;
       push(t, `${STATUS_WORDS[status]}${u.note ? `: ${u.note}` : ''}`, src);
@@ -208,8 +214,14 @@ function createThreadStore({ filePath, now = () => Date.now(), embed = null, onC
       push(t, u.note, src); changed = true;
     }
     if (u.note) t.statusNote = clip(u.note, 300);
-    if (u.waiting_on !== undefined || u.waitingOn !== undefined) t.waitingOn = clip(u.waiting_on || u.waitingOn, 80);
-    if (u.until !== undefined) t.until = u.until ? String(u.until).slice(0, 25) : '';
+    if (u.waiting_on !== undefined || u.waitingOn !== undefined) {
+      const w = clip(u.waiting_on || u.waitingOn, 80);
+      if (w !== t.waitingOn) { if (w) push(t, `waiting on ${w}`, src); t.waitingOn = w; changed = true; }
+    }
+    if (u.until !== undefined) {
+      const until = u.until ? String(u.until).slice(0, 25) : '';
+      if (until !== t.until) { if (until) push(t, `until ${until}`, src); t.until = until; changed = true; }
+    }
     for (const k of ['people', 'projects']) {
       const add = (Array.isArray(u[k]) ? u[k] : []).map((x) => clip(x, 60)).filter(Boolean);
       const merged = [...new Set([...t[k], ...add])].slice(0, 12);
@@ -241,6 +253,7 @@ function createThreadStore({ filePath, now = () => Date.now(), embed = null, onC
       t = cleanThread({ id: byId(idFor(u.title)) ? `t-${now().toString(36)}${Math.random().toString(36).slice(2, 5)}` : idFor(u.title),
         title: u.title, people: u.people, projects: u.projects, status: normStatus(u.status) || 'open', statusNote: u.note,
         waitingOn: u.waiting_on || u.waitingOn, until: u.until, createdAt: now(), updatedAt: now(),
+        closedBy: (u.source === 'fred' && CLOSED.has(normStatus(u.status))) ? 'fred' : '',
         history: [{ when: now(), event: `${STATUS_WORDS[normStatus(u.status) || 'open']}${u.note ? `: ${u.note}` : ''}`, source: u.source || 'hannibal' }] });
       threads.push(t);
       save();
@@ -254,6 +267,7 @@ function createThreadStore({ filePath, now = () => Date.now(), embed = null, onC
       keep.projects = [...new Set([...keep.projects, ...t.projects])].slice(0, 12);
       push(keep, `merged with "${t.title}"`, 'hannibal');
       threads = threads.filter((x) => x !== t);
+      gone[t.id] = { into: keep.id, at: now() };
       save();
       log(`merged "${t.title}" into "${keep.title}"`);
       return { ok: true, merged: true, thread: { ...keep } };
@@ -349,12 +363,20 @@ function createThreadStore({ filePath, now = () => Date.now(), embed = null, onC
     return hit ? { ...hit.t } : null;
   }
 
-  // Other side's threads: by id, the newer update wins.
-  function merge(list) {
+  // Other side's threads: by id, the newer update wins. `theirGone`: threads
+  // they merged away (a thread merged away on either side stays gone).
+  function merge(list, theirGone = {}) {
     let n = 0;
+    for (const [id, g] of Object.entries(theirGone && typeof theirGone === 'object' ? theirGone : {})) {
+      if (!g || gone[id]) continue;
+      gone[id] = { into: g.into, at: Number(g.at) || now() };
+      const before = threads.length;
+      threads = threads.filter((x) => x.id !== id);
+      n += before - threads.length || 1;
+    }
     for (const raw of Array.isArray(list) ? list : []) {
       const t = cleanThread(raw);
-      if (!t) continue;
+      if (!t || gone[t.id]) continue;
       const have = byId(t.id);
       if (!have) { threads.push(t); n += 1; }
       else if (t.updatedAt > have.updatedAt) { Object.assign(have, t); n += 1; }
@@ -366,7 +388,7 @@ function createThreadStore({ filePath, now = () => Date.now(), embed = null, onC
   load();
   return {
     upsert, observe, reconcile, renderForPrompt, relevant, renderRelevant, find, isClosedTopic, merge, match,
-    all: () => threads.map((t) => ({ ...t })), get existed() { return existed; }, get size() { return threads.length; }, file,
+    all: () => threads.map((t) => ({ ...t })), gone: () => ({ ...gone }), get existed() { return existed; }, get size() { return threads.length; }, file,
   };
 }
 
