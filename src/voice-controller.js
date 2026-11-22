@@ -128,7 +128,8 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     decode: (ab) => audioOut.current().decodeAudioData(ab),
     playVio: vioPlayOnce,
     useVio: () => vio,                         // checked per sentence: once the helper is off, the page plays
-    playPage: async (audioBuf) => playWithAmplitude(await audioOut.ensure(), audioBuf),
+    prepare: () => audioOut.ensure(),           // checked for a stop right after it resolves
+    playPage: (audioBuf, ctx) => playWithAmplitude(ctx, audioBuf),
     recover: async (why) => { audioOut.rebuild(why); await audioOut.ensure(); },
     onDrop: reportDrop,
   });
@@ -2352,6 +2353,8 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
         next: () => speakQueue.shift(),
         more: () => !streamEnded,
         isCurrent: () => seq === turnSeq,
+        generation: () => speaker.generation,   // a stop ends this queue …
+        clear: () => { if (seq === turnSeq) speakQueue.length = 0; },   // … and drops what waited behind it
         speak: async (item) => {
           playingOne = true;
           try { return await speakOne(item.text, item.audio, seq); }
