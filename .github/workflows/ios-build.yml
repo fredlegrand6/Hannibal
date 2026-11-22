@@ -1,0 +1,24 @@
+# Checks that the native iPhone app (ios/) still compiles. Runs only when
+# ios/ or the orb changes. Builds for the simulator, so no signing is needed;
+# installing on Fred's iPhone is still done from Xcode on his Mac.
+name: iOS app builds
+on:
+  push:
+    paths: ['ios/**', 'server/phone/orb.js', '.github/workflows/ios-build.yml']
+  pull_request:
+    paths: ['ios/**', 'server/phone/orb.js', '.github/workflows/ios-build.yml']
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Orb copy matches the web app's orb
+        run: cmp server/phone/orb.js ios/Hannibal/orb.js || { echo "Copy server/phone/orb.js to ios/Hannibal/orb.js"; exit 1; }
+      - name: Show Xcode
+        run: xcodebuild -version
+      - name: Build for the simulator
+        run: |
+          xcodebuild -project ios/Hannibal.xcodeproj -target Hannibal -configuration Debug \
+            -sdk iphonesimulator CODE_SIGNING_ALLOWED=NO build | tail -60
+          test ${PIPESTATUS[0]} -eq 0
