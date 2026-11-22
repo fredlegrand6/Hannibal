@@ -222,6 +222,7 @@
         } finally { if (current === h) current = null; }
       }
       drop(lastErr.stage || 'play', lastErr, false);
+      await recover('a sentence was skipped');   // the next sentence starts on a fresh output
       return { dropped: lastErr.stage || 'play' };
     }
 

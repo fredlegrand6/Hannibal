@@ -132,6 +132,19 @@ setShim('memory.query', async ({ text, limit = 3 } = {}) =>
 // Old memories saved cut off mid-sentence: trim them once, shortly after start.
 setTimeout(() => { memory.repairCutReplies().catch(() => {}); }, 60 * 1000).unref();
 
+// Voice dropouts (services/voice-drops.js): the phone's land here; "did your
+// voice drop out today?" puts these together with the Mac's when it is linked.
+const { speakToMp3 } = require(path.join(SERVICES, 'fast-tts'));
+const { createVoiceDropLog, merge: mergeDrops } = require(path.join(SERVICES, 'voice-drops'));
+const voiceDrops = createVoiceDropLog({ file: process.env.HANNIBAL_VOICE_DROP_LOG || path.join(CFG.dataDir, 'voice-dropouts.log') });
+ipc.handle('voice:drop', (_e, d) => { voiceDrops.record({ where: 'server', ...(d || {}) }); return { ok: true }; });
+ipc.handle('voice:dropouts', async (_e, hours) => {
+  const here = voiceDrops.list(hours);
+  if (!hub || !hub.linked()) return here;
+  try { return mergeDrops(here, await hub.invoke('voice.dropouts', { hours }), hours); }
+  catch (_) { return { ...here, summary: `${here.summary} (The Mac's own log wasn't reachable.)` }; }
+});
+
 // Only offer Claude the tools whose handlers exist: the server's own, plus the
 // Mac's while it is linked.
 const LOCAL_CHANNELS = Object.keys(registry);
@@ -170,11 +183,22 @@ async function voiceNote(text) {
 }
 
 // Hannibal's voice as MP3 (the phone app plays it straight in the browser).
+// Fast path first (ElevenLabs from Node, 15 s limit), then nova-tts.py. A
+// failure is written to the voice dropout log (stage "tts", where "phone").
 async function voiceMp3(text) {
+  let fastErr = null;
+  if (process.env.ELEVENLABS_API_KEY && process.env.HANNIBAL_FAST_TTS !== '0') {
+    try { return await speakToMp3(text, { timeoutMs: 15000 }); } catch (e) { fastErr = e; }
+  }
   const mp3 = path.join(os.tmpdir(), `hannibal-app-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.mp3`);
   try { await run(CFG.python, [path.join(SERVICES, 'nova-tts.py'), mp3], String(text || '')); return fs.readFileSync(mp3); }
-  finally { fs.unlink(mp3, () => {}); }
+  catch (e) {
+    voiceDrops.record({ where: 'phone', stage: 'tts', error: `${fastErr ? `fast: ${fastErr.message}; ` : ''}${e.message}`, device: 'phone', text });
+    throw e;
+  } finally { fs.unlink(mp3, () => {}); }
 }
+
+
 
 // A tool runs here if the server has it, otherwise on the linked Mac. The
 // confirmation gate has already asked Fred (on his phone) before invoke runs.
@@ -223,6 +247,7 @@ if (process.env.PHONE_APP_TOKEN) {
       runTool,
       transcribe: makeElevenLabsTranscriber({ apiKey: process.env.ELEVENLABS_API_KEY, model: process.env.ELEVENLABS_STT_MODEL || 'scribe_v1' }),
       speak: voiceMp3,
+      onVoiceDrop: (d) => voiceDrops.record(d),
       memory,
       status: () => ({ mac: !!(hub && hub.linked()) }),
       onReset: () => claudeBrain.resetHistory(),

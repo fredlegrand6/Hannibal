@@ -162,6 +162,16 @@ function createPhoneApp(opts = {}) {
       return;
     }
 
+    // The phone tells us when his voice failed there (fetch / play / blocked by
+    // the phone), so it lands in the same dropout log Hannibal can be asked about.
+    if (req.method === 'POST' && url.pathname === '/api/voice-drop') {
+      let body = {};
+      try { body = JSON.parse((await readBody(req, 4096)).toString('utf8')); } catch (_) {}
+      try { if (opts.onVoiceDrop) opts.onVoiceDrop({ ...body, where: 'phone' }); } catch (e) { log('voice-drop failed:', e.message); }
+      json(res, 200, { ok: true });
+      return;
+    }
+
     if (req.method === 'POST' && url.pathname === '/api/confirm') {
       let body = {};
       try { body = JSON.parse((await readBody(req, 4096)).toString('utf8')); } catch (_) {}
