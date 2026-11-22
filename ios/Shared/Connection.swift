@@ -35,6 +35,8 @@ struct Connection: Equatable {
 enum ConnectionStore {
     private static let service = "hannibal.phone"
     private static let account = "link"
+    /// Shared with the share sheet and the widgets (keychain-access-groups).
+    static let sharedGroup = "X4GXK2YQW8.com.revalisgroup.hannibal.shared"
 
     private static var query: [String: Any] {
         [kSecClass as String: kSecClassGenericPassword,
@@ -57,6 +59,7 @@ enum ConnectionStore {
     static func save(_ link: String) -> Bool {
         delete()
         var q = query
+        q[kSecAttrAccessGroup as String] = sharedGroup
         q[kSecValueData as String] = Data(link.trimmingCharacters(in: .whitespacesAndNewlines).utf8)
         q[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         return SecItemAdd(q as CFDictionary, nil) == errSecSuccess
@@ -64,5 +67,17 @@ enum ConnectionStore {
 
     static func delete() {
         SecItemDelete(query as CFDictionary)
+    }
+
+    /// Links saved before the share sheet existed sit in the app's own
+    /// keychain group; move them to the shared one so extensions can read it.
+    static func moveToSharedGroup() {
+        var check = query
+        check[kSecAttrAccessGroup as String] = sharedGroup
+        check[kSecMatchLimit as String] = kSecMatchLimitOne
+        guard SecItemCopyMatching(check as CFDictionary, nil) == errSecItemNotFound, let c = load() else { return }
+        var b = URLComponents(url: c.base, resolvingAgainstBaseURL: false)
+        b?.queryItems = [URLQueryItem(name: "k", value: c.token)]
+        if let link = b?.url?.absoluteString { save(link) }
     }
 }

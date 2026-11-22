@@ -17,6 +17,7 @@ const C = { cookie: `hannibal_k=${TOKEN}` };
 let toolCalls = [];
 let lastPayload = null;
 const voiceDrops = [];
+const placeEvents = [];
 const app = createPhoneApp({
   token: TOKEN, hosts: ['127.0.0.1'], port: PORT, persona: 'P', log: () => {},
   chat: async (payload, _on, { runTool }) => {
@@ -29,6 +30,14 @@ const app = createPhoneApp({
   speak: async (t) => Buffer.from(`mp3:${t}`),
   status: () => ({ mac: true }),
   onVoiceDrop: (d) => voiceDrops.push(d),
+  places: (() => { const { createPlaceReminders } = require('./place-reminders'); return createPlaceReminders({}); })(),
+  onPlace: (what, r) => placeEvents.push([what, r.message]),
+  glance: async () => ({
+    events: [{ title: 'Past', ts: Date.now() - 7200000, endTs: Date.now() - 3600000 },
+      { title: 'Lunch with Jay', ts: Date.now() + 3600000, endTs: Date.now() + 7200000 },
+      { title: 'Now', ts: Date.now() - 600000, endTs: Date.now() + 600000 }],
+    reminders: [{ message: 'Call Gaian', triggerTs: Date.now() + 1800000 }, { message: 'old', triggerTs: Date.now() - 1000 }],
+  }),
 });
 
 (async () => {
@@ -74,6 +83,41 @@ const app = createPhoneApp({
     assert.strictEqual(bad.status, 400);
     await (await fetch(`${base}/api/say`, { method: 'POST', headers: C, body: JSON.stringify({ text: 'plain' }) })).json();
     assert.strictEqual(lastPayload.images, undefined);
+  });
+
+  await test('live talk with the camera: speech + frame in one turn', async () => {
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 9, 9]).toString('base64');
+    const audio = Buffer.alloc(12).toString('base64');
+    const j = await (await fetch(`${base}/api/voice-look`, { method: 'POST', headers: C, body: JSON.stringify({ audio, mime: 'audio/wav', image: jpeg }) })).json();
+    assert.strictEqual(j.heard, 'heard 12 bytes of audio/wav');
+    assert.ok(j.ok && j.spoken);
+    assert.deepStrictEqual(lastPayload.images, [jpeg]);
+    assert.strictEqual(lastPayload.user, 'heard 12 bytes of audio/wav');
+    assert.strictEqual((await fetch(`${base}/api/voice-look`, { method: 'POST', headers: C, body: JSON.stringify({ audio }) })).status, 400);
+    assert.strictEqual((await fetch(`${base}/api/voice-look`, { method: 'POST', body: JSON.stringify({ audio, image: jpeg }) })).status, 401);
+  });
+
+  await test('glance: upcoming events and reminders for the widget, key needed', async () => {
+    assert.strictEqual((await fetch(`${base}/api/glance`)).status, 401);
+    const j = await (await fetch(`${base}/api/glance`, { headers: C })).json();
+    assert.deepStrictEqual(j.events.map((e) => e.title), ['Now', 'Lunch with Jay']);
+    assert.deepStrictEqual(j.reminders.map((r) => r.message), ['Call Gaian']);
+    assert.strictEqual(j.waiting, 0);
+  });
+
+  await test('place reminders: the phone lists them and reports fired / not found', async () => {
+    assert.strictEqual((await fetch(`${base}/api/places`)).status, 401);
+    const a = app._places.add('Buy milk', 'Bussum');
+    const b = app._places.add('Call Jay', 'Atlantis');
+    const list = await (await fetch(`${base}/api/places`, { headers: C })).json();
+    assert.deepStrictEqual(list.reminders.map((r) => r.message), ['Buy milk', 'Call Jay']);
+    const f = await (await fetch(`${base}/api/places/fired`, { method: 'POST', headers: C, body: JSON.stringify({ id: a.id }) })).json();
+    assert.strictEqual(f.ok, true);
+    const again = await (await fetch(`${base}/api/places/fired`, { method: 'POST', headers: C, body: JSON.stringify({ id: a.id }) })).json();
+    assert.strictEqual(again.ok, false);
+    await fetch(`${base}/api/places/failed`, { method: 'POST', headers: C, body: JSON.stringify({ id: b.id, error: 'not found' }) });
+    assert.deepStrictEqual(placeEvents, [['fired', 'Buy milk'], ['failed', 'Call Jay']]);
+    assert.deepStrictEqual((await (await fetch(`${base}/api/places`, { headers: C })).json()).reminders, []);
   });
 
   await test('a photo needs the key', async () => {

@@ -91,6 +91,8 @@ function createPhoneApp(opts = {}) {
     });
   }
 
+  let glanceCache = null;
+
   async function turn(text, { spoken = false, images } = {}) {
     let memories = '';
     if (opts.memory) { try { memories = await opts.memory.recall(text); } catch (_) {} }
@@ -180,6 +182,65 @@ function createPhoneApp(opts = {}) {
       return;
     }
 
+    // Live talk with the camera on (iPhone app): what Fred said + what the
+    // camera sees right now, in one turn. { audio: base64, mime, image: base64 jpeg }
+    if (req.method === 'POST' && url.pathname === '/api/voice-look') {
+      if (!opts.transcribe) { json(res, 501, { ok: false, reply: "I can't listen right now. Type it instead?" }); return; }
+      let body = {};
+      try { body = JSON.parse((await readBody(req, MAX_IMAGE_BODY)).toString('utf8')); } catch (_) {}
+      const image = String(body.image || '').replace(/^data:[^,]*,/, '');
+      const audio = String(body.audio || '');
+      if (!audio || !image || !/^[A-Za-z0-9+/=]+$/.test(image.slice(0, 4096))) { json(res, 400, { ok: false, reply: "That didn't come through. Try again?" }); return; }
+      if (busy) { json(res, 429, { ok: false, reply: 'One moment, still on the last one.' }); return; }
+      busy = true;
+      try {
+        const heard = String(await opts.transcribe(Buffer.from(audio, 'base64'), String(body.mime || 'audio/wav')) || '').trim();
+        if (!heard) { json(res, 200, { ok: false, heard: '', reply: "I couldn't make that out. Try again?" }); return; }
+        json(res, 200, { heard, ...(await turn(heard, { spoken: true, images: [image] })) });
+      } catch (e) { log('voice-look failed:', e.message); json(res, 500, { ok: false, reply: 'Something went wrong with that. Try again?' }); }
+      finally { busy = false; }
+      return;
+    }
+
+    // At a glance (iPhone home/lock screen widget): next appointments,
+    // reminders and how many Yes/No questions wait. Cached for a minute.
+    if (req.method === 'GET' && url.pathname === '/api/glance') {
+      try {
+        if (!glanceCache || Date.now() - glanceCache.at > 60000) {
+          const g = opts.glance ? await opts.glance() : {};
+          const now = Date.now();
+          const events = (Array.isArray(g.events) ? g.events : [])
+            .filter((e) => e && Number(e.endTs || e.ts) >= now)
+            .sort((a, b) => a.ts - b.ts).slice(0, 6)
+            .map((e) => ({ title: String(e.title || '').slice(0, 120), ts: Number(e.ts), ...(e.endTs ? { endTs: Number(e.endTs) } : {}), allDay: !!e.allDay }));
+          const reminders = (Array.isArray(g.reminders) ? g.reminders : [])
+            .filter((r) => r && Number(r.triggerTs) >= now)
+            .sort((a, b) => a.triggerTs - b.triggerTs).slice(0, 6)
+            .map((r) => ({ message: String(r.message || '').slice(0, 160), ts: Number(r.triggerTs) }));
+          glanceCache = { at: Date.now(), body: { ok: true, events, reminders } };
+        }
+        json(res, 200, { ...glanceCache.body, waiting: pending.size, at: glanceCache.at });
+      } catch (e) { log('glance failed:', e.message); json(res, 200, { ok: false, events: [], reminders: [], waiting: pending.size }); }
+      return;
+    }
+
+    // Place reminders: the iPhone app turns these into geofences, then says
+    // when one fired or a place couldn't be found (opts.places, see place-reminders.js).
+    if (url.pathname === '/api/places' && req.method === 'GET') {
+      json(res, 200, opts.places ? opts.places.upcoming() : { ok: true, reminders: [] });
+      return;
+    }
+    if ((url.pathname === '/api/places/fired' || url.pathname === '/api/places/failed') && req.method === 'POST') {
+      let body = {};
+      try { body = JSON.parse((await readBody(req, 4096)).toString('utf8')); } catch (_) {}
+      if (!opts.places || !body.id) { json(res, 400, { ok: false }); return; }
+      const fired = url.pathname.endsWith('fired');
+      const r = fired ? opts.places.fired(body.id) : opts.places.failed(body.id, body.error);
+      if (r && opts.onPlace) { try { opts.onPlace(fired ? 'fired' : 'failed', r, body.error); } catch (_) {} }
+      json(res, 200, { ok: !!r });
+      return;
+    }
+
     if (req.method === 'POST' && url.pathname === '/api/speak') {
       if (!opts.speak) { res.writeHead(501); res.end(); return; }
       try {
@@ -249,7 +310,13 @@ function createPhoneApp(opts = {}) {
     return clients.size;
   }
 
-  return { start, stop, notify, handle, _confirmer: confirmer, _pending: pending };
+  /** Place reminders changed: tell an open app now, wake a closed one quietly. */
+  function placesChanged() {
+    push({ type: 'places' });
+    if (!clients.size && canPush() && opts.push.wake) opts.push.wake({ sync: 'places' }).catch((e) => log('silent push failed:', e.message));
+  }
+
+  return { start, stop, notify, placesChanged, handle, _confirmer: confirmer, _pending: pending, _places: opts.places };
 }
 
 module.exports = { createPhoneApp, PHONE_APP_CONTEXT };

@@ -13,6 +13,25 @@ struct Reply: Decodable {
     var spoken: Bool?
 }
 
+/// What the home / lock screen widget shows (/api/glance).
+struct Glance: Codable {
+    struct Event: Codable, Hashable { var title: String; var ts: Double; var endTs: Double?; var allDay: Bool? }
+    struct Reminder: Codable, Hashable { var message: String; var ts: Double }
+    var ok: Bool?
+    var events: [Event]
+    var reminders: [Reminder]
+    var waiting: Int?
+}
+
+/// A place reminder the phone watches (/api/places).
+struct PlaceReminder: Codable, Hashable {
+    var id: String
+    var message: String
+    var place: String
+    var on: String          // "arrive" | "leave"
+}
+private struct PlaceList: Decodable { var reminders: [PlaceReminder] }
+
 struct HannibalEvent: Decodable {
     var type: String
     var id: String?
@@ -91,6 +110,11 @@ final class HannibalAPI {
         try await reply(request("api/voice", contentType: mime, body: audio))
     }
 
+    /// Live talk with the camera on: the sentence and the current frame together.
+    func voiceLook(_ audio: Data, mime: String, jpeg: Data) async throws -> Reply {
+        try await reply(request("api/voice-look", body: jsonBody(["audio": audio.base64EncodedString(), "mime": mime, "image": jpeg.base64EncodedString()])))
+    }
+
     func look(jpegBase64: String, text: String) async throws -> Reply {
         try await reply(request("api/look", body: jsonBody(["image": jpegBase64, "text": text])))
     }
@@ -113,6 +137,31 @@ final class HannibalAPI {
         case 410: return .expired
         default: return .unknown
         }
+    }
+
+    func glance() async throws -> Glance {
+        let (data, resp) = try await session.data(for: request("api/glance", method: "GET", contentType: nil, timeout: 20))
+        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        if code == 401 || code == 403 { throw APIError.unauthorized }
+        guard code == 200 else { throw APIError.status(code) }
+        return try JSONDecoder().decode(Glance.self, from: data)
+    }
+
+    func places() async throws -> [PlaceReminder] {
+        let (data, resp) = try await session.data(for: request("api/places", method: "GET", contentType: nil, timeout: 20))
+        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        if code == 401 || code == 403 { throw APIError.unauthorized }
+        guard code == 200 else { throw APIError.status(code) }
+        return try JSONDecoder().decode(PlaceList.self, from: data).reminders
+    }
+
+    func placeFired(_ id: String) async -> Bool {
+        guard let r = try? await session.data(for: request("api/places/fired", body: jsonBody(["id": id]), timeout: 20)) else { return false }
+        return (r.1 as? HTTPURLResponse)?.statusCode == 200
+    }
+
+    func placeFailed(_ id: String, error: String) async {
+        _ = try? await session.data(for: request("api/places/failed", body: jsonBody(["id": id, "error": error]), timeout: 20))
     }
 
     func registerPush(token: String) async {

@@ -4,6 +4,7 @@
 // and the morning brief arrive live while the app is open.
 // ─────────────────────────────────────────────────────────────────────────
 import Foundation
+import WidgetKit
 import Observation
 import UIKit
 
@@ -30,6 +31,7 @@ final class HannibalModel {
     var live = false                 // hands-free conversation is on
     var liveHearing = false          // ...and Fred is talking right now
     var looking = false
+    var cameraOn = false             // live camera during live talk
     var waiting = 0
     var level: Float = 0
     var pulses = 0                   // bumps when something arrives; the orb flashes
@@ -73,6 +75,7 @@ final class HannibalModel {
     @ObservationIgnored private var liveActiveAt = Date()
     @ObservationIgnored private var liveWatch: Task<Void, Never>?
     @ObservationIgnored private let activity = LiveActivityController()
+    @ObservationIgnored let camera = LiveCamera()
     private static let historyKey = "history.v1"
 
     init() {
@@ -93,6 +96,7 @@ final class HannibalModel {
         liveVoice.onLevel = { [weak self] l in self?.level = l }
         liveVoice.onUtterance = { [weak self] wav in self?.sendLive(wav) }
         liveVoice.onStopped = { [weak self] why in self?.stopLive(why) }
+        ConnectionStore.moveToSharedGroup()
         if let c = ConnectionStore.load() { use(c) }
         // Action Button / Siri / lock screen button / Dynamic Island stop.
         NotificationCenter.default.addObserver(forName: LiveRequest.start, object: nil, queue: .main) { [weak self] _ in
@@ -161,6 +165,29 @@ final class HannibalModel {
         }
     }
 
+    /// Camera on/off during live talk (turning it on starts live talk if needed).
+    func toggleCamera() {
+        if cameraOn { camera.stop(); cameraOn = false; return }
+        Task {
+            guard await LiveCamera.askPermission() else {
+                add(.error, "Hannibal needs the camera. Turn it on in Settings › Hannibal.")
+                return
+            }
+            do { try camera.start(front: camera.front) } catch {
+                add(.error, "The camera couldn't start: \(error.localizedDescription)")
+                return
+            }
+            cameraOn = true
+            if !live { startLive() }
+            add(.note, "Camera on. Point it and just talk: he sees what you see when you finish a sentence.")
+        }
+    }
+
+    /// iOS stops the camera when the app leaves the screen.
+    func appWentToBackground() {
+        if cameraOn { camera.stop(); cameraOn = false }
+    }
+
     func stopLive(_ note: String? = "Live talk off.") {
         guard live else { return }
         live = false
@@ -173,6 +200,7 @@ final class HannibalModel {
         speaker.clip = SimpleClipPlayer()
         UIApplication.shared.isIdleTimerDisabled = false
         activity.end()
+        if cameraOn { camera.stop(); cameraOn = false }
         if let note { add(.note, note) }
     }
 
@@ -188,10 +216,15 @@ final class HannibalModel {
                 if live { liveVoice.setAccepting(true) }
             }
             do {
-                let r = try await api.voice(wav, mime: "audio/wav")
+                let frame = cameraOn ? camera.snapshotJPEG() : nil
+                if frame != nil { looking = true }
+                defer { looking = false }
+                let r: Reply
+                if let frame { r = try await api.voiceLook(wav, mime: "audio/wav", jpeg: frame) }
+                else { r = try await api.voice(wav, mime: "audio/wav") }
                 let heard = (r.heard ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 if heard.isEmpty { return }     // a cough or a door: ignore quietly in live talk
-                add(.me, "🎙 " + heard)
+                add(.me, (frame != nil ? "📷🎙 " : "🎙 ") + heard)
                 show(r, spoken: true)
             } catch { add(.error, friendly(error)) }
         }
@@ -302,8 +335,13 @@ final class HannibalModel {
             online = true
             backoff = 1
             expireOldConfirms()          // a close may have been missed while away
+            WidgetCenter.shared.reloadAllTimelines()
+            Task { await PlaceWatcher.shared.sync() }
+        case "places":
+            Task { await PlaceWatcher.shared.sync() }
         case "notify":
             guard let t = ev.text, !t.isEmpty else { return }
+            WidgetCenter.shared.reloadAllTimelines()
             add(.notify, t)
             pulses += 1
             UINotificationFeedbackGenerator().notificationOccurred(.success)
@@ -313,6 +351,7 @@ final class HannibalModel {
             lines.append(Line(kind: .confirm, text: (ev.summary ?? "Shall I go ahead?"), confirmId: id, expires: Date().addingTimeInterval(120)))
             pulses += 1
             scheduleExpiry()
+            WidgetCenter.shared.reloadAllTimelines()
             UINotificationFeedbackGenerator().notificationOccurred(.warning)
         case "confirm-closed":
             guard let id = ev.id, let i = lines.firstIndex(where: { $0.confirmId == id }) else { return }
@@ -487,16 +526,3 @@ final class HannibalModel {
     }
 }
 
-extension UIImage {
-    /// Same size the desk and web app send: longest side 1568 px, JPEG.
-    func forHannibal() -> Data? {
-        let maxSide: CGFloat = 1568
-        let longest = max(size.width, size.height)
-        let scale = longest > maxSide ? maxSide / longest : 1
-        let target = CGSize(width: (size.width * scale).rounded(), height: (size.height * scale).rounded())
-        let format = UIGraphicsImageRendererFormat()
-        format.scale = 1
-        let img = UIGraphicsImageRenderer(size: target, format: format).image { _ in draw(in: CGRect(origin: .zero, size: target)) }
-        return img.jpegData(compressionQuality: 0.75)
-    }
-}

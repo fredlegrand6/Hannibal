@@ -5,5 +5,10 @@
 	<!-- Push notifications (reminders, brief, Yes/No on the lock screen). -->
 	<key>aps-environment</key>
 	<string>development</string>
+	<!-- The server link is shared with the share sheet and the widgets. -->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)com.revalisgroup.hannibal.shared</string>
+	</array>
 </dict>
 </plist>

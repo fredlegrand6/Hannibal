@@ -32,6 +32,8 @@ Tailscale must be on on the iPhone, same as for the web app.
 - **Tap the orb** to stop him talking. Starting to talk also stops him.
 - Speaker icon: read every answer aloud, or only when you talked.
 - Camera button: take or choose a photo; anything typed goes with it as the question.
+- **Live camera** (video icon at the top): starts live talk with the camera on. Point and talk; when you
+  finish a sentence he sees the current frame (/api/voice-look, needs a server deploy). Tap the preview to flip.
 - Reminders, the morning brief and Yes/No questions show up live while the app is open,
   and as notifications when it's closed (No right there; Yes needs the phone unlocked and opens the app).
 
@@ -45,6 +47,16 @@ Open Hannibal once after installing, so iOS learns the shortcuts.
 - **Lock screen / Control Center:** long-press the lock screen › Customize › Lock Screen › tap a
   bottom button › *Talk to Hannibal*. In Control Center: tap + › Add a Control › Hannibal.
 - **Dynamic Island:** while live talk runs it shows listening / thinking / speaking, with Stop.
+
+### Share, widget, place reminders
+
+- **Share to Hannibal:** in any app tap Share › Hannibal (first time: scroll the app row › More › turn
+  Hannibal on). Pick a quick action (summarise, remind me, draft a reply, remember) or type your own.
+- **Widget:** long-press the home screen › + › Hannibal. Shows the next appointments, reminders and
+  whether he's waiting for a Yes/No. Also on the lock screen (Customize › widgets).
+- **Place reminders:** say "remind me to call Jay when I get home" or "…when I land in Ibiza" / "…when I
+  leave the office". The phone watches the place (allow location *Always*) and rings when you arrive or
+  leave. Needs a server deploy. At most 18 active places (iOS limit is 20).
 
 ## Notes for builders
 
