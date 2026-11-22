@@ -87,6 +87,7 @@ const t = async (name, fn) => { await fn(); n++; console.log('  ok ', name); };
     const ct = require('./claude-tools');
     const names = new Set(ct.toolDefinitions().map((d) => ct.fromApiName(d.name)));
     assert.ok(names.has('contacts.find') && names.has('whatsapp.send'));
+    assert.ok(!names.has('mac.say'), 'he never talks in the macOS voice');
     const { summarizeAction } = require('./agent/executor');
     assert.match(summarizeAction({ tool: 'whatsapp.send' }, { contact: 'Jay Legrand', number: '+31611112222', message: 'hi' }), /Send a WhatsApp to Jay Legrand \(\+31611112222\): .*hi.* — send it\?/);
     const { ceilingFor } = require('./agent/permission-store');
