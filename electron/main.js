@@ -60,11 +60,14 @@ registerProactive(ipcMain, {
   // always-on server, it sends its own morning brief; desk reminders go via it.
   onBrief: (text) => { if (telegram) telegram.notify(`☀️ Morning brief\n\n${text}`, { voice: true }).catch(() => {}); },
   onNudgeDone: (r) => { const done = pendingNudges.get(r.id); if (done) { pendingNudges.delete(r.id); done(r.ok); } },
+  // Returns a promise so the reminder is marked delivered (or not) for reminders.recent.
   onReminder: (message) => {
     const text = `⏰ Reminder: ${message}`;
-    if (telegram) telegram.notify(text).catch(() => {});
-    else if (linked()) bodyLink.request('phone.notify', { text, voice: true }).catch((e) => console.warn('[body] reminder to phone failed:', e.message));
+    if (telegram) return telegram.notify(text).then(() => true);
+    if (linked()) return bodyLink.request('phone.notify', { text, voice: true }).then(() => true);
+    return undefined;   // no phone reachable: the banner and his voice still carry it
   },
+  banner: (title, body) => { const { Notification } = require('electron'); if (Notification.isSupported()) new Notification({ title, body }).show(); },
 });   // morning brief + reminders.add/cancel/upcoming
 
 // Saved facts: while linked, the server's copy is the master. A change made at

@@ -3107,6 +3107,16 @@ RULES:
     } catch (e) { console.warn('[care-ping] error', e); }
   }, 30 * 60 * 1000);   // every 30 minutes
 
+  // Reminders main has fired and that are waiting to be spoken.
+  const DUE_TO_SAY = [];
+  if (window.hannibal && window.hannibal.onRemindersDue) {
+    window.hannibal.onRemindersDue((r) => {
+      if (!r || DUE_TO_SAY.some((x) => x.id === r.id)) return;
+      DUE_TO_SAY.push({ id: r.id, message: r.message, at: Date.now() });
+      loadReminders().catch(() => {});
+    });
+  }
+
   // ── Reminder + timer tick (1 Hz) ──
   // Walks both lists each second and fires any whose triggerTs has passed.
   // Marks them `fired: true` instead of deleting so the JSON history shows
@@ -3121,25 +3131,20 @@ RULES:
       // retries every second, so a due item just waits until Fred pauses.
       const canAnnounce = !autonomousSpeaking &&
         (continuousListen ? (phase === 'idle' || restfulListen) : phase !== 'speaking');
-      // Reminders — only fire if Hannibal isn't currently speaking (so we
-      // don't talk over another reply). If busy, the next tick will catch it.
-      const dueReminders = REMINDERS.filter((r) => !r.fired && r.triggerTs <= now);
-      if (dueReminders.length && canAnnounce) {
-        // Take the mic cleanly for the whole batch (always-listen: closes the open
-        // resting turn, suppresses the re-arm until we're done, then reopens once).
+      // Reminders: main fires them (banner + phone) and hands them here to be
+      // spoken. Say them at a resting moment; if that moment doesn't come
+      // within a minute, say them anyway as soon as he isn't talking.
+      const waitedLong = DUE_TO_SAY.length && now - DUE_TO_SAY[0].at > 60000;
+      if (DUE_TO_SAY.length && !autonomousSpeaking && !confirmInFlight
+          && (canAnnounce || (waitedLong && phase !== 'speaking' && phase !== 'thinking'))) {
         autonomousSpeaking = true;
         if (phase === 'listening') abortListening();
-        for (const r of dueReminders) {
-          r.fired = true;
-          r.firedAt = now;
+        while (DUE_TO_SAY.length) {
+          const r = DUE_TO_SAY.shift();
           emitModel('system');
-          try { window.hannibal.reminderFired && window.hannibal.reminderFired(r.message || 'you asked me to remind you'); } catch (_) {}
           try { await speakLine(`Fred, reminder: ${r.message || 'you asked me to remind you'}.`); }
           catch (_) {}
         }
-        // GC anything fired > 24h ago
-        REMINDERS = REMINDERS.filter((r) => !r.fired || (now - (r.firedAt || 0)) < 86400000);
-        await saveReminders();
         autonomousSpeaking = false;
         restOrRearm();
       }

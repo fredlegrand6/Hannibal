@@ -250,7 +250,7 @@ function createBriefScheduler({ send, statePath = path.join(DATA, 'proactive.jso
 }
 
 // Wire both into Electron main.
-function registerProactive(ipcMain, { getWindow, onBrief, onReminder, onNudgeDone, statePath, remindersPath, notesPath } = {}) {
+function registerProactive(ipcMain, { getWindow, onBrief, onReminder, onNudgeDone, banner, statePath, remindersPath, notesPath } = {}) {
   const toRenderer = (channel, payload) => {
     const w = getWindow && getWindow();
     try { w && !w.isDestroyed() && w.webContents.send(channel, payload); } catch (_) {}
@@ -273,15 +273,43 @@ function registerProactive(ipcMain, { getWindow, onBrief, onReminder, onNudgeDon
     if (r && r.ok && r.kind === 'morning-brief' && r.text && onBrief) { try { onBrief(String(r.text)); } catch (_) {} }
     return res;
   });
-  // A reminder fired at the desk → also on the phone.
-  ipcMain.handle('reminders:fired', (_e, message) => {
-    if (onReminder && message) { try { onReminder(String(message)); } catch (_) {} }
-    return { ok: true };
-  });
+  // Old page builds told main when they fired one; main fires them itself now.
+  ipcMain.handle('reminders:fired', () => ({ ok: true }));
+  // Reminders fire HERE, in the main process, on a clock of their own. They
+  // used to fire in the page only when Hannibal was at rest, and with the mic
+  // always open that moment could fail to come for days (one due 18 Nov was
+  // still waiting on 22 Nov). Now each due reminder goes out at once as a Mac
+  // banner and to Fred's phone, and the page speaks it at the next chance.
+  const fireDue = createReminderFirer({ reminders, toRenderer, onReminder, banner });
+  const firstFire = setTimeout(fireDue, 15000);
+  const fireTimer = setInterval(fireDue, 20000);
   // First check shortly after launch (the window needs a moment), then every minute.
   const first = setTimeout(() => brief.tick(), 45000);
   const timer = setInterval(() => brief.tick(), 60000);
-  return { reminders, brief, stop: () => { clearTimeout(first); clearInterval(timer); } };
+  return { reminders, brief, fireDue, stop: () => { clearTimeout(first); clearInterval(timer); clearTimeout(firstFire); clearInterval(fireTimer); } };
 }
 
-module.exports = { createReminderTools, createNoteTools, createBriefScheduler, registerProactive, cancelAcross, BRIEF_PROMPT };
+// Takes every due reminder once and sends it out: Mac banner, phone, voice.
+// One missed by hours (the Mac was asleep or off) still goes out, marked late.
+function createReminderFirer({ reminders, toRenderer = () => {}, onReminder = null, banner = null, now = () => Date.now() }) {
+  return function fireDue() {
+    let due = [];
+    try { due = reminders.takeDue(); } catch (e) { console.warn('[reminder] check failed:', e.message); return []; }
+    for (const r of due) {
+      const lateMin = Math.round((now() - Number(r.triggerTs)) / 60000);
+      const late = lateMin >= 30 ? ` (this was due ${new Date(Number(r.triggerTs)).toLocaleString('en-GB', { weekday: 'short', hour: '2-digit', minute: '2-digit' })}, I missed it)` : '';
+      const message = `${r.message}${late}`;
+      console.log(`[reminder] fired: ${r.message}${late ? ` — ${lateMin} min late` : ''}`);
+      try { banner && banner('Hannibal reminder', message); } catch (_) {}
+      toRenderer('reminders:due', { id: r.id, message });
+      if (onReminder) {
+        Promise.resolve().then(() => onReminder(message))
+          .then((res) => { if (res !== undefined) reminders.markDelivered(r.id, res !== false); })
+          .catch((e) => { console.warn('[reminder] could not reach the phone:', e.message); reminders.markDelivered(r.id, false, e.message); });
+      }
+    }
+    return due;
+  };
+}
+
+module.exports = { createReminderTools, createNoteTools, createBriefScheduler, registerProactive, createReminderFirer, cancelAcross, BRIEF_PROMPT };

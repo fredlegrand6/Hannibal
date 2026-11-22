@@ -15,7 +15,7 @@ fakeSdk.APIError = class extends Error {};
 const origLoad = Module._load;
 Module._load = function (req, ...rest) { return req === '@anthropic-ai/sdk' ? fakeSdk : origLoad.call(this, req, ...rest); };
 
-const { createReminderTools, createBriefScheduler } = require('./proactive');
+const { createReminderTools, createBriefScheduler, createReminderFirer } = require('./proactive');
 const claudeTools = require('./claude-tools');
 const brain = require('./claude-brain');
 
@@ -182,6 +182,28 @@ async function test(name, fn) {
     assert.strictEqual(note.role, 'system');
     assert(/^Now: \w+day \d{4}-\d{2}-\d{2} \d{2}:\d{2} \(/.test(note.content), note.content);
     assert(/mood: fine/.test(note.content));
+  });
+
+  await test('main fires due reminders itself: banner, page, phone, once, late ones marked', async () => {
+    let t = Date.parse('2026-11-18T07:00:00');
+    const file = tmp('fire');
+    const r = createReminderTools({ filePath: file, now: () => t });
+    r.add('check GEX131', '2026-11-18T08:00');
+    r.add('call Jay', '2026-11-22T10:00');
+    const banners = [], page = [], phone = [];
+    const fire = createReminderFirer({ reminders: r, now: () => t,
+      banner: (title, body) => banners.push(body), toRenderer: (ch, x) => page.push([ch, x.message]), onReminder: async (m) => { phone.push(m); return true; } });
+    assert.strictEqual(fire().length, 0, 'nothing due yet');
+    t = Date.parse('2026-11-22T09:00:00');
+    const quiet = console.log; console.log = () => {};
+    try { assert.strictEqual(fire().length, 1); assert.strictEqual(fire().length, 0, 'only once'); } finally { console.log = quiet; }
+    await new Promise((res) => setTimeout(res, 10));
+    assert(/check GEX131 \(this was due .*I missed it\)/.test(banners[0]), banners[0]);
+    assert.deepStrictEqual(page[0][0], 'reminders:due');
+    assert.strictEqual(phone.length, 1);
+    const rec = r.recent(200);
+    assert.strictEqual(rec.wentOff.length, 1, JSON.stringify(rec));
+    assert.strictEqual(rec.missed.length, 0);
   });
 
   console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ''}`);
