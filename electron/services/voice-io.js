@@ -37,17 +37,18 @@ function build() {
 }
 
 function createVoiceIO({ send = () => {} } = {}) {
-  let child = null, ready = false, seq = 0, wanted = false, failures = 0;
+  let child = null, ready = false, seq = 0, wanted = false, failures = 0, restarting = false;
   const waiting = new Map();   // id → resolve
+  let heardAt = 0;             // last time the helper reported his voice actually coming out
 
   function onLine(line) {
     let j; try { j = JSON.parse(line); } catch (_) { return; }
-    if (j.ev === 'level') { send('vio:level', { mic: j.mic, out: j.out }); return; }
+    if (j.ev === 'level') { if (j.out > 0.0005) heardAt = Date.now(); send('vio:level', { mic: j.mic, out: j.out }); return; }
     if (j.ev === 'engine') { log(j.on ? 'echo cancelling on (he is talking)' : 'echo cancelling off, mic handed back'); return; }
     if (j.ev === 'ready') { ready = true; failures = 0; log('ready (echo cancelling works here; it runs only while he talks)'); send('vio:ready', {}); return; }
     if (j.ev === 'done' || j.ev === 'clip') { const w = waiting.get(j.id); if (w) { waiting.delete(j.id); w(j); } return; }
     if (j.ev === 'error') { log('error:', j.error); if (j.id && waiting.has(j.id)) { const w = waiting.get(j.id); waiting.delete(j.id); w(j); } return; }
-    if (j.ev === 'reconfigured') log('audio device changed — engine restarted');
+    if (j.ev === 'reconfigured') log('audio device changed — the helper drops this sentence and starts fresh on the new speakers');
     if (j.ev === 'info') log(j.error || `input ${j.in}, output ${j.out}`);
   }
 
@@ -65,9 +66,11 @@ function createVoiceIO({ send = () => {} } = {}) {
       child = null; ready = false; send('vio:ready', { ready: false });
       for (const [, w] of waiting) w({ ev: 'done', error: 'helper exited' });
       waiting.clear();
+      // A restart we asked for (hung, woke from sleep) doesn't count as a failure.
+      const asked = restarting; restarting = false;
       // Keep his voice on, but don't spin: after 3 quick failures stay on the old playback.
-      if (code !== 0 && ++failures >= 3) { log('giving up for this session — he speaks through the page instead'); return; }
-      if (wanted) setTimeout(start, 3000);
+      if (!asked && code !== 0 && ++failures >= 3) { log('giving up for this session — he speaks through the page instead'); return; }
+      if (wanted) setTimeout(start, asked ? 300 : 3000);
     });
   }
 
@@ -85,16 +88,41 @@ function createVoiceIO({ send = () => {} } = {}) {
 
   // Wait for the sentence's own length plus a margin, not two minutes: a hung
   // helper used to keep him "speaking" (deaf and silent) for that long.
+  // Start watchdog: if none of his voice comes out within START_MS, the sentence
+  // fails fast (the page plays it instead) and the helper is restarted fresh.
+  const START_MS = Number(process.env.HANNIBAL_VIO_START_MS) || 4000;
   async function play(bytes, durationMs) {
     const f = path.join(os.tmpdir(), `hannibal-say-${process.pid}-${++seq}.mp3`);
     fs.writeFileSync(f, Buffer.from(bytes));
     const limit = durationMs > 0 ? Math.max(6000, durationMs + 4000) : 60000;
+    const sent = Date.now();
+    let watch = null;
     try {
-      const j = await request({ cmd: 'play', path: f }, limit);
-      if (j.error === 'timeout') { log(`play hung for ${limit} ms — stopping the helper`); stop(); }
+      const silent = new Promise((resolve) => {
+        watch = setInterval(() => {
+          if (heardAt >= sent) { clearInterval(watch); watch = null; return; }
+          if (Date.now() - sent >= START_MS) { clearInterval(watch); watch = null; resolve({ ev: 'error', error: `no sound started within ${START_MS} ms` }); }
+        }, 250);
+      });
+      const j = await Promise.race([request({ cmd: 'play', path: f }, limit), silent]);
+      if (j.error === 'timeout' || /no sound started/.test(j.error || '')) {
+        log(`play ${j.error === 'timeout' ? `hung for ${limit} ms` : 'made no sound'} — restarting the helper`);
+        restart(j.error);
+      }
       return j;
-    } finally { fs.unlink(f, () => {}); }
+    } finally { if (watch) clearInterval(watch); fs.unlink(f, () => {}); }
   }
+
+  // Kill the helper and start it fresh (its audio engine follows the Mac's current speakers).
+  function restart(why) {
+    if (!child) return;
+    log(`restarting the helper (${why})`);
+    restarting = true;
+    for (const [, w] of waiting) w({ ev: 'done', error: `helper restarted: ${why}` });
+    waiting.clear();
+    try { child.kill(); } catch (_) {}
+  }
+  function refresh(why) { if (child && !waiting.size) restart(why); }
 
   async function clip(ms) {
     const j = await request({ cmd: 'clip', ms: Math.round(ms) }, 5000);
@@ -116,7 +144,7 @@ function createVoiceIO({ send = () => {} } = {}) {
     ipcMain.handle('vio:clip', async (_e, ms) => clip(ms));
   }
 
-  return { start, stop, warm, release, play, clip, quit, register, get ready() { return ready; } };
+  return { start, stop, warm, release, play, clip, quit, register, restart, refresh, get ready() { return ready; } };
 }
 
 module.exports = { createVoiceIO, build };

@@ -65,6 +65,7 @@ final class Session {
   var playFormat: AVAudioFormat
   var chunks: [(start: Int64, rms: [Float], step: Int)] = []
   var scheduledEnd: Int64 = 0
+  var configObserver: NSObjectProtocol? = nil
 
   init() throws {
     let input = engine.inputNode
@@ -83,6 +84,16 @@ final class Session {
     input.installTap(onBus: 0, bufferSize: 1024, format: nil) { buf, _ in onMic(buf) }
     engine.prepare()
     try engine.start()
+    // Speakers came or went (monitor asleep, USB-C audio, AirPods): the engine
+    // stops and the sentence it was playing never finishes. Before this, that
+    // left him silent until a restart. Now: drop this engine, fail the pending
+    // sentences with "audio device changed" (the app plays them again), and the
+    // next sentence builds a fresh engine on the new speakers.
+    configObserver = NotificationCenter.default.addObserver(
+      forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
+      guard let self = self, !self.engine.isRunning else { return }   // still running: nothing broke
+      engineChanged(self)
+    }
   }
 
   func load(_ path: String) throws -> AVAudioPCMBuffer {
@@ -134,6 +145,7 @@ final class Session {
     return 0
   }
   func close() {
+    if let o = configObserver { NotificationCenter.default.removeObserver(o); configObserver = nil }
     player.stop()
     engine.inputNode.removeTap(onBus: 0)
     engine.stop()
@@ -163,6 +175,13 @@ func closeSession() {
   guard let s = session else { return }
   s.close(); session = nil
   emit(["ev": "engine", "on": false])
+}
+func engineChanged(_ s: Session) {
+  guard session === s else { return }
+  let ids = pending; pending.removeAll()
+  closeSession()
+  emit(["ev": "reconfigured"])
+  for p in ids { emit(["ev": "error", "id": p, "error": "audio device changed"]) }
 }
 
 // levels every 50 ms while the engine runs; tear it down when he has been quiet IDLE_S

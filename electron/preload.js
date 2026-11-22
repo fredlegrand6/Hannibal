@@ -21,6 +21,10 @@ contextBridge.exposeInMainWorld('hannibal', {
   vioClip: (ms) => ipcRenderer.invoke('vio:clip', ms),
   onVioLevel: (cb) => ipcRenderer.on('vio:level', (_e, m) => cb(m)),
   onVioReady: (cb) => ipcRenderer.on('vio:ready', (_e, m) => cb(m)),     // -> Uint8Array (MP3 bytes)
+  // Voice dropouts: log one (stage/error/device) · read them back · the Mac woke up.
+  voiceDrop: (entry) => ipcRenderer.invoke('voice:drop', entry),
+  voiceDropouts: (hours) => ipcRenderer.invoke('voice:dropouts', hours),
+  onPowerResume: (cb) => ipcRenderer.on('power:resume', (_e, m) => cb(m)),
   // Claude chat brain (runs in main; the API key never reaches the renderer).
   // payload: { system, context, user } · onToken(text) fires as the reply streams.
   // -> { ok, text, model, usage } | { ok:false, error }  (caller falls back to Ollama)

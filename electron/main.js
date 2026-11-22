@@ -1,4 +1,6 @@
-const { app, BrowserWindow, ipcMain, screen, systemPreferences } = require('electron');
+const { app, BrowserWindow, ipcMain, screen, systemPreferences, powerMonitor } = require('electron');
+// His voice may start without a click (a reminder, the morning brief, after sleep).
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -397,11 +399,11 @@ function ping(url) {
 
 // ── TTS: run nova-tts.py (text via stdin), return the MP3 BYTES to renderer.
 // Renderer plays them through Web Audio so the brain can read amplitude. ──
-function runTts(cmd, args, stdinText) {
+function runTts(cmd, args, stdinText, timeoutMs = 45000) {
   return new Promise((resolve, reject) => {
     const p = spawn(cmd, args, { env: process.env });
     let err = '';
-    const timer = setTimeout(() => { try { p.kill(); } catch (_) {} reject(new Error('tts timed out')); }, 45000);
+    const timer = setTimeout(() => { try { p.kill(); } catch (_) {} reject(new Error('tts timed out')); }, timeoutMs);
     p.stderr.on('data', (d) => { err += d; });
     p.on('error', (e) => { clearTimeout(timer); reject(e); });
     p.on('close', (code) => {
@@ -428,30 +430,35 @@ const { speakToMp3 } = require('./services/fast-tts');
 ipcMain.handle('voice:tts', async (_e, text) => {
   // Unique per call — two sentences requested in the same millisecond must not share a file.
   const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  let file = `/tmp/hannibal-tts-${stamp}.mp3`;
+  const file = `/tmp/hannibal-tts-${stamp}.mp3`;
   const t0 = Date.now();
+  let fastErr = null;
   // Fast path: ElevenLabs straight from Node (electron/services/fast-tts.js).
   if (process.env.HANNIBAL_FAST_TTS !== '0' && process.env.ELEVENLABS_API_KEY) {
     try {
-      const buf = await speakToMp3(text);
+      const buf = await speakToMp3(text, { timeoutMs: 15000 });
       console.log(`[tts] ElevenLabs (fast, ${Date.now() - t0} ms): ${String(text || '').length} chars → ${buf.length} bytes of audio`);
       return buf;
-    } catch (e) { console.warn('[tts] fast voice failed, trying the old path:', e.message); }
+    } catch (e) { fastErr = e; console.warn('[tts] fast voice failed, trying the old path:', e.message); }
   }
+  // Second try through nova-tts.py. He only ever speaks in his own voice: no
+  // macOS robot voice. If both fail the error goes back to the renderer, which
+  // logs the dropout (stage "tts") and moves on to the next sentence.
   try {
-    await runTts(CONFIG.pythonTTS, [CONFIG.ttsScript, file], String(text || ''));   // ElevenLabs
+    await runTts(CONFIG.pythonTTS, [CONFIG.ttsScript, file], String(text || ''), 25000);
+    const buf = fs.readFileSync(file);
+    console.log(`[tts] ElevenLabs: ${String(text || '').length} chars → ${buf.length} bytes of audio`);
+    return buf; // arrives in renderer as a Uint8Array
   } catch (e) {
-    // ElevenLabs unavailable (key, quota, network) — never stay silent: fall back
-    // to the built-in macOS voice so the answer is still spoken out loud.
-    console.warn('[tts] ElevenLabs failed, using the macOS voice instead:', e.message);
-    file = `/tmp/hannibal-tts-${stamp}.wav`;
-    await runTts('/usr/bin/say', ['-o', file, '--data-format=LEI16@22050', String(text || '')], null);
-  }
-  const buf = fs.readFileSync(file);
-  fs.unlink(file, () => {});
-  console.log(`[tts] ${file.endsWith('.mp3') ? 'ElevenLabs' : 'macOS voice'}: ${String(text || '').length} chars → ${buf.length} bytes of audio`);
-  return buf; // arrives in renderer as a Uint8Array
+    throw new Error(`ElevenLabs failed${fastErr ? ` (fast: ${fastErr.message})` : ''}: ${e.message}`.slice(0, 400));
+  } finally { fs.unlink(file, () => {}); }
 });
+
+// Every voice dropout is written down (services/voice-drops.js) so Hannibal can
+// answer "did your voice drop out today?" (tool voice.dropouts).
+const { createVoiceDropLog, registerVoiceDrops } = require('./services/voice-drops');
+const voiceDrops = createVoiceDropLog();
+registerVoiceDrops(ipcMain, voiceDrops, { where: 'desk' });
 
 // System metrics, calendar, mail and web live in services/info-handlers.js
 // (shared with the always-on server, server/hannibal-server.js).
@@ -1367,6 +1374,17 @@ voiceIO.register(ipcMain);
 
 app.whenReady().then(async () => {
   voiceIO.start().catch((e) => console.warn('[voice-io] start failed', e.message));
+  // Back from sleep / screen unlocked: the speakers may be different now. The
+  // voice helper starts fresh and the page rebuilds its audio output.
+  const onWake = (why) => {
+    console.log(`[voice] ${why}: refreshing his voice output`);
+    voiceIO.refresh(why);
+    try { win && win.webContents.send('power:resume', { why }); } catch (_) {}
+  };
+  try {
+    powerMonitor.on('resume', () => onWake('the Mac woke up'));
+    powerMonitor.on('unlock-screen', () => onWake('the screen was unlocked'));
+  } catch (e) { console.warn('[voice] no power events:', e.message); }
   ensureAliasesFile();
   ensureBehaviorLogFile();
   ensurePrefsFile();

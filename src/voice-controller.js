@@ -112,7 +112,26 @@ const NOISE_CAL_SAMPLES = 12;     // ~850ms ambient sample taken once at startup
 
 export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, onConfirm, onWatching } = {}) {
   const cfg = await window.hannibal.config();
+  // audioCtx: the MIC side (level meters, the open-mic tap). His VOICE plays on
+  // its own output context (audioOut below) so that one can be rebuilt any time
+  // (after sleep, a speaker change, or when it gets stuck) without touching the mic.
   const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const VP = window.VoicePlayer;
+  const audioOut = VP.createAudioOut({
+    makeContext: () => new (window.AudioContext || window.webkitAudioContext)(),
+    mediaDevices: navigator.mediaDevices || null,
+    log: (m) => console.warn(`[voice] ${m}`),
+  });
+  // One sentence at a time through the voice helper or the page (see speakOne).
+  const speaker = VP.createSpeaker({
+    tts: (text) => window.hannibal.tts(text),
+    decode: (ab) => audioOut.current().decodeAudioData(ab),
+    playVio: vioPlayOnce,
+    useVio: () => vio,                         // checked per sentence: once the helper is off, the page plays
+    playPage: async (audioBuf) => playWithAmplitude(await audioOut.ensure(), audioBuf),
+    recover: async (why) => { audioOut.rebuild(why); await audioOut.ensure(); },
+    onDrop: reportDrop,
+  });
 
   // Load the self-learning alias map from disk before any transcript is seen.
   // Empty map is a safe default if load fails — fixTranscript still works.
@@ -477,9 +496,18 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   const emitModel = (name) => { try { onModel && onModel(name); } catch (_) {} };
 
   // unlock audio playback on first user gesture (autoplay policy)
-  const unlock = () => { if (audioCtx.state === 'suspended') audioCtx.resume(); };
+  const unlock = () => { if (audioCtx.state === 'suspended') audioCtx.resume(); audioOut.ensure().catch(() => {}); };
   window.addEventListener('pointerdown', unlock);
   window.addEventListener('keydown', unlock);
+  // Back from sleep (or the screen unlocked): start his voice on a fresh output,
+  // on whatever speakers the Mac uses now. No restart needed.
+  if (window.hannibal.onPowerResume) {
+    window.hannibal.onPowerResume((m) => {
+      audioOut.rebuild((m && m.why) || 'the Mac woke up');
+      audioOut.ensure().catch(() => {});
+      if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+    });
+  }
 
   // ── LISTEN ──────────────────────────────────────────────────────────────
   let micStream = null, recorder = null, chunks = [], silenceTimer = null, aborted = false;
@@ -2288,6 +2316,7 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     streamEnded = true;
     speaking = false;
     try { window.hannibal.claudeInterrupt && window.hannibal.claudeInterrupt(); } catch (_) {}
+    speaker.stop();                             // cuts the page sound at once, even if the output is dead
     if (curSrc) { try { curSrc.stop(); } catch (_) {} }
     if (vio) { try { window.hannibal.vioStop(); } catch (_) {} }
     brain.setAmplitude(0);
@@ -2311,67 +2340,88 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     if (!speaking) playerRun = runPlayer();
   }
 
+  // Every sentence is bounded (src/voice-player.js): a failed voice request, a
+  // clip that never ends or a dead audio output is logged, recovered and
+  // retried once, then skipped. The queue never stays locked behind one sentence.
   async function runPlayer() {
     speaking = true;
     setPhase('speaking');
-    if (audioCtx.state === 'suspended') await audioCtx.resume();
     const seq = turnSeq;                       // a barge-in bumps this: stop at once
-    // play while there's work, or while the LLM may still produce more
-    while ((speakQueue.length || !streamEnded) && seq === turnSeq) {
-      if (!speakQueue.length) { await sleep(40); continue; }
-      const item = speakQueue.shift();
-      playingOne = true;
-      try { await speakOne(item.text, item.audio, seq); }
-      catch (e) { console.warn('[voice] tts/play failed', e); }
-      finally { playingOne = false; }
+    try {
+      await VP.runQueue({
+        next: () => speakQueue.shift(),
+        more: () => !streamEnded,
+        isCurrent: () => seq === turnSeq,
+        speak: async (item) => {
+          playingOne = true;
+          try { return await speakOne(item.text, item.audio, seq); }
+          finally { playingOne = false; }
+        },
+        onAbandon: () => { speaker.stop(); if (vio) { try { window.hannibal.vioStop(); } catch (_) {} } },
+        onDrop: reportDrop,
+      });
+    } catch (e) { console.warn('[voice] player failed', e); }
+    finally {
+      speaking = false;
+      brain.setAmplitude(0);
     }
-    speaking = false;
+  }
+
+  // Every dropout goes to ~/Library/Logs/Hannibal/voice-dropouts.log (main side)
+  // with the stage, the error and the speakers, so "did your voice drop out
+  // today?" has a real answer (tool voice.dropouts).
+  function reportDrop(d) {
+    const entry = { ...d, device: audioOut.device(), where: 'desk' };
+    console.warn(`[voice-drop] ${entry.stage}: ${entry.error}${entry.recovered ? ' (recovered)' : ' (skipped)'} — ${entry.device}`);
+    try { window.hannibal.voiceDrop && window.hannibal.voiceDrop(entry); } catch (_) {}
+  }
+
+
+  async function vioPlayOnce(bytes, ms) {
+    if (turnEndedAt) { console.warn(`[timing] you stopped talking → his first word: ${Math.round(performance.now() - turnEndedAt)} ms`); turnEndedAt = 0; }
+    const r = await window.hannibal.vioPlay(bytes, ms);
     brain.setAmplitude(0);
+    if (r && (r.ok || r.stopped)) return r;
+    // The speakers changed under the helper: it rebuilt itself, try it once more.
+    const retryable = !!(r && /device changed/i.test(r.error || ''));
+    if (!retryable) {
+      console.warn('[voice] voice helper could not play — using the page from now on:', r && r.error);
+      vioOff(`it could not play: ${(r && r.error) || 'no answer'}`);
+    }
+    return { ...(r || {}), retryable };
   }
 
   async function speakOne(text, prefetched, seq = null) {
     spokenRecent.push(String(text || '')); if (spokenRecent.length > 3) spokenRecent.shift();
-    const bytes = await (prefetched || window.hannibal.tts(text));   // Uint8Array (MP3)
-    const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-    const audioBuf = await audioCtx.decodeAudioData(ab);
-    if (seq !== null && seq !== turnSeq) return;   // Fred cut in while this sentence was loading
-    if (vio) {
-      if (turnEndedAt) { console.warn(`[timing] you stopped talking → his first word: ${Math.round(performance.now() - turnEndedAt)} ms`); turnEndedAt = 0; }
-      const r = await window.hannibal.vioPlay(bytes, Math.round(audioBuf.duration * 1000));
-      brain.setAmplitude(0);
-      if (r && (r.ok || r.stopped)) return;
-      console.warn('[voice] voice helper could not play — using the page from now on:', r && r.error);
-      vioOff(`it could not play: ${(r && r.error) || 'no answer'}`);
-      if (seq !== null && seq !== turnSeq) return;
-    }
-    if (turnEndedAt) { console.warn(`[timing] you stopped talking → his first word: ${Math.round(performance.now() - turnEndedAt)} ms`); turnEndedAt = 0; }
-    await playWithAmplitude(audioBuf);
+    return speaker.speak(text, {
+      prefetched,
+      isCurrent: () => seq === null || seq === turnSeq,   // Fred cut in: drop this sentence
+    });
   }
 
-  function playWithAmplitude(audioBuf) {
-    return new Promise((resolve) => {
-      const src = audioCtx.createBufferSource();
-      src.buffer = audioBuf;
-      const analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 1024;
-      src.connect(analyser);
-      analyser.connect(audioCtx.destination);
-
-      const data = new Uint8Array(analyser.fftSize);
-      let raf = 0;
-      const loop = () => {
-        analyser.getByteTimeDomainData(data);
-        let sum = 0;
-        for (let i = 0; i < data.length; i++) { const v = (data[i] - 128) / 128; sum += v * v; }
-        const rms = Math.sqrt(sum / data.length);
-        brain.setAmplitude(Math.min(1, rms * 3)); // scale speech RMS into 0..1
+  function playWithAmplitude(ctx, audioBuf) {
+    if (turnEndedAt) { console.warn(`[timing] you stopped talking → his first word: ${Math.round(performance.now() - turnEndedAt)} ms`); turnEndedAt = 0; }
+    let raf = 0;
+    const h = VP.playBuffer(ctx, audioBuf, {
+      connect: (src) => {
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 1024;
+        src.connect(analyser);
+        analyser.connect(ctx.destination);
+        const data = new Uint8Array(analyser.fftSize);
+        const loop = () => {
+          analyser.getByteTimeDomainData(data);
+          let sum = 0;
+          for (let i = 0; i < data.length; i++) { const v = (data[i] - 128) / 128; sum += v * v; }
+          brain.setAmplitude(Math.min(1, Math.sqrt(sum / data.length) * 3)); // scale speech RMS into 0..1
+          raf = requestAnimationFrame(loop);
+        };
+        curSrc = src;
         raf = requestAnimationFrame(loop);
-      };
-      src.onended = () => { cancelAnimationFrame(raf); brain.setAmplitude(0); if (curSrc === src) curSrc = null; resolve(); };
-      curSrc = src;
-      src.start();
-      loop();
+        return () => { cancelAnimationFrame(raf); brain.setAmplitude(0); if (curSrc === src) curSrc = null; try { analyser.disconnect(); src.disconnect(); } catch (_) {} };
+      },
     });
+    return h;
   }
 
   // Stream an Ollama chat and speak it sentence-by-sentence as tokens arrive.
