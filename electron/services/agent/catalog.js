@@ -960,6 +960,47 @@ const TOOLS = [
     description: 'Snapshot of live Claude Code sessions tracked by the cc-ingest listener.',
     params: [], side_effect: SIDE_EFFECT.READ, executor: EXECUTOR.MAIN, via: { channel: 'cc:getSessions' },
     note: 'Populated by inbound n8n→cc-ingest events; this is a read of that in-memory state.' },
+
+  // ═══════════════════════ CLAUDE CODE JOBS (services/code-jobs.js) ═══════════════════════
+  // Headless Claude Code on the Mac, in its own git worktree on a new branch.
+  // Starting one (and a follow-up) is confirm-first; it never merges or deploys.
+  // Works from the desk and, while the Mac is awake and linked, from the phone.
+  // claude_only: never composed by the Ollama planner.
+  { name: 'codejob.projects', domain: 'codejobs',
+    description: "List Fred's code projects (git repos on the Mac) that a Claude Code job can work on. Use it when you are not sure of the exact project name.",
+    params: [], side_effect: SIDE_EFFECT.READ, executor: EXECUTOR.MAIN,
+    via: { channel: 'codejob', action: 'projects', raw: true }, claude_only: true,
+    returns: '{ ok, count, projects:[{ name, where }] }' },
+  { name: 'codejob.start', domain: 'codejobs',
+    description: 'Start a Claude Code job for Fred: Claude Code works by itself in the background on one of his projects (own copy, new branch), commits, and Hannibal pushes the branch and opens a DRAFT pull request. Fred is told when it is done. It never merges or deploys. '
+      + 'Write the task as a clear, complete brief for a developer (what to change, where if known, how to check it); keep Fred\'s own words and any spec he gave.',
+    params: [
+      { name: 'project', type: 'string', required: true, desc: 'the project (folder) name, e.g. "hannibal-v2" or "revalis-housing"' },
+      { name: 'task', type: 'string', required: true, desc: 'the full brief for Claude Code' },
+      { name: 'title', type: 'string', required: false, desc: 'a short name for the job (3-6 words), used for the branch and PR title' },
+    ], side_effect: SIDE_EFFECT.WRITE, confirm: true, executor: EXECUTOR.MAIN,
+    via: { channel: 'codejob', action: 'start', raw: true }, claude_only: true, permission: { ceiling: 'never' },
+    returns: '{ ok, message, job:{ id, title, project, branch, state } }  or { ok:false, ambiguous, options[] } / { ok:false, error, projects[] }' },
+  { name: 'codejob.status', domain: 'codejobs',
+    description: 'How are the Claude Code jobs doing: running ones (what they are doing right now) and recent finished ones (summary, PR link). Give job to ask about one.',
+    params: [{ name: 'job', type: 'string', required: false, desc: 'job id, title or project' }],
+    side_effect: SIDE_EFFECT.READ, executor: EXECUTOR.MAIN,
+    via: { channel: 'codejob', action: 'status', raw: true }, claude_only: true,
+    returns: '{ ok, running, jobs:[{ id, title, project, state, minutes, doing?, lastSaid?, summary?, pr?, openPr?, error? }] }' },
+  { name: 'codejob.stop', domain: 'codejobs',
+    description: 'Stop a running Claude Code job (Fred asked). What it already committed stays on its branch.',
+    params: [{ name: 'job', type: 'string', required: false, desc: 'job id, title or project (default: the running one)' }],
+    side_effect: SIDE_EFFECT.WRITE, confirm: false, executor: EXECUTOR.MAIN,
+    via: { channel: 'codejob', action: 'stop', raw: true }, claude_only: true,
+    returns: '{ ok, message }' },
+  { name: 'codejob.followUp', domain: 'codejobs',
+    description: 'Give a finished Claude Code job more work ("also add a test", "fix what the review said"): same branch, same conversation; the PR gets the new commits.',
+    params: [
+      { name: 'job', type: 'string', required: false, desc: 'job id, title or project (default: the latest job)' },
+      { name: 'text', type: 'string', required: true, desc: 'what Claude Code should do next' },
+    ], side_effect: SIDE_EFFECT.WRITE, confirm: true, executor: EXECUTOR.MAIN,
+    via: { channel: 'codejob', action: 'followUp', raw: true }, claude_only: true, permission: { ceiling: 'never' },
+    returns: '{ ok, message, job }' },
 ];
 
 // ─────────────────────────── accessors ───────────────────────────

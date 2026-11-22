@@ -3478,7 +3478,7 @@ RULES:
   if (window.hannibal && window.hannibal.onRemindersDue) {
     window.hannibal.onRemindersDue((r) => {
       if (!r || DUE_TO_SAY.some((x) => x.id === r.id)) return;
-      DUE_TO_SAY.push({ id: r.id, message: r.message, at: Date.now() });
+      DUE_TO_SAY.push({ id: r.id, message: r.message, say: !!r.say, at: Date.now() });   // say: the line as is (Claude Code job news)
       loadReminders().catch(() => {});
     });
   }
@@ -3508,7 +3508,7 @@ RULES:
         while (DUE_TO_SAY.length) {
           const r = DUE_TO_SAY.shift();
           emitModel('system');
-          try { await speakLine(`Fred, reminder: ${r.message || 'you asked me to remind you'}.`); }
+          try { await speakLine(r.say ? r.message : `Fred, reminder: ${r.message || 'you asked me to remind you'}.`); }
           catch (_) {}
         }
         autonomousSpeaking = false;

@@ -166,9 +166,9 @@ refreshTools();
 
 const serverContext = () => (hub && hub.linked()
   ? 'You are running on Fred\'s always-on server. His Mac is awake and linked right now, so you can also use its tools '
-    + '(apps, files, camera, screen, WhatsApp, music). Anything that changes something is confirmed on his phone first.'
+    + '(apps, files, camera, screen, WhatsApp, music, and Claude Code jobs: codejob.*). Anything that changes something is confirmed on his phone first.'
   : 'You are running on Fred\'s always-on server. His Mac is asleep or off right now, so you can use his calendar, mail (read), '
-    + 'the web, news, reminders and your memory, but not Mac apps, the camera, the screen or WhatsApp. If he asks for one '
+    + 'the web, news, reminders and your memory, but not Mac apps, the camera, the screen, WhatsApp or Claude Code jobs. If he asks for one '
     + 'of those, say it needs the Mac awake.');
 const PERSONA = "You are Hannibal, Fred's personal AI assistant. Be concise, direct, and natural, "
   + 'with dry wit. Notes about the current situation arrive as system messages during the conversation.';
