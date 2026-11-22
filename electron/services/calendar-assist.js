@@ -463,7 +463,8 @@ function createCalendarPreflight({ events, account, reminders = null, env = proc
       ? `; its reminder moves to ${fmtTime(r.ms - (linked[0].offsetMin || 0) * 60000, t)}` : '';
     const calTxt = ev && ev.calendar ? ` in your ${ev.calendar} calendar` : '';
     return { confirm: `Move “${title}”${only}${calTxt}${from} to ${to}${rem} — move it?`,
-      extra: { id, title, start: r.iso, ...(minutes ? { minutes } : {}), ...(occurrence ? { occurrence } : {}) } };
+      // Only a length Fred asked for is passed on: the event's own length (even 2 days) is kept by the move itself.
+      extra: { id, title, start: r.iso, ...(Number(p.minutes) > 0 ? { minutes: Math.round(Number(p.minutes)) } : {}), ...(occurrence ? { occurrence } : {}) } };
   }
 
   async function del(p) {

@@ -115,7 +115,8 @@ function parseICalEvents(xml, now, tz = assist.fredTz()) {
   const today = assist.dayOf(now.getTime(), tz);
   const dayN = (ts) => Math.round((Date.UTC(...ymd(assist.dayOf(ts, tz))) - Date.UTC(...ymd(today))) / 864e5);
   return events
-    .filter((e) => e.allDay || e.ts >= now.getTime() - 30 * 60 * 1000)   // drop past timed events (30m grace)
+    // drop past timed events (30m grace), but keep one still going (for the clash check)
+    .filter((e) => e.allDay || e.ts >= now.getTime() - 30 * 60 * 1000 || (e.endTs && e.endTs > now.getTime()))
     .sort((a, b) => a.ts - b.ts)
     .map((e) => {
       const n = dayN(e.ts);
@@ -818,6 +819,7 @@ function moveOccurrence(ics, occurrence, { start, minutes, now = Date.now(), tz 
 // move to another weekday of a series that repeats on named days.
 function moveSeries(ics, occurrence, { start, minutes, now = Date.now(), tz = assist.fredTz() } = {}) {
   const s = seriesOf(ics); if (s.error) return { ok: false, error: s.error };
+  if (s.master.top.some((l) => /^RDATE[;:]/.test(l))) return { ok: false, error: 'this series has extra dates added by hand, so moving the whole series is safer in the Calendar app: tell Fred' };
   if (s.blocks.some((b) => b.rid)) return { ok: false, error: 'some repeats of this series were already changed one by one, so moving the whole series is safer in the Calendar app: tell Fred' };
   const first = lineInstant(s.dtstart);
   const inst = occurrence ? occInstant(occurrence) : first;

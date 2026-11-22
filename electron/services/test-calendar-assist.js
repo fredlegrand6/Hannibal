@@ -178,6 +178,26 @@ async function withFetch(w, fn) {
     assert.strictEqual(A.isoLocal(free, TZ), '2026-11-24T08:00', '21:00 would end after Fred\'s day');
   });
 
+  await t('an event that started earlier and is still going counts as a clash', async () => {
+    const w = world({ store: { '/werk/long.ics': obj('long', 'Workshop', '2026-11-22T13:00', 180) } });
+    await withFetch(w, async () => {
+      const d = desk(w);
+      const r = await d.run('add', { title: 'Call with Jay', start: '2026-11-22T15:00', minutes: 30, remind_minutes: 0 });
+      assert.strictEqual(r.status, 'question', JSON.stringify(r));
+      assert.match(r.out.ask, /clashes with “Workshop” \(13:00 to 16:00\)/);
+    });
+  });
+  await t('moving a 2-day event keeps it 2 days (its own length is not forced into minutes)', async () => {
+    const w = world({ store: { '/werk/trip.ics': obj('trip', 'Ibiza trip', '2026-11-24T10:00', 48 * 60) } });
+    await withFetch(w, async () => {
+      const d = desk(w);
+      const r = await d.run('move', { id: '/werk/trip.ics', title: 'Ibiza trip', start: '2026-11-26T10:00', allow_clash: true });
+      assert.strictEqual(r.status, 'ok', JSON.stringify(r));
+      assert.match(d.asked[0], /for 48 hours/);
+      assert.match(w.store['/werk/trip.ics'], /DTSTART:20261126T090000Z\r\nDTEND:20261128T090000Z/);
+    });
+  });
+
   console.log('3. "Werk" unless Fred names another calendar');
   await t('no calendar named: Werk (even though the account\'s own default is Home), and the question says so', async () => {
     const w = world();
@@ -399,6 +419,13 @@ async function withFetch(w, fn) {
     const ics = standup().replace('RRULE:FREQ=WEEKLY', 'RRULE:FREQ=WEEKLY;BYDAY=MO');
     const r = moveSeries(ics, '20261123T080000Z', { start: '2026-11-24T09:00', now: NOW, tz: TZ });
     assert.ok(!r.ok && /repeat rule/.test(r.error));
+  });
+
+  await t('a series with hand-added dates (RDATE) is not moved as a whole: refused, nothing written', () => {
+    const { moveSeries } = require('./info-handlers');
+    const ics = standup().replace('RRULE:FREQ=WEEKLY', 'RRULE:FREQ=WEEKLY\r\nRDATE;TZID=Europe/Madrid:20261126T090000');
+    const r = moveSeries(ics, '20261123T080000Z', { start: '2026-11-23T10:00', now: NOW, tz: TZ });
+    assert.ok(!r.ok && /Calendar app/.test(r.error), JSON.stringify(r));
   });
 
   console.log('8. every write is read back; done only when verified');
