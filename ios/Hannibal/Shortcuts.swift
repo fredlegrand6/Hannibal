@@ -7,6 +7,8 @@
 // ─────────────────────────────────────────────────────────────────────────
 import AppIntents
 import Foundation
+import UIKit
+import UserNotifications
 
 struct AskHannibalIntent: AppIntent {
     static var title: LocalizedStringResource = "Ask Hannibal"
@@ -27,24 +29,67 @@ struct AskHannibalIntent: AppIntent {
             let s = "I didn't catch a question."
             return .result(value: s, dialog: IntentDialog(stringLiteral: s))
         }
-        // Siri stops waiting after a while; a long job with tools keeps running
-        // on the server, and its answer is in Hannibal's memory and the app.
+        // Siri stops waiting after a while. A long job keeps running here; its
+        // answer then arrives as a notification (tap it, or it shows in the
+        // chat if the app is open), so nothing is lost.
         let api = HannibalAPI(conn: conn)
-        let answer: String = await withTaskGroup(of: String?.self) { group in
-            group.addTask {
-                do { return try await api.say(q).reply ?? "He didn't answer." }
-                catch { return "I couldn't reach Hannibal: \(error.localizedDescription)" }
-            }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: 25_000_000_000)
-                return nil
-            }
-            let first = await group.next() ?? nil
-            group.cancelAll()
-            return first ?? "He's still working on it. Open Hannibal for the answer."
+        let work = Task { () -> String in
+            do { return try await api.say(q).reply ?? "He didn't answer." }
+            catch { return "I couldn't reach Hannibal: \(error.localizedDescription)" }
+        }
+        guard let answer = await Self.first(of: work, within: 25) else {
+            await Self.deliverLater(work, question: q)
+            let s = "He's still working on it. I'll send you his answer as a notification."
+            return .result(value: s, dialog: IntentDialog(stringLiteral: s))
         }
         let spoken = Self.clean(answer)
         return .result(value: spoken, dialog: IntentDialog(stringLiteral: spoken))
+    }
+
+    /// The answer, or nil if it takes longer than `seconds` (the work keeps going).
+    static func first(of work: Task<String, Never>, within seconds: Double) async -> String? {
+        final class Once: @unchecked Sendable {
+            private let lock = NSLock()
+            private var cont: CheckedContinuation<String?, Never>?
+            init(_ c: CheckedContinuation<String?, Never>) { cont = c }
+            func resume(_ v: String?) {
+                lock.lock(); let c = cont; cont = nil; lock.unlock()
+                c?.resume(returning: v)
+            }
+        }
+        return await withCheckedContinuation { c in
+            let once = Once(c)
+            Task { once.resume(await work.value) }
+            Task {
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                once.resume(nil)
+            }
+        }
+    }
+
+    /// Keeps the app awake for the rest of the answer, then posts it.
+    @MainActor
+    static func deliverLater(_ work: Task<String, Never>, question: String) {
+        final class BG: @unchecked Sendable {
+            var id = UIBackgroundTaskIdentifier.invalid
+            @MainActor func end() {
+                guard id != .invalid else { return }
+                UIApplication.shared.endBackgroundTask(id); id = .invalid
+            }
+        }
+        let bg = BG()
+        bg.id = UIApplication.shared.beginBackgroundTask(withName: "hannibal.ask") { MainActor.assumeIsolated { bg.end() } }
+        Task { @MainActor in
+            let answer = clean(await work.value)
+            let content = UNMutableNotificationContent()
+            content.title = "Hannibal"
+            content.subtitle = String(question.prefix(80))
+            content.body = answer
+            content.sound = .default
+            try? await UNUserNotificationCenter.current().add(
+                UNNotificationRequest(identifier: "ask-\(UUID().uuidString)", content: content, trigger: nil))
+            bg.end()
+        }
     }
 
     /// Siri reads plain text: drop markdown marks and the Yes/No tail.
