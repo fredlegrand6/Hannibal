@@ -32,7 +32,19 @@ Tailscale must be on on the iPhone, same as for the web app.
 - **Tap the orb** to stop him talking. Starting to talk also stops him.
 - Speaker icon: read every answer aloud, or only when you talked.
 - Camera button: take or choose a photo; anything typed goes with it as the question.
-- Reminders, the morning brief and Yes/No questions show up live while the app is open.
+- Reminders, the morning brief and Yes/No questions show up live while the app is open,
+  and as notifications when it's closed (No right there; Yes needs the phone unlocked and opens the app).
+
+### Siri, Action Button, lock screen (step 4)
+
+Open Hannibal once after installing, so iOS learns the shortcuts.
+
+- **Siri:** "Hey Siri, talk to Hannibal" starts live talk. "Hey Siri, ask Hannibal" lets Siri ask
+  for the question and reads his answer out without opening the app (Siri's voice; same brain).
+- **Action Button:** Settings › Action Button › Controls (or Shortcut) › *Talk to Hannibal*.
+- **Lock screen / Control Center:** long-press the lock screen › Customize › Lock Screen › tap a
+  bottom button › *Talk to Hannibal*. In Control Center: tap + › Add a Control › Hannibal.
+- **Dynamic Island:** while live talk runs it shows listening / thinking / speaking, with Stop.
 
 ## Notes for builders
 
@@ -43,4 +55,5 @@ Tailscale must be on on the iPhone, same as for the web app.
   `hannibal_k` cookie the web app uses.
 - Long answers are spoken sentence by sentence (the next one loads while one plays).
 - Live talk sends each sentence as a 16 kHz WAV to /api/voice; no server change.
-- Next steps: push notifications, Siri / Action Button.
+- `ios/Shared/` is compiled into both the app and the `HannibalWidgets` extension (Live Activity
+  data + the start/stop intents). The extension (iOS 18+) draws the control button and the Live Activity.
