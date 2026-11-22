@@ -3,8 +3,7 @@
 // even when the app is closed. The server sends them through Apple (see
 // server/apns.js) only while the app isn't open; when it is open they show
 // up in the conversation as before.
-// Yes on the lock screen needs Face ID (an action can't run unasked);
-// No doesn't. Tapping the notification itself opens the app.
+// Yes needs the phone unlocked (Face ID) and opens the app; No doesn't. Tapping the notification itself opens the app.
 // ─────────────────────────────────────────────────────────────────────────
 import UIKit
 import UserNotifications
@@ -39,7 +38,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         let center = UNUserNotificationCenter.current()
         center.delegate = self
-        let yes = UNNotificationAction(identifier: "YES", title: "Yes, go ahead", options: [.authenticationRequired])
+        // iOS hid a Yes marked .authenticationRequired on Fred's iPhone (only No
+        // showed). A .foreground action also needs the phone unlocked (Face ID)
+        // and opens Hannibal, so the answer and its outcome show in the chat.
+        let yes = UNNotificationAction(identifier: "YES", title: "Yes, go ahead", options: [.foreground])
         let no = UNNotificationAction(identifier: "NO", title: "No", options: [.destructive])
         let confirm = UNNotificationCategory(identifier: "CONFIRM", actions: [yes, no], intentIdentifiers: [], options: [])
         center.setNotificationCategories([confirm])
@@ -84,7 +86,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         case "YES", "NO":
             let yes = response.actionIdentifier == "YES"
             if let model { await model.answerFromPush(id: id, summary: body, yes: yes) }
-            else if let conn = ConnectionStore.load() {
+            else if yes {
+                // Yes opens the app: answer once its screen is up so the outcome shows there.
+                await MainActor.run { self.withModel { m in Task { await m.answerFromPush(id: id, summary: body, yes: true) } } }
+            } else if let conn = ConnectionStore.load() {
                 // Answered from the lock screen before the app's screen was up.
                 _ = await HannibalAPI(conn: conn).confirm(id: id, yes: yes)
             }
