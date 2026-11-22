@@ -13,6 +13,16 @@ struct Reply: Decodable {
     var spoken: Bool?
 }
 
+/// What the home / lock screen widget shows (/api/glance).
+struct Glance: Codable {
+    struct Event: Codable, Hashable { var title: String; var ts: Double; var endTs: Double?; var allDay: Bool? }
+    struct Reminder: Codable, Hashable { var message: String; var ts: Double }
+    var ok: Bool?
+    var events: [Event]
+    var reminders: [Reminder]
+    var waiting: Int?
+}
+
 struct HannibalEvent: Decodable {
     var type: String
     var id: String?
@@ -118,6 +128,14 @@ final class HannibalAPI {
         case 410: return .expired
         default: return .unknown
         }
+    }
+
+    func glance() async throws -> Glance {
+        let (data, resp) = try await session.data(for: request("api/glance", method: "GET", contentType: nil, timeout: 20))
+        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        if code == 401 || code == 403 { throw APIError.unauthorized }
+        guard code == 200 else { throw APIError.status(code) }
+        return try JSONDecoder().decode(Glance.self, from: data)
     }
 
     func registerPush(token: String) async {

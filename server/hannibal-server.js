@@ -271,6 +271,14 @@ if (process.env.PHONE_APP_TOKEN) {
       onVoiceDrop: (d) => voiceDrops.record(d),
       memory,
       status: () => ({ mac: !!(hub && hub.linked()) }),
+      // The iPhone widget: next 2 days of calendar + upcoming reminders (here and at the desk).
+      glance: async () => {
+        const [cal, rem] = await Promise.all([
+          Promise.resolve(registry['calendar:events'] ? registry['calendar:events'](null, 2) : null).catch(() => null),
+          Promise.resolve(registry['reminders:upcoming'] ? registry['reminders:upcoming'](null) : null).catch(() => null),
+        ]);
+        return { events: (cal && cal.ok && cal.events) || [], reminders: (rem && rem.reminders) || [] };
+      },
       onReset: () => claudeBrain.resetHistory(),
     });
     phoneApp.start();

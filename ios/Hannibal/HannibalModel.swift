@@ -4,6 +4,7 @@
 // and the morning brief arrive live while the app is open.
 // ─────────────────────────────────────────────────────────────────────────
 import Foundation
+import WidgetKit
 import Observation
 import UIKit
 
@@ -334,8 +335,10 @@ final class HannibalModel {
             online = true
             backoff = 1
             expireOldConfirms()          // a close may have been missed while away
+            WidgetCenter.shared.reloadAllTimelines()
         case "notify":
             guard let t = ev.text, !t.isEmpty else { return }
+            WidgetCenter.shared.reloadAllTimelines()
             add(.notify, t)
             pulses += 1
             UINotificationFeedbackGenerator().notificationOccurred(.success)
@@ -345,6 +348,7 @@ final class HannibalModel {
             lines.append(Line(kind: .confirm, text: (ev.summary ?? "Shall I go ahead?"), confirmId: id, expires: Date().addingTimeInterval(120)))
             pulses += 1
             scheduleExpiry()
+            WidgetCenter.shared.reloadAllTimelines()
             UINotificationFeedbackGenerator().notificationOccurred(.warning)
         case "confirm-closed":
             guard let id = ev.id, let i = lines.firstIndex(where: { $0.confirmId == id }) else { return }

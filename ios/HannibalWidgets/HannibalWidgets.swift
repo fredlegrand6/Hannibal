@@ -14,6 +14,7 @@ import WidgetKit
 @main
 struct HannibalWidgets: WidgetBundle {
     var body: some Widget {
+        HannibalGlanceWidget()
         HannibalLiveActivity()
         HannibalTalkControl()
     }

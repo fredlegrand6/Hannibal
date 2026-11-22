@@ -29,6 +29,12 @@ const app = createPhoneApp({
   speak: async (t) => Buffer.from(`mp3:${t}`),
   status: () => ({ mac: true }),
   onVoiceDrop: (d) => voiceDrops.push(d),
+  glance: async () => ({
+    events: [{ title: 'Past', ts: Date.now() - 7200000, endTs: Date.now() - 3600000 },
+      { title: 'Lunch with Jay', ts: Date.now() + 3600000, endTs: Date.now() + 7200000 },
+      { title: 'Now', ts: Date.now() - 600000, endTs: Date.now() + 600000 }],
+    reminders: [{ message: 'Call Gaian', triggerTs: Date.now() + 1800000 }, { message: 'old', triggerTs: Date.now() - 1000 }],
+  }),
 });
 
 (async () => {
@@ -86,6 +92,14 @@ const app = createPhoneApp({
     assert.strictEqual(lastPayload.user, 'heard 12 bytes of audio/wav');
     assert.strictEqual((await fetch(`${base}/api/voice-look`, { method: 'POST', headers: C, body: JSON.stringify({ audio }) })).status, 400);
     assert.strictEqual((await fetch(`${base}/api/voice-look`, { method: 'POST', body: JSON.stringify({ audio, image: jpeg }) })).status, 401);
+  });
+
+  await test('glance: upcoming events and reminders for the widget, key needed', async () => {
+    assert.strictEqual((await fetch(`${base}/api/glance`)).status, 401);
+    const j = await (await fetch(`${base}/api/glance`, { headers: C })).json();
+    assert.deepStrictEqual(j.events.map((e) => e.title), ['Now', 'Lunch with Jay']);
+    assert.deepStrictEqual(j.reminders.map((r) => r.message), ['Call Gaian']);
+    assert.strictEqual(j.waiting, 0);
   });
 
   await test('a photo needs the key', async () => {

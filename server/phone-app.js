@@ -91,6 +91,8 @@ function createPhoneApp(opts = {}) {
     });
   }
 
+  let glanceCache = null;
+
   async function turn(text, { spoken = false, images } = {}) {
     let memories = '';
     if (opts.memory) { try { memories = await opts.memory.recall(text); } catch (_) {} }
@@ -197,6 +199,28 @@ function createPhoneApp(opts = {}) {
         json(res, 200, { heard, ...(await turn(heard, { spoken: true, images: [image] })) });
       } catch (e) { log('voice-look failed:', e.message); json(res, 500, { ok: false, reply: 'Something went wrong with that. Try again?' }); }
       finally { busy = false; }
+      return;
+    }
+
+    // At a glance (iPhone home/lock screen widget): next appointments,
+    // reminders and how many Yes/No questions wait. Cached for a minute.
+    if (req.method === 'GET' && url.pathname === '/api/glance') {
+      try {
+        if (!glanceCache || Date.now() - glanceCache.at > 60000) {
+          const g = opts.glance ? await opts.glance() : {};
+          const now = Date.now();
+          const events = (Array.isArray(g.events) ? g.events : [])
+            .filter((e) => e && Number(e.endTs || e.ts) >= now)
+            .sort((a, b) => a.ts - b.ts).slice(0, 6)
+            .map((e) => ({ title: String(e.title || '').slice(0, 120), ts: Number(e.ts), ...(e.endTs ? { endTs: Number(e.endTs) } : {}), allDay: !!e.allDay }));
+          const reminders = (Array.isArray(g.reminders) ? g.reminders : [])
+            .filter((r) => r && Number(r.triggerTs) >= now)
+            .sort((a, b) => a.triggerTs - b.triggerTs).slice(0, 6)
+            .map((r) => ({ message: String(r.message || '').slice(0, 160), ts: Number(r.triggerTs) }));
+          glanceCache = { at: Date.now(), body: { ok: true, events, reminders } };
+        }
+        json(res, 200, { ...glanceCache.body, waiting: pending.size, at: glanceCache.at });
+      } catch (e) { log('glance failed:', e.message); json(res, 200, { ok: false, events: [], reminders: [], waiting: pending.size }); }
       return;
     }
 
