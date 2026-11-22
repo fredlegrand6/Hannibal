@@ -3191,7 +3191,9 @@ RULES:
   const YES_FILLER = /^(please|thanks|thank you|hannibal|book it|do it|go ahead|send it|that's fine|that is fine|fine|perfect|great|good|sure|yes|yeah|ok|okay|graag|dank je|merci)$/i;
   const CONFIRM_NO  = /^(n|no|nope|nah|don'?t|do not|stop|cancel|wait|hold on|hold up|never ?mind|negative|nee|non|skip|not now|leave it|abort)$/i;
 
+  // EN/NL/FR/ES yes/no words, including how Whisper spells them (src/confirm-words.js).
   function classifyConfirmation(raw) {
+    if (window.ConfirmWords) return window.ConfirmWords.classify(raw);
     const t = String(raw || '').trim().toLowerCase().replace(/^[\s.!?,]+/, '').replace(/[\s.!?,]+$/, '');
     if (!t) return 'silence';               // nothing heard at all
     if (CONFIRM_YES.test(t)) return 'yes';  // a clean affirmative and nothing more
@@ -3235,9 +3237,11 @@ RULES:
         stream.getTracks().forEach((t) => t.stop());
         const blob = new Blob(localChunks, { type: 'audio/webm' });
         if (!blob.size) { resolve(null); return; }
-        const code = LANG_CODE[currentLanguage] || 'en';
+        // Same language rule as a normal turn (auto among his languages), so a
+        // Dutch "ja" or a French "oui" isn't forced into English spelling.
+        const code = cfg.sttLanguage === 'follow' ? (LANG_CODE[currentLanguage] || 'en') : (cfg.sttLanguage || 'auto');
         try {
-          const r = await fetch(`${cfg.whisperUrl}/transcribe?language=${code}`, { method: 'POST', body: blob });
+          const r = await fetch(`${cfg.whisperUrl}/transcribe?language=${code}&hint=${LANG_CODE[currentLanguage] || 'en'}`, { method: 'POST', body: blob });
           const j = await r.json();
           resolve(fixTranscript(((j && j.transcript) || '').trim()));
         } catch (e) { console.warn('[gate] transcribe failed', e); resolve(null); }
@@ -3276,7 +3280,7 @@ RULES:
   async function handleConfirmRequest(req) {
     // main asks per-action and awaits each reply, so only one is ever in flight;
     // deny any overlap defensively.
-    if (confirmInFlight) { try { window.hannibal.agentConfirmResponse(req.id, false); } catch (_) {} return; }
+    if (confirmInFlight) { console.warn('[gate] overlapping request refused'); try { window.hannibal.agentConfirmResponse(req.id, { approved: false, answer: 'unheard' }); } catch (_) {} return; }
     confirmInFlight = true;   // from here, the normal voice loop is fully suspended
     // Seize the mic: stop any in-progress normal capture so its recorder can't
     // also grab the spoken answer. finishListening() no-ops while confirmInFlight,
@@ -3287,10 +3291,10 @@ RULES:
     for (let w = 0; narrating && w < 30; w++) await new Promise((r) => setTimeout(r, 50));
     // ...and let Claude finish the sentence it's saying before the tool call (≤15s)
     for (let w = 0; (speakQueue.length || playingOne) && w < 300; w++) await new Promise((r) => setTimeout(r, 50));
-    let decided = false, decision = false, gateUI = null, heardVerdict = null;
+    let decided = false, decision = false, gateUI = null, heardVerdict = null, decidedHow = null;
     const finalize = (val, how) => {
       if (decided) return;
-      decided = true; decision = !!val;
+      decided = true; decision = !!val; decidedHow = how;
       console.warn(`[gate] "${req.summary}" → ${decision ? 'YES' : 'NO'} (${how})`);
       try { if (confirmCancel) confirmCancel(); } catch (_) {}
     };
@@ -3313,43 +3317,49 @@ RULES:
       //    defaulting to NO. Still deny-by-default.
       const SETTLE_MS = 550;
       const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-      for (let attempt = 0; attempt < 2 && !decided; attempt++) {
-        if (attempt === 1) {
-          try { gateUI && gateUI.reveal(); } catch (_) {}   // voice missed → show the button backup
+      // Silence, Whisper noise or a half answer is NOT a no: ask again (up to
+      // three listens), and if there's still no clear answer, hold off and tell
+      // Claude it was unheard, so he asks again instead of calling it declined.
+      const TRIES = 3;
+      for (let attempt = 0; attempt < TRIES && !decided; attempt++) {
+        if (attempt >= 1) {
+          if (attempt === 1) { try { gateUI && gateUI.reveal(); } catch (_) {} }   // voice missed → show the button backup
           emitModel('system');
-          try { await speakLine("I didn't catch that — yes or no?"); } catch (_) {}
+          try { await speakLine(attempt === 1 ? "I didn't catch that. Yes or no?" : 'Sorry, once more: yes or no?'); } catch (_) {}
         }
         await sleep(SETTLE_MS);            // let the TTS tail clear → clean audio for VAD
         if (decided) break;               // a click landed during the prompt/settle
         const heard = await recordConfirmation();
         if (decided) break;               // a click won during capture
-        if (heard == null || heard === '') {
-          console.warn(`[gate] confirm: VAD/no clean speech (attempt ${attempt + 1}/2)`);
-          continue;                        // re-ask, or fall through to NO after the 2nd miss
-        }
-        heardVerdict = classifyConfirmation(heard);
-        console.warn(`[gate] heard "${heard}" → ${heardVerdict}`);
-        finalize(heardVerdict === 'yes', `voice:${heardVerdict}`);
+        heardVerdict = (heard == null || heard === '') ? 'silence' : classifyConfirmation(heard);
+        console.warn(`[gate] attempt ${attempt + 1}/${TRIES}: heard ${JSON.stringify(heard || '')} → ${heardVerdict}`);
+        if (heardVerdict === 'yes' || heardVerdict === 'no') finalize(heardVerdict === 'yes', `voice:${heardVerdict}`);
       }
-      if (!decided) finalize(false, 'silence');   // deny-by-default after one honest re-ask
+      if (!decided) finalize(false, 'no clear answer');   // deny-by-default, but say it was unheard
     } catch (e) {
       console.warn('[gate] handler error', e);
       finalize(false, 'error');
     }
     if (gateUI) { try { gateUI.finish(decision); } catch (_) {} }
-    // deny-by-default transparency: say why when it wasn't a clean yes
+    // The spoken line, the log and the answer to main all come from `decision`.
+    const said = decision ? 'yes' : (decidedHow === 'click' || heardVerdict === 'no' ? 'no' : 'unheard');
     try {
-      if (decision) await speakLine('On it.');
-      else if (heardVerdict === 'no') await speakLine('Okay, leaving it.');
-      else await speakLine("I didn't get a clear yes, so I'll hold off.");
+      if (said === 'yes') await speakLine('On it.');
+      else if (said === 'no') await speakLine('Okay, leaving it.');
+      else await speakLine("I didn't get a clear answer, so I haven't done it. Just ask again when you want it.");
     } catch (_) {}
     confirmInFlight = false;
-    try { window.hannibal.agentConfirmResponse(req.id, decision); } catch (_) {}
+    try { window.hannibal.agentConfirmResponse(req.id, { approved: decision, answer: said }); } catch (_) {}
     restOrRearm();   // always-listen: return to the open mic (else just idles)
   }
 
   if (window.hannibal && window.hannibal.onAgentConfirmRequest) {
-    window.hannibal.onAgentConfirmRequest(handleConfirmRequest);
+    // One question at a time: a second request waits its turn instead of being
+    // silently refused (which Claude would have reported as "declined").
+    let confirmChain = Promise.resolve();
+    window.hannibal.onAgentConfirmRequest((req) => {
+      confirmChain = confirmChain.then(() => handleConfirmRequest(req)).catch((e) => console.warn('[gate] queue error', e));
+    });
   }
 
   // ── AGENT PROGRESS (Stage 6) — spoken progress, brain cascade per step, a
