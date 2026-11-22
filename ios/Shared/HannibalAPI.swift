@@ -164,6 +164,18 @@ final class HannibalAPI {
         return (r.1 as? HTTPURLResponse)?.statusCode == 200
     }
 
+    /// A recorded meeting (m4a file). The server answers at once; the write-up comes later as a message.
+    func meeting(file: URL, seconds: TimeInterval, started: Date) async throws -> String {
+        var r = request("api/meeting", contentType: "audio/mp4", timeout: 600)
+        r.setValue(String(Int(seconds)), forHTTPHeaderField: "X-Meeting-Seconds")
+        r.setValue(String(Int(started.timeIntervalSince1970 * 1000)), forHTTPHeaderField: "X-Meeting-Started")
+        let (data, resp) = try await session.upload(for: r, fromFile: file)
+        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        if code == 401 || code == 403 { throw APIError.unauthorized }
+        guard code == 202 || code == 200 else { throw APIError.status(code) }
+        return ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any])?["note"] as? String ?? "Got it."
+    }
+
     /// The phone's answer to a server question (drive time…).
     func answer(_ reply: [String: Any]) async {
         _ = try? await session.data(for: request("api/answer", body: jsonBody(reply), timeout: 20))

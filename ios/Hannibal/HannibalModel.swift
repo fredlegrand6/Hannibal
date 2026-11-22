@@ -30,6 +30,9 @@ final class HannibalModel {
     var recording = false
     var speaking = false
     var live = false                 // hands-free conversation is on
+    var meetingSince: Date?          // recording a meeting since (nil = not recording)
+    let meeting = MeetingRecorder()
+    private var sendingMeetings = false
     var liveHearing = false          // ...and Fred is talking right now
     var looking = false
     var cameraOn = false             // live camera during live talk
@@ -135,6 +138,7 @@ final class HannibalModel {
 
     func startLive() {
         guard api != nil, !live else { return }
+        if meetingSince != nil { add(.note, "A meeting is being recorded. Stop it first (red bar)."); return }
         Task {
             guard await AudioSession.askMicPermission() else {
                 add(.error, "Hannibal needs the microphone. Turn it on in Settings › Hannibal.")
@@ -181,6 +185,55 @@ final class HannibalModel {
             cameraOn = true
             if !live { startLive() }
             add(.note, "Camera on. Point it and just talk: he sees what you see when you finish a sentence.")
+        }
+    }
+
+    // MARK: Meeting memory
+
+    /// Record button: start recording the meeting, or stop and send it.
+    func toggleMeeting() {
+        if meetingSince != nil {
+            guard let rec = meeting.stop() else { meetingSince = nil; return }
+            meetingSince = nil
+            UIApplication.shared.isIdleTimerDisabled = false
+            let mins = max(1, Int((rec.seconds / 60).rounded()))
+            add(.note, "Meeting recorded (\(mins) min). Sending it to Hannibal…")
+            Task { await sendWaitingMeetings() }
+            return
+        }
+        Task {
+            guard await AudioSession.askMicPermission() else {
+                add(.error, "Hannibal needs the microphone. Turn it on in Settings › Hannibal.")
+                return
+            }
+            if live { stopLive(nil) }
+            speaker.stop()
+            do { try meeting.start() } catch {
+                add(.error, "The recording couldn't start: \(error.localizedDescription)")
+                return
+            }
+            meetingSince = meeting.startedAt
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            add(.note, "Recording the meeting. Let the others know they're being recorded. It keeps going with the screen locked; tap the red bar to stop.")
+        }
+    }
+
+    /// Sends every recorded meeting that hasn't reached the server yet (oldest first).
+    func sendWaitingMeetings() async {
+        guard let api, !sendingMeetings else { return }
+        sendingMeetings = true
+        defer { sendingMeetings = false }
+        for (file, started) in MeetingRecorder.waiting().sorted(by: { $0.1 < $1.1 }) {
+            if meetingSince != nil, let s = meeting.startedAt, abs(s.timeIntervalSince(started)) < 1 { continue }   // still recording this one
+            let seconds = await MeetingRecorder.duration(of: file)
+            do {
+                let note = try await api.meeting(file: file, seconds: seconds, started: started)
+                try? FileManager.default.removeItem(at: file)
+                add(.note, "🎙 " + note)
+            } catch {
+                add(.error, "The meeting recording couldn't be sent yet (\(friendly(error))). It's kept; I'll send it when the connection is back.")
+                return
+            }
         }
     }
 
@@ -338,6 +391,7 @@ final class HannibalModel {
             expireOldConfirms()          // a close may have been missed while away
             WidgetCenter.shared.reloadAllTimelines()
             Task { await PlaceWatcher.shared.sync() }
+            Task { await sendWaitingMeetings() }
         case "places":
             Task { await PlaceWatcher.shared.sync() }
         case "notify":
@@ -428,7 +482,7 @@ final class HannibalModel {
     }
 
     func startRecording() {
-        guard api != nil, !live else { return }
+        guard api != nil, !live, meetingSince == nil else { return }
         wantRecording = true
         speaker.stop()                                  // talking over him stops him
         speaker.hold = true                             // and nothing new plays into the mic

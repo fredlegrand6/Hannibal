@@ -89,6 +89,7 @@ struct ChatView: View {
             Palette.bg.ignoresSafeArea()
             VStack(spacing: 0) {
                 header
+                if let since = model.meetingSince { meetingBar(since) }
                 orb
                 conversation
                 inputBar
@@ -119,6 +120,12 @@ struct ChatView: View {
             Circle().fill(model.online ? Color.green : Color.orange).frame(width: 8, height: 8)
             Text(model.online ? "Hannibal" : "Connecting…").font(.headline)
             Spacer()
+            Button { model.toggleMeeting() } label: {
+                Image(systemName: model.meetingSince != nil ? "record.circle.fill" : "record.circle")
+                    .font(.system(size: 20))
+                    .foregroundStyle(model.meetingSince != nil ? Color.red : Palette.cyan)
+            }
+            .accessibilityLabel(model.meetingSince != nil ? "Stop recording the meeting" : "Record a meeting")
             Button { model.toggleCamera() } label: {
                 Image(systemName: model.cameraOn ? "video.fill" : "video")
                     .font(.system(size: 19))
@@ -141,6 +148,27 @@ struct ChatView: View {
         .foregroundStyle(Palette.cyan)
         .padding(.horizontal, 16)
         .padding(.top, 6)
+    }
+
+    /// While a meeting is recorded: red bar with the time; tap = stop and send.
+    private func meetingBar(_ since: Date) -> some View {
+        Button { model.toggleMeeting() } label: {
+            HStack(spacing: 8) {
+                Circle().fill(Color.red).frame(width: 10, height: 10)
+                TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                    let s = Int(ctx.date.timeIntervalSince(since))
+                    Text("Recording meeting  \(s / 3600 > 0 ? "\(s / 3600):" : "")\(String(format: "%02d:%02d", (s / 60) % 60, s % 60))")
+                        .font(.subheadline.weight(.semibold).monospacedDigit())
+                }
+                Spacer()
+                Text("Stop").font(.subheadline.bold())
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 14).padding(.vertical, 10)
+            .background(Color.red.opacity(0.85), in: RoundedRectangle(cornerRadius: 12))
+            .padding(.horizontal, 16).padding(.top, 8)
+        }
+        .accessibilityLabel("Stop recording the meeting and send it")
     }
 
     private var orb: some View {

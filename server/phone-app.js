@@ -26,7 +26,8 @@ const STATIC = path.join(__dirname, 'phone');
 const COOKIE = 'hannibal_k';
 const CONFIRM_TIMEOUT_MS = 120000;
 const MAX_BODY = 15 * 1024 * 1024;
-const MAX_IMAGE_BODY = 8 * 1024 * 1024;     // a phone photo after shrinking is ~0.3-1 MB
+const MAX_IMAGE_BODY = 8 * 1024 * 1024;
+const MAX_MEETING_BODY = 200 * 1024 * 1024;  // ~3 h of meeting at 32 kbps AAC is ~45 MB     // a phone photo after shrinking is ~0.3-1 MB
 
 const PHONE_APP_CONTEXT =
   'Fred is using the Hannibal app on his phone, not speaking at the desk. Your reply is shown as text '
@@ -108,6 +109,18 @@ function createPhoneApp(opts = {}) {
     }
     if (r && r.toolsUsed && r.toolsUsed.length) return { ok: false, reply: `I ran ${r.toolsUsed.map((t) => t.tool).join(', ')} but then lost the connection to my brain. Check before asking again.` };
     return { ok: false, reply: `I can't think right now: ${(r && r.error) || 'no answer'}.` };
+  }
+
+  /** Hannibal thinks about something Fred didn't type (a meeting write-up):
+   *  same brain and tools, writes still go through Fred's Yes/No. */
+  async function think(prompt) {
+    const r = await opts.chat(
+      { system: opts.persona, context: PHONE_APP_CONTEXT, user: prompt },
+      null,
+      { runTool: opts.runTool ? (name, input) => opts.runTool(name, input, { confirmer }) : undefined },
+    );
+    if (r && r.ok && r.text) return r.text;
+    throw new Error((r && r.error) || 'my brain gave no answer');
   }
 
   const json = (res, code, body, extra = {}) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...extra }); res.end(JSON.stringify(body)); };
@@ -288,6 +301,18 @@ function createPhoneApp(opts = {}) {
       return;
     }
 
+    // A recorded meeting (raw audio). Answered at once; the write-up comes as a message.
+    if (req.method === 'POST' && url.pathname === '/api/meeting') {
+      if (!opts.meetings) { json(res, 501, { ok: false, note: 'Meeting memory is not set up on the server.' }); return; }
+      let audio;
+      try { audio = await readBody(req, MAX_MEETING_BODY); } catch (e) { json(res, 413, { ok: false, note: 'That recording is too long (over about 3 hours).' }); return; }
+      if (!audio.length) { json(res, 400, { ok: false, note: 'The recording was empty.' }); return; }
+      const h = (k) => { try { return decodeURIComponent(String(req.headers[k] || '')); } catch (_) { return ''; } };
+      const { id } = opts.meetings.accept(audio, { mime: req.headers['content-type'] || 'audio/mp4', title: h('x-meeting-title'), startedAt: Number(h('x-meeting-started')) || undefined, seconds: Number(h('x-meeting-seconds')) || 0 });
+      json(res, 202, { ok: true, id, note: 'Got it. I\'m writing it up and will send it in a few minutes.' });
+      return;
+    }
+
     // The phone's answer to ask() (e.g. { id, ok, minutes, km, place }).
     if (req.method === 'POST' && url.pathname === '/api/answer') {
       let body = {};
@@ -362,7 +387,7 @@ function createPhoneApp(opts = {}) {
     if (!clients.size && canPush() && opts.push.wake) opts.push.wake({ sync: 'places' }).catch((e) => log('silent push failed:', e.message));
   }
 
-  return { start, stop, notify, navigate, ask, placesChanged, handle, _confirmer: confirmer, _pending: pending, _places: opts.places };
+  return { start, stop, notify, navigate, ask, think, placesChanged, handle, _confirmer: confirmer, _pending: pending, _places: opts.places };
 }
 
 module.exports = { createPhoneApp, PHONE_APP_CONTEXT };
