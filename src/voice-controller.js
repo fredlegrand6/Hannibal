@@ -381,6 +381,11 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
                                  // to load at all) — never as a silent per-turn fallback after a hiccup.
   let vadTurnActive = false;     // a listening turn is recording and should honor VAD events
   let vadHeardThisTurn = false;  // silero confirmed speech began during this turn
+  let levelHeardThisTurn = false;   // same, from the level detector (no silero)
+  let lastHeardAnyAt = 0;           // last time ANY speech was transcribed (to Hannibal or not)
+  let nudgeQuiet = false;           // "stay quiet" / "we're busy": no nudges until Fred speaks to him again
+  // Fred is mid-sentence right now (the mic latched real speech this turn).
+  const fredTalking = () => phase === 'listening' && (vadHeardThisTurn || levelHeardThisTurn);
   let vadSpeechStartAt = 0;      // for the hard max-utterance cap in VAD mode
   const vadControl = (cmd) => { try { window.hannibal?.vadControl?.(cmd); console.log('[voice] VAD →', cmd); } catch (_) {} };
   // ── ALWAYS-LISTEN (continuous, wake-word-free) ──────────────────────────────
@@ -570,7 +575,7 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     let heardSpeech = false;              // latched only by SUSTAINED sound, never a single blip
     let sampleLog = 0;
     // Reset per-turn VAD state — silero is the primary stop decision once it has loaded.
-    vadTurnActive = true; vadHeardThisTurn = false; vadSpeechStartAt = 0;
+    vadTurnActive = true; vadHeardThisTurn = false; vadSpeechStartAt = 0; levelHeardThisTurn = false;
     // How long an open-but-silent mic waits before giving up this turn. In always-
     // listen mode that's a long, invisible recycle (it just reopens); otherwise
     // it's the 5s conversation/wake window that drops to idle.
@@ -610,7 +615,7 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
 
       // Onset: clearly above the measured floor for ~300ms = a real turn starting.
       if (avg >= speechThreshold) loudStreak++; else loudStreak = 0;
-      if (loudStreak >= SPEECH_ONSET_SAMPLES && !heardSpeech) { heardSpeech = true; speechStartAt = now; restfulListen = false; }
+      if (loudStreak >= SPEECH_ONSET_SAMPLES && !heardSpeech) { heardSpeech = true; levelHeardThisTurn = true; speechStartAt = now; restfulListen = false; }
 
       // Pause/release with hysteresis: a turn ends when the level falls back near
       // the floor (floor + small margin) OR drops below a fraction of the running
@@ -749,6 +754,7 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
         followUpMs: Number(cfg.nameFollowUpMs) || 20000,
         enabled: cfg.nameGate !== false,
       });
+      lastHeardAnyAt = Date.now();   // Fred is talking (maybe to someone else): not a gap for a nudge
       if (!gate.answer) { console.warn('[voice] not for me (no "Hannibal"):', JSON.stringify(transcript)); restOrRearm(); return; }
       if (gate.why === 'name' && gate.nameOnly) {
         // Just "Hannibal?" → answer like a wake word and listen for the request.
@@ -761,6 +767,14 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
       transcript = gate.text;
     }
     lastUserSpeakTs = Date.now();   // arbiter: Fred just spoke → hold camera chit-chat briefly (he's engaged)
+    lastHeardAnyAt = lastUserSpeakTs;
+    if (window.NudgeGate && window.NudgeGate.isQuietRequest(transcript)) {
+      if (!nudgeQuiet) console.warn('[nudge] quiet mode on: no nudges until Fred speaks to me again');
+      nudgeQuiet = true;
+    } else if (nudgeQuiet) {
+      nudgeQuiet = false;
+      console.warn('[nudge] quiet mode off: Fred is talking to me again');
+    }
     console.log('[voice] heard' + (continuousListen ? ' (always-listen, no wake word)' : '') + ':', JSON.stringify(transcript));
     emitUser(transcript);
     // Capture teach-mode state BEFORE handleCommand — if a teach step
@@ -3136,7 +3150,7 @@ RULES:
       // within a minute, say them anyway as soon as he isn't talking.
       const waitedLong = DUE_TO_SAY.length && now - DUE_TO_SAY[0].at > 60000;
       if (DUE_TO_SAY.length && !autonomousSpeaking && !confirmInFlight
-          && (canAnnounce || (waitedLong && phase !== 'speaking' && phase !== 'thinking'))) {
+          && (canAnnounce || (waitedLong && phase !== 'speaking' && phase !== 'thinking' && !fredTalking()))) {
         autonomousSpeaking = true;
         if (phase === 'listening') abortListening();
         while (DUE_TO_SAY.length) {
@@ -3614,13 +3628,24 @@ RULES:
     let briefText = '';
     let startedWatch = null;
     try {
-      // A nudge also waits until the conversation has paused for 2 minutes, so
-      // "improve your mail" never lands in the middle of a topic. One deadline
-      // (10 min) for both, inside main's 12-minute delivery window.
-      const between = () => job.kind !== 'nudge' || Date.now() - Math.max(lastUserSpeakTs || 0, lastSpokeAt || 0) > 120000;
+      // A nudge waits for a gap between topics (src/nudge-gate.js): nobody
+      // talking for cfg.nudgeIdleMs (25 s), no open yes/no, no "stay quiet".
+      // An urgent one only waits for Fred's sentence and the yes/no to end.
+      // One deadline (10 min), inside main's 12-minute delivery window.
+      const nudgeOk = () => window.NudgeGate.canDeliver({
+        now: Date.now(), urgent: !!job.urgent, idleMs: cfg.nudgeIdleMs,
+        lastHeardAt: Math.max(lastHeardAnyAt || 0, lastUserSpeakTs || 0), lastSpokeAt: speaking || playingOne ? Date.now() : lastSpokeAt,
+        fredTalking: fredTalking(), confirmPending: confirmInFlight,
+        hannibalBusy: speaking || playingOne || autonomousSpeaking || chatTurnActive || narrating || !!teachState || phase === 'thinking' || phase === 'speaking',
+        quietMode: nudgeQuiet || presenceMuted || presenceSleeping,
+      });
+      const ready = () => (job.kind === 'nudge' ? nudgeOk().ok : isQuiet());
       const deadline = Date.now() + 600000;
-      while (!(isQuiet() && between()) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 1000));
-      if (!isQuiet() || !between()) { console.log('[proactive] never got a quiet moment — main will retry'); return; }
+      while (!ready() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 1000));
+      if (!ready()) {
+        console.log(`[proactive] never got a quiet moment${job.kind === 'nudge' ? ` (${nudgeOk().why})` : ''}, main will retry`);
+        return;
+      }
       console.log(`[proactive] delivering ${job.kind === 'nudge' ? 'a nudge' : 'morning brief'}`);
       // The brief counts for the day once he actually starts speaking it.
       if (job.kind === 'morning-brief') {

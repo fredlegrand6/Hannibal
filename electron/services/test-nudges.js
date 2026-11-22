@@ -101,6 +101,26 @@ async function t(name, fn) {
     assert.strictEqual(z2.status().zone, false);
   });
 
+  await t('not said yet (Fred mid-topic): kept in line and tried again in 2 minutes, most urgent first', async () => {
+    let ok = false;
+    const tried = [];
+    const q = nudger({ deliver: async (x) => { tried.push(x.key); return ok; },
+      getEvents: async () => ({ events: [{ ts: NOW.getTime() + 30 * MIN, time: '14:30', title: 'HTS call' }] }) });
+    assert.strictEqual(await q.n.tick(), 'not-delivered');
+    q.step(1 * MIN); assert.strictEqual(await q.n.tick(), 'not-yet');
+    q.step(1 * MIN); ok = true; assert.strictEqual(await q.n.tick(), 'said');
+    assert.deepStrictEqual(tried.map((k) => k.split(':')[0]), ['soon', 'soon'], 'the meeting first, both times');
+    q.step(21 * MIN); assert.strictEqual(await q.n.tick(), 'said', 'then the mail, in a later gap');
+    assert.ok(tried[2].startsWith('mail:'));
+    q.step(21 * MIN); assert.strictEqual(await q.n.tick(), 'nothing', 'never the same one twice');
+  });
+
+  await t('a meeting in under 5 minutes is urgent', () => {
+    const at = (m) => findNudges({ now: NOW.getTime(), events: [{ ts: NOW.getTime() + m * MIN, title: 'HTS call' }] })[0];
+    assert.strictEqual(at(4).urgent, true);
+    assert.strictEqual(at(20).urgent, false);
+  });
+
   await t('the desk and the server share what was said', () => {
     const { n } = nudger();
     assert.strictEqual(n.markSaid(['mail:a', 'mail:b']), 2);

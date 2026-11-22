@@ -2,7 +2,7 @@
 // NUDGES: Hannibal speaks first when something needs Fred.
 //
 // Every 20 minutes during the day, cheap checks (no AI) look for:
-//   • a meeting starting in 10-40 minutes;
+//   • a meeting starting in 2-40 minutes (under 5 minutes it is urgent);
 //   • a trip coming up (a flight, Ibiza...): once a few days ahead, once the
 //     day before;
 //   • mail from a real person, sent to Fred directly, unanswered for 2+ days
@@ -20,8 +20,10 @@
 //
 // Each thing is brought up once (data/nudges.json), at most HANNIBAL_NUDGE_MAX
 // a day (default 5), between HANNIBAL_NUDGE_FROM and _UNTIL (08:00-21:00).
-// The desk speaks them; the always-on server sends them to the phone while the
-// Mac is away, and the two share which ones were already said.
+// Not said yet (Fred mid-topic, see src/nudge-gate.js): it stays in line, most
+// urgent first, and is tried again every 2 minutes. The desk speaks them; the
+// always-on server sends them to the phone while the Mac is away, and the two
+// share which ones were already said.
 // Off: HANNIBAL_NUDGES=0.
 // ─────────────────────────────────────────────────────────────────────────
 'use strict';
@@ -54,8 +56,8 @@ function findNudges({ events = [], mail = [], now, said = new Set(), isKnown = (
     if (!e || !Number.isFinite(e.ts)) continue;
     const until = e.ts - now;
     const title = String(e.title || '').trim();
-    if (!e.allDay && until >= 10 * MIN && until <= 40 * MIN) {
-      out.push({ key: `soon:${e.ts}:${norm(title)}`, rank: 0,
+    if (!e.allDay && until >= 2 * MIN && until <= 40 * MIN) {
+      out.push({ key: `soon:${e.ts}:${norm(title)}`, rank: 0, urgent: until <= 5 * MIN,
         text: `"${title}" starts at ${e.time || fmtWhen(e.ts)}, in ${Math.round(until / MIN)} minutes.`,
         prompt: `${LEAD} Fred has "${title}" at ${e.time || fmtWhen(e.ts)} (in ${Math.round(until / MIN)} minutes). Give him a heads-up. ${TAIL}` });
     }
@@ -183,6 +185,9 @@ function createNudger({ getEvents, getMail, deliver, statePath, now = () => new 
         try { onSaid && onSaid([n.key]); } catch (_) {}
         return 'said';
       }
+      // Not said (no gap between topics yet): it stays first in line and is
+      // tried again in 2 minutes, not dropped until the next 20-minute round.
+      lastRun = d.getTime() - everyMs + 2 * MIN;
       return 'not-delivered';
     } finally { busy = false; }
   }
