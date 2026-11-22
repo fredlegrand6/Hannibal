@@ -1,14 +1,15 @@
 // ─────────────────────────────────────────────────────────────────────────
 // PROACTIVE — Hannibal starts the conversation when it matters.
 //
-// 1. MORNING BRIEF. Once a day, from HANNIBAL_BRIEF_TIME (default 08:00) until
-//    HANNIBAL_BRIEF_UNTIL (default 12:00), Hannibal briefs Fred without being
+// 1. MORNING BRIEF. Once a day, from HANNIBAL_BRIEF_TIME (default 08:00, local
+//    time; never earlier), Hannibal briefs Fred without being
 //    asked: Claude checks the calendar, mail and reminders with its (read-only)
 //    tools and speaks the few things that matter. The tick runs every minute,
-//    so if the Mac was asleep at 08:00 the brief comes when it wakes (still
-//    before noon). The renderer only delivers it at a quiet moment (not over
+//    so if the Mac was off or asleep at 08:00 the brief comes once when it
+//    wakes, later that day. The renderer only delivers it at a quiet moment (not over
 //    Fred, not while presence is muted/asleep) and reports back; the day is
-//    marked done only after it was actually spoken. Off: HANNIBAL_BRIEF=0.
+//    marked done on disk as soon as he starts speaking it, so a restart or a
+//    page reload never repeats it. Off: HANNIBAL_BRIEF=0.
 //
 // 2. REMINDERS CLAUDE CAN SET. reminders.add / reminders.cancel give Claude
 //    the same reminders the voice command uses (data/reminders.json, fired by
@@ -223,26 +224,43 @@ function createBriefScheduler({ send, statePath = path.join(DATA, 'proactive.jso
   const enabled = () => !/^(0|false|off|no)$/i.test(env.HANNIBAL_BRIEF || '');
 
   // Called every minute. Returns what it did (for tests/logs).
+  // Rules (Fred, 22 Nov): once per calendar day, never before 08:00 local; if
+  // the Mac was off at 08:00 it comes once when he starts later that day; a
+  // restart or a page reload never brings a second one. The day is written to
+  // disk (data/proactive.json, lastBrief) the moment he starts speaking it.
   function tick() {
     if (!enabled()) return 'disabled';
     const d = now();
     const from = parseHHMM(env.HANNIBAL_BRIEF_TIME, { h: 8, m: 0 });
-    const until = parseHHMM(env.HANNIBAL_BRIEF_UNTIL, { h: 12, m: 0 });
+    const until = parseHHMM(env.HANNIBAL_BRIEF_UNTIL, { h: 23, m: 59 });
     const mins = d.getHours() * 60 + d.getMinutes();
-    if (mins < from.h * 60 + from.m || mins >= until.h * 60 + until.m) return 'outside-window';
+    if (mins < from.h * 60 + from.m) return 'too-early';
+    if (mins >= until.h * 60 + until.m) return 'outside-window';
     const day = dayKey(d);
     if (state.lastBrief === day) return 'done-today';
+    // Handed to the page and not spoken yet (waiting for a quiet moment):
+    // don't send a second copy. Re-sent only if the page lost it.
     if (inFlight && inFlight.day === day && d - inFlight.since < 15 * 60000) return 'waiting';
     inFlight = { day, since: d };
     send({ kind: 'morning-brief', day, prompt: BRIEF_PROMPT });
     return 'sent';
   }
 
-  // The renderer reports back. Only a spoken brief marks the day as done.
-  function done({ kind, day, ok } = {}) {
-    if (kind !== 'morning-brief') return { ok: false };
-    if (inFlight && inFlight.day === day) inFlight = null;
-    if (ok) { state.lastBrief = day; save(); }
+  const markDone = (day) => {
+    if (state.lastBrief === day) return;
+    state.lastBrief = day;
+    delete state.briefTries;
+    save();
+    console.log(`[proactive] morning brief for ${day} counted (saved to disk)`);
+  };
+
+  // The renderer reports back. `started`: he began speaking it, so the day is
+  // done right then, even if a restart, a crash or Fred cuts it short.
+  function done({ kind, day, ok, started } = {}) {
+    if (kind !== 'morning-brief' || !day) return { ok: false };
+    // A failed or undelivered one is tried again after 15 minutes (inFlight
+    // stays), not every minute.
+    if (started || ok) markDone(day);
     return { ok: true };
   }
 
@@ -250,7 +268,9 @@ function createBriefScheduler({ send, statePath = path.join(DATA, 'proactive.jso
 }
 
 // Wire both into Electron main.
+let registered = null;   // one scheduler per app run, never two timers
 function registerProactive(ipcMain, { getWindow, onBrief, onReminder, onNudgeDone, banner, statePath, remindersPath, notesPath } = {}) {
+  if (registered) { console.warn('[proactive] already running, not starting a second scheduler'); return registered; }
   const toRenderer = (channel, payload) => {
     const w = getWindow && getWindow();
     try { w && !w.isDestroyed() && w.webContents.send(channel, payload); } catch (_) {}
@@ -286,7 +306,8 @@ function registerProactive(ipcMain, { getWindow, onBrief, onReminder, onNudgeDon
   // First check shortly after launch (the window needs a moment), then every minute.
   const first = setTimeout(() => brief.tick(), 45000);
   const timer = setInterval(() => brief.tick(), 60000);
-  return { reminders, brief, fireDue, stop: () => { clearTimeout(first); clearInterval(timer); clearTimeout(firstFire); clearInterval(fireTimer); } };
+  registered = { reminders, brief, fireDue, stop: () => { clearTimeout(first); clearInterval(timer); clearTimeout(firstFire); clearInterval(fireTimer); registered = null; } };
+  return registered;
 }
 
 // Takes every due reminder once and sends it out: Mac banner, phone, voice.

@@ -445,7 +445,7 @@ const nudger = createNudger({
     const id = `n${++nudgeSeq}`;
     const timer = setTimeout(() => { pendingNudges.delete(id); resolve(false); }, 12 * 60 * 1000);
     pendingNudges.set(id, (ok) => { clearTimeout(timer); resolve(!!ok); });
-    try { win && !win.isDestroyed() ? win.webContents.send('proactive:run', { kind: 'nudge', id, prompt: n.prompt }) : (clearTimeout(timer), resolve(false)); }
+    try { win && !win.isDestroyed() ? win.webContents.send('proactive:run', { kind: 'nudge', id, prompt: n.prompt, urgent: !!n.urgent }) : (clearTimeout(timer), resolve(false)); }
     catch (_) { clearTimeout(timer); resolve(false); }
   }),
   quietText: async (n) => {
@@ -470,6 +470,7 @@ ipcMain.handle('voice:config', () => ({
   alwaysListen: CONFIG.alwaysListen,
   nameGate: CONFIG.nameGate,
   nameFollowUpMs: CONFIG.nameFollowUpMs,
+  nudgeIdleMs: (Number(process.env.HANNIBAL_NUDGE_IDLE_S) || 25) * 1000,   // quiet gap before a nudge
   bargeIn: process.env.HANNIBAL_BARGE_IN !== '0',   // talk over him to cut him off
   bargeMinBar: Number(process.env.HANNIBAL_BARGE_BAR) || 0,   // mic level that counts as Fred talking (default 0.006)
   qdrantUrl: CONFIG.qdrantUrl,
