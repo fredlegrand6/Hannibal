@@ -555,6 +555,7 @@ test('brief test: "Paste the brief into Claude Code" — finds the session, wait
     if (a.code === keys.CODES.v && a.mods.includes('cmd')) box = w.clipboard;   // the paste lands in the box
     if (a.code === keys.CODES.return && !a.mods.length) { sent = true; box = ''; }
   };
+  w.onClick = () => { w.element = PROMPT_EL(); };
   const c = makeComputer(w);
   const g = wire(c);
   // 1st call: busy, no wait → told it is busy, nothing pasted
@@ -589,6 +590,133 @@ test('Claude Code: several sessions → Fred is asked which; a named one is pick
   const r = await g.run('computer.pasteToClaudeCode', { text: 'hello' });
   assert.ok(/several Claude Code sessions/.test(r.content) && /Terminal: claude — hannibal-v2/.test(r.content), r.content);
   assert.ok(!w.calls.some((x) => x.cmd === 'key'));
+});
+
+// A Claude desktop app that can be slow: to come to the front, to take the
+// focus, to show pasted text. Knobs: frontAfter (front() polls before Claude is
+// frontmost), focusAfterClicks, renderAfter (dumps before the paste shows),
+// lostPastes (pastes that never arrive), sendsOnPaste (a paste that sends).
+function slowClaude(knobs = {}) {
+  const k = { frontAfter: 0, focusAfterClicks: 1, renderAfter: 0, lostPastes: 0, ...knobs };
+  const w = fakeWorld({ front: { app: 'Notes', bundle: 'com.apple.Notes', pid: 501 }, element: { role: 'AXTextArea', value: '' } });
+  const st = { box: '', pending: null, sent: 0, convo: '', busy: false, clicks: 0, fronts: 0, activated: false, pastes: 0 };
+  w.st = st;
+  w.onSh = (cmd) => (/pgrep/.test(cmd) ? '701\n' : '');
+  w.onOsa = (s) => {
+    if (/exists \(first process/.test(s)) return 'false';
+    if (/to activate/.test(s)) st.activated = true;
+    return '';
+  };
+  const hcall = w.hands.call;
+  w.hands.call = async (cmd, a = {}) => {
+    if (cmd === 'front' && st.activated) { st.fronts++; if (st.fronts > k.frontAfter) w.front = { app: 'Claude', bundle: 'com.anthropic.claudefordesktop', pid: 701 }; }
+    if (cmd === 'raise') st.activated = true;
+    if (cmd === 'focused' && st.activated && st.fronts > k.frontAfter) w.front = { app: 'Claude', bundle: 'com.anthropic.claudefordesktop', pid: 701 };
+    return hcall(cmd, a);
+  };
+  w.onClick = () => { st.clicks++; if (st.clicks >= k.focusAfterClicks && w.front.pid === 701) w.element = PROMPT_EL(); };
+  w.dump = () => {
+    if (st.pending && --st.pending.wait <= 0) { st.box += st.pending.text; st.pending = null; }
+    return desktopTree({ busy: st.busy, boxValue: st.box, convo: st.convo });
+  };
+  w.onKey = (a) => {
+    if (w.front.pid !== 701) return;
+    if (a.code === keys.CODES.v && a.mods.includes('cmd')) {
+      st.pastes++;
+      if (st.pastes <= k.lostPastes) return;                          // this paste never arrives
+      if (k.sendsOnPaste && st.pastes === 1) { st.convo = w.clipboard.split('\n')[0]; st.busy = true; return; }
+      st.pending = { text: w.clipboard, wait: k.renderAfter };
+      if (k.renderAfter <= 0) { st.box += st.pending.text; st.pending = null; }
+    }
+    if (a.code === keys.CODES.a && a.mods.includes('cmd')) st.selAll = true;
+    if (a.code === keys.CODES.delete && st.selAll) { st.box = ''; st.selAll = false; }
+    if (a.code === keys.CODES.return && !a.mods.length) { st.sent++; st.convo = st.box.split('\n')[0]; st.box = ''; st.busy = true; }
+  };
+  return w;
+}
+const PROMPT_EL = () => ({ role: 'AXTextArea', description: 'Write your prompt to Claude', value: '', frame: { x: 308, y: 981, w: 183, h: 21 } });
+const BRIEF2 = 'BRIEF: fix the first-try paste\nsteps…';
+const parseOut = (r) => { try { return JSON.parse(typeof r.content === 'string' ? r.content : r.content[0].text); } catch (_) { return {}; } };
+const enters = (w) => w.calls.filter((x) => x.cmd === 'key' && x.code === keys.CODES.return && !(x.mods || []).length).length;
+
+test('Fred\'s test: Claude not in front at the start → waits until it is frontmost and focused, then pastes', async () => {
+  const w = slowClaude({ frontAfter: 4 });
+  const c = makeComputer(w);
+  const g = wire(c);
+  const r = await g.run('computer.pasteToClaudeCode', { text: BRIEF2 });
+  assert.strictEqual(r.status, 'ok', r.content);
+  assert.strictEqual(parseOut(r).verified, true);
+  assert.strictEqual(enters(w), 1, 'sent exactly once');
+  // the fake only counts a paste that arrives while Claude is in front: one, on the first try
+  assert.strictEqual(w.st.pastes, 1, 'pasted once, first try, into Claude');
+  assert.ok(w.st.fronts > 4, 'it waited for Claude to come to the front');
+  assert.ok(w.calls.some((x) => x.cmd === 'osa' && /tell application id "com\.anthropic\.claudefordesktop" to activate/.test(x.script)), 'activated by bundle id');
+  // every step is in the log
+  const log = fs.readFileSync(c._logFile, 'utf8');
+  for (const s of ['activate', 'focus', 'paste', 'verify', 'send', 'confirm']) assert.ok(log.includes(`pasteToClaudeCode.${s}`), `logged ${s}`);
+});
+
+test('Fred\'s test: slow focus → clicks into the box again until it has the focus', async () => {
+  const w = slowClaude({ focusAfterClicks: 3 });
+  const g = wire(makeComputer(w));
+  const r = await g.run('computer.pasteToClaudeCode', { text: BRIEF2 });
+  assert.strictEqual(r.status, 'ok', r.content);
+  assert.strictEqual(w.st.clicks, 3);
+  assert.strictEqual(w.st.pastes, 1);
+  assert.strictEqual(enters(w), 1);
+});
+
+test('Fred\'s test: slow render of the pasted text → polled, found, sent once (no retry)', async () => {
+  const w = slowClaude({ renderAfter: 6 });
+  const g = wire(makeComputer(w));
+  const r = await g.run('computer.pasteToClaudeCode', { text: BRIEF2 });
+  assert.strictEqual(r.status, 'ok', r.content);
+  assert.strictEqual(w.st.pastes, 1, 'no second paste');
+  assert.strictEqual(enters(w), 1);
+  assert.strictEqual(parseOut(r).verified, true);
+});
+
+test('Fred\'s test: retry never double-sends', async () => {
+  // a lost first paste → box cleared, pasted again, Enter exactly once
+  const w = slowClaude({ lostPastes: 1 });
+  const g = wire(makeComputer(w));
+  const r = await g.run('computer.pasteToClaudeCode', { text: BRIEF2 });
+  assert.strictEqual(r.status, 'ok', r.content);
+  assert.strictEqual(w.st.pastes, 2);
+  assert.strictEqual(enters(w), 1, 'Enter once');
+  assert.strictEqual(w.st.sent, 1);
+  assert.ok(parseOut(r).steps.some((s) => s.step === 'clear'), 'the box was cleared before the second try');
+  // the first paste actually went out on its own → no second paste, no Enter at all
+  const w2 = slowClaude({ sendsOnPaste: true });
+  const g2 = wire(makeComputer(w2));
+  const r2 = await g2.run('computer.pasteToClaudeCode', { text: BRIEF2 });
+  assert.strictEqual(r2.status, 'ok', r2.content);
+  assert.strictEqual(w2.st.pastes, 1);
+  assert.strictEqual(enters(w2), 0, 'not sent again');
+  // a paste that never shows → reported, never sent
+  const w3 = slowClaude({ lostPastes: 5 });
+  const g3 = wire(makeComputer(w3));
+  const r3 = await g3.run('computer.pasteToClaudeCode', { text: BRIEF2 });
+  assert.notStrictEqual(r3.status, 'ok');
+  assert.ok(/NOT sent/.test(r3.content) && /tried twice/.test(r3.content), r3.content);
+  assert.strictEqual(enters(w3), 0);
+  // text in the box twice (a very late first paste) → not sent
+  const w4 = slowClaude({ lostPastes: 0 });
+  const c4 = makeComputer(w4);
+  w4.st.box = BRIEF2;   // already there from an earlier, late paste
+  const r4 = await wire(c4).run('computer.pasteToClaudeCode', { text: BRIEF2 });
+  assert.notStrictEqual(r4.status, 'ok');
+  assert.strictEqual(enters(w4), 0);
+});
+
+test('paste into Claude Code keeps the focus re-check: focus moved away before Enter → not sent', async () => {
+  const w = slowClaude();
+  const orig = w.onKey;
+  w.onKey = (a) => { orig(a); if (a.code === keys.CODES.v) { w.front = { app: 'Messages', bundle: 'com.apple.MobileSMS', pid: 800 }; w.st.activated = false; } };
+  const g = wire(makeComputer(w));
+  const r = await g.run('computer.pasteToClaudeCode', { text: BRIEF2 });
+  assert.notStrictEqual(r.status, 'ok');
+  assert.strictEqual(enters(w), 0, 'Enter never pressed in Messages');
 });
 
 (async () => {

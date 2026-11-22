@@ -199,49 +199,181 @@ async function pasteToClaudeCode(deps, { text, session, wait_seconds: waitS } = 
   }
   if (deps.aborted()) return { ok: false, stopped: true, error: 'Fred said stop' };
 
-  // 2. focus the prompt box
-  if (c.where === 'desktop') {
-    await deps.hands.call('raise', { pid: c.pid, title: '' });
-    await deps.sleep(250);
-    const f = c.composer.box.frame;
-    await deps.hands.call('click', { x: f.x + Math.min(40, f.w / 2), y: f.y + f.h / 2, button: 'left', count: 1 });
-  } else {
-    await focusTerminal(deps, c);
-  }
-  await deps.sleep(350);
-
-  // 3. paste and check it is in the box before sending
-  const before = c.where === 'desktop' ? '' : await terminalContents(deps, c);
-  const p = await deps.paste(body);
-  if (!p || !p.ok) return { ok: false, error: `paste failed: ${(p && p.error) || 'unknown'}` };
-  await deps.sleep(600);
-  let landed;
-  if (c.where === 'desktop') {
-    const st = await desktopState(deps, c.pid);
-    landed = !!(st.composer && appears(st.composer.box.value, body));
-  } else {
-    const now = await terminalContents(deps, c);
-    landed = appears(now.slice(Math.max(0, now.length - 6000)), body) && now !== before;
-  }
-  if (!landed) return { ok: false, verified: false, session: c.label, error: 'The text did not show up in the Claude Code prompt, so it was NOT sent. Look at the screen (computer.screen) before trying again.' };
-  if (deps.aborted()) return { ok: false, stopped: true, error: 'Fred said stop (the text is in the prompt box but was not sent)' };
-
-  // 4. send and verify
-  await deps.hands.call('key', { code: 36, mods: [] });
-  let verified = false, how = '';
-  for (let i = 0; i < 8 && !verified; i++) {
-    await deps.sleep(700);
-    if (c.where === 'desktop') {
-      const st = await desktopState(deps, c.pid);
-      const boxEmpty = st.composer && !appears(st.composer.box.value, body);
-      if (boxEmpty && (st.composer.busy || appears(st.text, body))) { verified = true; how = st.composer.busy ? 'prompt box emptied and Claude Code started working' : 'the brief shows in the conversation'; }
-    } else {
-      const now = await terminalContents(deps, c);
-      if (terminalBusy(now)) { verified = true; how = 'Claude Code started working on it'; }
+  // Every step is logged (deps.log) and returned in `steps`, so a failure says
+  // exactly where it stopped: activate, focus, paste, verify or send.
+  const steps = [];
+  const log = typeof deps.log === 'function' ? deps.log : () => {};
+  const step = (name, ok, info) => { const e = { step: name, ok: !!ok }; if (info) e.info = String(info).slice(0, 200); steps.push(e); try { log(name, !!ok, info || '', c.label); } catch (_) {} };
+  const fail = (name, error, extra = {}) => ({ ok: false, verified: false, session: c.label, failed_step: name, steps, error, ...extra });
+  const stoppedNow = (note) => ({ ok: false, stopped: true, session: c.label, steps, error: `Fred said stop${note ? ` (${note})` : ''}` });
+  const POLL = Math.max(10, Number(deps.pollMs) || 150);
+  // Poll fn() until it gives something truthy, for about `ms`.
+  async function waitFor(fn, ms) {
+    const n = Math.max(1, Math.ceil(ms / POLL));
+    for (let i = 0; i <= n; i++) {
+      if (deps.aborted()) return null;
+      const v = await fn();
+      if (v) return v;
+      if (i < n) await deps.sleep(POLL);
     }
+    return null;
   }
-  return { ok: true, verified, where: c.where, session: c.label,
-    message: verified ? `Sent to Claude Code (${c.label}); checked: ${how}.` : 'Pressed Enter, but could not confirm Claude Code picked it up. Look at the screen before telling Fred it is done.' };
+  let sent = false;   // Enter is pressed at most once per call, ever
+
+  if (c.where === 'desktop') {
+    const isBox = (el, frame) => {
+      if (!el || !/^AXText(Area|Field)$/.test(el.role || '')) return false;
+      if (PROMPT_BOX.test(`${el.description || ''} ${el.title || ''} ${el.placeholder || ''}`)) return true;
+      const f = el.frame;
+      return !!(f && frame && f.x < frame.x + frame.w && frame.x < f.x + f.w && f.y < frame.y + frame.h && frame.y < f.y + f.h);
+    };
+    let boxFrame = c.composer.box.frame;
+    // Is Claude in front with its prompt box focused? → 'yes' | 'unknown' (no AX focus info) | reason string
+    const focusState = async () => {
+      const fo = await deps.hands.call('focused').catch(() => ({}));
+      if (Number(fo.pid) !== Number(c.pid)) return `${fo.app || 'another app'} is in front, not Claude`;
+      if (!fo.element || !fo.element.role) return 'unknown';
+      return isBox(fo.element, boxFrame) ? 'yes' : `the focus is on ${fo.element.role}${fo.element.description ? ` “${fo.element.description}”` : ''}, not the prompt box`;
+    };
+
+    // 2. bring Claude to the front and WAIT until it really is frontmost
+    const activate = async () => {
+      await deps.osa(`tell application id "${DESKTOP_BUNDLE}" to activate`).catch(() => '');
+      await deps.hands.call('raise', { pid: c.pid, title: '' }).catch(() => ({}));
+      let last = {};
+      const fr = await waitFor(async () => { last = await deps.hands.call('front').catch(() => ({})); return Number(last.pid) === Number(c.pid) ? last : null; }, 3000);
+      if (deps.aborted()) return 'stopped';
+      step('activate', !!fr, fr ? '' : `${last.app || 'another app'} stayed in front`);
+      return fr ? null : `Could not bring the Claude app to the front (${last.app || 'another app'} stayed in front), so nothing was pasted.`;
+    };
+    // 3. click into the prompt box until it has the focus (fresh frame each time)
+    const focus = async () => {
+      let why = '';
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        const st = await desktopState(deps, c.pid).catch(() => ({}));
+        if (st.composer) boxFrame = st.composer.box.frame;
+        if (deps.aborted()) return 'stopped';
+        await deps.hands.call('click', { x: boxFrame.x + Math.min(40, boxFrame.w / 2), y: boxFrame.y + boxFrame.h / 2, button: 'left', count: 1 });
+        const got = await waitFor(async () => { const s = await focusState(); why = s; return s === 'yes' || s === 'unknown' ? s : null; }, 1500);
+        if (deps.aborted()) return 'stopped';
+        if (got) { step('focus', true, `${got === 'unknown' ? 'Claude in front (focus not reported)' : 'prompt box focused'}${attempt > 1 ? `, after ${attempt} clicks` : ''}`); return null; }
+      }
+      step('focus', false, why);
+      return `Could not put the cursor in the Claude Code prompt box (${why}), so nothing was pasted.`;
+    };
+    // Safety re-check (as in every computer action): right before a keystroke,
+    // Claude must still be in front with the prompt box focused.
+    const guard = async (what) => {
+      const s = await focusState();
+      if (s === 'yes' || s === 'unknown') return null;
+      step(`guard:${what}`, false, s);
+      return `Stopped before ${what}: ${s}. Nothing was ${what === 'send' ? 'sent' : 'pasted'} there.`;
+    };
+    const read = () => desktopState(deps, c.pid).catch(() => ({}));
+    const dupes = (v) => {
+      const val = String(v || '');
+      const markers = (val.match(/\[pasted text/gi) || []).length;
+      const p = norm(probe(body)).slice(0, 24);
+      const hits = p ? norm(val).split(p).length - 1 : 0;
+      return markers > 1 || hits > 1;
+    };
+
+    let err = await activate();
+    if (err === 'stopped') return stoppedNow();
+    if (err) return fail('activate', err);
+    err = await focus();
+    if (err === 'stopped') return stoppedNow();
+    if (err) return fail('focus', err);
+
+    let landed = null;
+    for (let attempt = 1; attempt <= 2 && !landed; attempt++) {
+      if (attempt === 2) {
+        // Before trying again: make sure the first try did not send it already…
+        const st = await read();
+        if (st.composer && (st.composer.busy || appears(st.text, body)) && !appears(st.composer.box.value, body)) {
+          step('verify', true, 'the first paste had already been sent');
+          return { ok: true, verified: true, where: c.where, session: c.label, steps, message: `Sent to Claude Code (${c.label}); checked: it is already in the conversation (not sent twice).` };
+        }
+        // …then clear the box and paste once more.
+        err = await activate();
+        if (err === 'stopped') return stoppedNow();
+        if (err) return fail('activate', err);
+        err = await focus();
+        if (err === 'stopped') return stoppedNow();
+        if (err) return fail('focus', err);
+        err = await guard('clearing the box');
+        if (err) return fail('focus', err);
+        await deps.hands.call('key', { code: 0, mods: ['cmd'] });        // cmd+a
+        await deps.hands.call('key', { code: 51, mods: [] });            // delete
+        await deps.sleep(150);
+        step('clear', true, 'emptied the prompt box for a second try');
+      }
+      if (deps.aborted()) return stoppedNow();
+      err = await guard('paste');
+      if (err) return fail('focus', err);
+      const p = await deps.paste(body);
+      if (p && p.stopped) return stoppedNow('nothing was pasted');
+      if (!p || !p.ok) { step('paste', false, (p && p.error) || 'unknown'); return fail('paste', `paste failed: ${(p && p.error) || 'unknown'}`); }
+      step('paste', true, attempt > 1 ? 'second try' : '');
+      // 4. verify: poll up to ~3 s for the text to show in the box
+      landed = await waitFor(async () => { const st = await read(); return st.composer && appears(st.composer.box.value, body) ? st : null; }, 3000);
+      if (deps.aborted()) return stoppedNow('the text may be in the prompt box but was not sent');
+      step('verify', !!landed, landed ? 'text is in the prompt box' : `not in the prompt box after 3 s${attempt === 1 ? ', trying once more' : ''}`);
+    }
+    if (!landed) return fail('verify', 'The text did not show up in the Claude Code prompt (tried twice), so it was NOT sent. Look at the screen (computer.screen) before trying again.');
+    if (dupes(landed.composer.box.value)) { step('verify', false, 'the text is in the box twice'); return fail('verify', 'The text shows up twice in the Claude Code prompt box, so it was NOT sent. Clear the box (or ask Fred) before trying again.'); }
+    if (deps.aborted()) return stoppedNow('the text is in the prompt box but was not sent');
+
+    // 5. send (once) and verify
+    err = await guard('send');
+    if (err) return fail('send', err);
+    if (sent) return fail('send', 'already sent once');
+    sent = true;
+    await deps.hands.call('key', { code: 36, mods: [] });
+    step('send', true, 'pressed Enter once');
+    let how = '';
+    const ok = await waitFor(async () => {
+      const st = await read();
+      const boxEmpty = st.composer && !appears(st.composer.box.value, body);
+      if (boxEmpty && (st.composer.busy || appears(st.text, body))) { how = st.composer.busy ? 'prompt box emptied and Claude Code started working' : 'the brief shows in the conversation'; return true; }
+      return null;
+    }, 5600);
+    step('confirm', !!ok, ok ? how : 'could not see it picked up');
+    return { ok: true, verified: !!ok, where: c.where, session: c.label, steps,
+      message: ok ? `Sent to Claude Code (${c.label}); checked: ${how}.` : 'Pressed Enter, but could not confirm Claude Code picked it up. Look at the screen before telling Fred it is done.' };
+  }
+
+  // ── Terminal / iTerm2 ──
+  const termFront = async () => { const f = await deps.hands.call('front').catch(() => ({})); return norm(f.app).includes(norm(c.app === 'iTerm2' ? 'iterm' : 'terminal')) ? f : null; };
+  const before = await terminalContents(deps, c);
+  let landed = false;
+  for (let attempt = 1; attempt <= 2 && !landed; attempt++) {
+    await focusTerminal(deps, c).catch(() => {});
+    const fr = await waitFor(termFront, 3000);
+    if (deps.aborted()) return stoppedNow();
+    step('activate', !!fr, fr ? '' : `${c.app} did not come to the front`);
+    if (!fr) return fail('activate', `Could not bring ${c.app} to the front, so nothing was pasted.`);
+    const p = await deps.paste(body);
+    if (p && p.stopped) return stoppedNow('nothing was pasted');
+    if (!p || !p.ok) { step('paste', false, (p && p.error) || 'unknown'); return fail('paste', `paste failed: ${(p && p.error) || 'unknown'}`); }
+    step('paste', true, attempt > 1 ? 'second try' : '');
+    let nowText = before;
+    landed = !!(await waitFor(async () => { nowText = await terminalContents(deps, c); return appears(nowText.slice(Math.max(0, nowText.length - 6000)), body) && nowText !== before; }, 3000));
+    if (deps.aborted()) return stoppedNow('the text may be in the prompt but was not sent');
+    step('verify', landed, landed ? 'text is in the prompt' : 'not in the prompt after 3 s');
+    // Only paste again if NOTHING arrived (a half-arrived paste is never doubled).
+    if (!landed && nowText !== before) return fail('verify', 'Something changed in the terminal but the text is not clearly in the Claude Code prompt, so it was NOT sent. Look at the screen first.');
+  }
+  if (!landed) return fail('verify', 'The text did not show up in the Claude Code prompt (tried twice), so it was NOT sent. Look at the screen (computer.screen) before trying again.');
+  if (deps.aborted()) return stoppedNow('the text is in the prompt but was not sent');
+  if (!(await termFront())) { step('guard:send', false, `${c.app} is no longer in front`); return fail('send', `Stopped before sending: ${c.app} is no longer in front.`); }
+  sent = true;
+  await deps.hands.call('key', { code: 36, mods: [] });
+  step('send', true, 'pressed Enter once');
+  const ok = await waitFor(async () => terminalBusy(await terminalContents(deps, c)), 5600);
+  step('confirm', !!ok, ok ? 'Claude Code started working on it' : 'could not see it picked up');
+  return { ok: true, verified: !!ok, where: c.where, session: c.label, steps,
+    message: ok ? `Sent to Claude Code (${c.label}); checked: Claude Code started working on it.` : 'Pressed Enter, but could not confirm Claude Code picked it up. Look at the screen before telling Fred it is done.' };
 }
 
 module.exports = { pasteToClaudeCode, terminalBusy, desktopComposers, desktopSessions, parseTerminalList, pickSession, appears, probe, DESKTOP_BUNDLE };

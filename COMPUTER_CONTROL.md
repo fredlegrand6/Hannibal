@@ -26,7 +26,7 @@ Screen Recording is already granted (vision.capture uses it).
 | `computer.type` | type or paste text (Fred's clipboard is put back) |
 | `computer.key` | shortcuts: `cmd+n`, `enter`, `cmd+tab`, `esc`, `cmd+a, delete` |
 | `computer.scroll` | up / down / left / right |
-| `computer.pasteToClaudeCode` | find the Claude Code session (desktop app, then Terminal/iTerm), wait till idle, paste, send, verify |
+| `computer.pasteToClaudeCode` | find the Claude Code session (desktop app, then Terminal/iTerm), wait till idle, bring it to the front and wait till it is frontmost with the prompt box focused, paste, poll ~3 s for the text, retry once (box cleared) if it didn't land, press Enter exactly once, verify. Each step is logged as `pasteToClaudeCode.<step>` |
 
 Every action comes back with `verified` true/false (read from the screen after)
 and a fresh screenshot. Max 25 actions per task.

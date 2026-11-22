@@ -583,7 +583,8 @@ function createComputer(deps = {}) {
       }
 
       case 'pasteToClaudeCode': {
-        const r = await claudeCode.pasteToClaudeCode({ hands, osa, sh, sleep, paste, aborted: () => state.aborted }, p);
+        const r = await claudeCode.pasteToClaudeCode({ hands, osa, sh, sleep, paste, aborted: () => state.aborted,
+          log: (stepName, ok, info, session) => logAction({ app: 'Claude Code', action: `pasteToClaudeCode.${stepName}`, target: session || '', result: ok ? `ok${info ? `: ${info}` : ''}` : `failed: ${info}` }) }, p);
         if (r.stopped) return stopped();
         return r;
       }
