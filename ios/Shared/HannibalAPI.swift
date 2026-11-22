@@ -39,6 +39,10 @@ struct HannibalEvent: Decodable {
     var text: String?
     var note: String?
     var ok: Bool?
+    var url: String?          // notify / navigate: a Google Maps route
+    var dest: String?
+    var kind: String?         // ask: what the server wants to know ("eta")
+    var destination: String?
 }
 
 enum APIError: LocalizedError {
@@ -158,6 +162,11 @@ final class HannibalAPI {
     func placeFired(_ id: String) async -> Bool {
         guard let r = try? await session.data(for: request("api/places/fired", body: jsonBody(["id": id]), timeout: 20)) else { return false }
         return (r.1 as? HTTPURLResponse)?.statusCode == 200
+    }
+
+    /// The phone's answer to a server question (drive time…).
+    func answer(_ reply: [String: Any]) async {
+        _ = try? await session.data(for: request("api/answer", body: jsonBody(reply), timeout: 20))
     }
 
     func placeFailed(_ id: String, error: String) async {

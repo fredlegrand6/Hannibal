@@ -67,7 +67,7 @@ final class PlaceWatcher: NSObject, CLLocationManagerDelegate {
         known = store
     }
 
-    private func askAlways() {
+    func askAlways() {
         switch manager.authorizationStatus {
         case .notDetermined: manager.requestAlwaysAuthorization()
         case .authorizedWhenInUse: manager.requestAlwaysAuthorization()

@@ -64,8 +64,13 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         Task { @MainActor in self.model?.registerPush(token: hex) }
     }
 
-    /// Silent push from the server: the place reminders changed.
+    /// Silent push from the server: the place reminders changed, or it asks
+    /// something only the phone knows (drive time from here).
     func application(_ application: UIApplication, didReceiveRemoteNotification userInfo: [AnyHashable: Any]) async -> UIBackgroundFetchResult {
+        if let q = userInfo["ask"] as? [String: Any] {
+            await Nav.answer(q)
+            return .newData
+        }
         guard (userInfo["sync"] as? String) == "places" else { return .noData }
         await PlaceWatcher.shared.sync()
         return .newData
@@ -87,6 +92,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
         let info = response.notification.request.content.userInfo
         let body = response.notification.request.content.body
+        if let url = info["navigate"] as? String {          // "tap to start the route"
+            await MainActor.run { Nav.open(url) }
+            return
+        }
         guard let id = info["confirmId"] as? String else {
             await MainActor.run { self.show(response.notification.request.content) }
             return

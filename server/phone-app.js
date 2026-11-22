@@ -285,6 +285,19 @@ function createPhoneApp(opts = {}) {
       return;
     }
 
+    // The phone's answer to ask() (e.g. { id, ok, minutes, km, place }).
+    if (req.method === 'POST' && url.pathname === '/api/answer') {
+      let body = {};
+      try { body = JSON.parse((await readBody(req, 16 * 1024)).toString('utf8')); } catch (_) {}
+      const a = asks.get(String(body.id || ''));
+      if (!a) { json(res, 410, { ok: false, note: 'Too late, that question expired.' }); return; }
+      asks.delete(String(body.id)); clearTimeout(a.timer);
+      const { id: _id, ...answer } = body;
+      a.resolve(answer);
+      json(res, 200, { ok: true });
+      return;
+    }
+
     if (req.method === 'POST' && url.pathname === '/api/reset') { opts.onReset && opts.onReset(); json(res, 200, { ok: true }); return; }
 
     res.writeHead(404); res.end();
@@ -303,11 +316,39 @@ function createPhoneApp(opts = {}) {
 
   // Hannibal starts the conversation (reminders, brief) — shown if the app is open,
   // otherwise sent to the iPhone as a push notification.
-  function notify(text) {
+  // extra.url: tapping it (notification or chat line) opens that link, e.g. a Google Maps route.
+  function notify(text, extra = {}) {
     if (!text) return clients.size;
-    push({ type: 'notify', text: String(text) });
-    if (!clients.size && canPush()) opts.push.notify({ body: String(text) }).catch((e) => log('push failed:', e.message));
+    const url = extra && extra.url ? String(extra.url) : undefined;
+    push({ type: 'notify', text: String(text), ...(url ? { url } : {}) });
+    if (!clients.size && canPush()) opts.push.notify({ body: String(text), ...(url ? { data: { navigate: url } } : {}) }).catch((e) => log('push failed:', e.message));
     return clients.size;
+  }
+
+  /** Start a Google Maps route on the phone. The app opens it when it is on
+   *  screen, else shows a tap-to-start notification. */
+  function navigate(dest, url) {
+    const text = `🚗 Route to ${dest}. Tap to start it in Google Maps.`;
+    if (clients.size) { push({ type: 'navigate', dest: String(dest), url: String(url), text }); return 'opened'; }
+    if (canPush()) { opts.push.notify({ body: text, data: { navigate: String(url) } }).catch((e) => log('push failed:', e.message)); return 'notified'; }
+    return 'none';
+  }
+
+  /** Ask the phone something only it knows (drive time from where Fred is).
+   *  Open app: over the live stream; closed: a silent push wakes it. Resolves
+   *  with the phone's answer, or null when it doesn't answer in time. */
+  const asks = new Map();
+  function ask(kind, params = {}, timeoutMs = 20000) {
+    return new Promise((resolve) => {
+      const viaPush = !clients.size && canPush() && opts.push.wake;
+      if (!clients.size && !viaPush) { resolve(null); return; }
+      const id = crypto.randomBytes(8).toString('hex');
+      const timer = setTimeout(() => { asks.delete(id); resolve(null); }, timeoutMs);
+      asks.set(id, { resolve, timer });
+      const q = { id, kind: String(kind), ...params };
+      if (clients.size) push({ type: 'ask', ...q });
+      else opts.push.wake({ ask: q }).catch((e) => { log('silent push failed:', e.message); });
+    });
   }
 
   /** Place reminders changed: tell an open app now, wake a closed one quietly. */
@@ -316,7 +357,7 @@ function createPhoneApp(opts = {}) {
     if (!clients.size && canPush() && opts.push.wake) opts.push.wake({ sync: 'places' }).catch((e) => log('silent push failed:', e.message));
   }
 
-  return { start, stop, notify, placesChanged, handle, _confirmer: confirmer, _pending: pending, _places: opts.places };
+  return { start, stop, notify, navigate, ask, placesChanged, handle, _confirmer: confirmer, _pending: pending, _places: opts.places };
 }
 
 module.exports = { createPhoneApp, PHONE_APP_CONTEXT };

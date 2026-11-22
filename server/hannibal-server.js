@@ -106,6 +106,17 @@ const places = createPlaceReminders({ filePath: path.join(CFG.dataDir, 'place-re
 ipc.handle('reminders:place', (_e, message, place, on) => places.add(message, place, on));
 ipc.handle('reminders:places', () => places.upcoming());
 ipc.handle('reminders:cancelPlace', (_e, query) => places.cancel(query));
+// Navigation with Google Maps on the iPhone, drive times, "time to leave" (server/nav.js).
+const { createNav } = require('./nav');
+const nav = createNav({
+  phone: { navigate: (d, u) => (phoneApp ? phoneApp.navigate(d, u) : 'none'), ask: (k, p, ms) => (phoneApp ? phoneApp.ask(k, p, ms) : Promise.resolve(null)) },
+  events: (days) => (registry['calendar:events'] ? registry['calendar:events'](null, days) : null),
+  notify: (text, { url } = {}) => tellFred(text, { url }),
+  statePath: path.join(CFG.dataDir, 'nav-warned.json'),
+  tz: () => require(path.join(SERVICES, 'calendar-assist')).fredTz(),
+});
+ipc.handle('nav:go', (_e, destination) => nav.go(destination));
+ipc.handle('nav:eta', (_e, destination) => nav.eta(destination));
 ipc.handle('reminders:add', (_e, message, at) => reminders.add(message, at));
 // Reminders set at the desk live on the Mac: when it is linked, both lists count.
 async function macUpcoming() {
@@ -297,10 +308,11 @@ if (process.env.PHONE_APP_TOKEN) {
   } catch (e) { console.warn('[phone] app disabled:', e.message); phoneApp = null; }
 } else console.log('[phone] PHONE_APP_TOKEN not set: no phone app');
 // Things Hannibal tells Fred go to Telegram and, if it is open, the app.
-const tellFred = async (text, { voice = false } = {}) => {
-  if (phoneApp) phoneApp.notify(text);
-  return telegram.notify(text, { voice });
+const tellFred = async (text, { voice = false, url } = {}) => {
+  if (phoneApp) phoneApp.notify(text, url ? { url } : {});
+  return telegram.notify(url ? `${text}\n${url}` : text, { voice });
 };
+nav.start();
 
 // ── morning brief: Claude reads calendar/mail/reminders, Fred gets it on the phone ──
 const brief = createBriefScheduler({
@@ -382,6 +394,9 @@ if (process.env.BODY_LINK_TOKEN) {
         'reminders.place': ({ message, place, on } = {}) => places.add(message, place, on),
         'reminders.places': () => places.upcoming(),
         'reminders.cancelPlace': ({ query } = {}) => places.cancel(query),
+        // Navigation runs through the iPhone (the desk asks here).
+        'nav.go': ({ destination } = {}) => nav.go(destination),
+        'nav.eta': ({ destination } = {}) => nav.eta(destination),
         'reminders.cancelId': ({ id } = {}) => reminders.cancel(String(id || '')),
         'reminders.retime': ({ id, ts } = {}) => reminders.retime(String(id || ''), Number(ts)),
       },

@@ -148,6 +148,30 @@ const app = createPhoneApp({
     ctrl.abort();
   });
 
+  await test('navigation: open app gets the route; ask() is answered by the phone', async () => {
+    const ctrl = new AbortController();
+    const es = await fetch(`${base}/api/events`, { headers: C, signal: ctrl.signal });
+    const reader = es.body.getReader();
+    const events = [];
+    (async () => { let buf = ''; for (;;) { const { value, done } = await reader.read().catch(() => ({ done: true })); if (done) break; buf += Buffer.from(value).toString(); let i; while ((i = buf.indexOf('\n\n')) >= 0) { const chunk = buf.slice(0, i); buf = buf.slice(i + 2); if (chunk.startsWith('data: ')) events.push(JSON.parse(chunk.slice(6))); } } })();
+    for (let i = 0; i < 40 && !events.length; i++) await new Promise((r) => setTimeout(r, 25));
+    assert.strictEqual(app.navigate('Ibiza airport', 'https://maps/x'), 'opened');
+    const q = app.ask('eta', { destination: 'Home' }, 3000);
+    for (let i = 0; i < 40 && !events.find((e) => e.type === 'ask'); i++) await new Promise((r) => setTimeout(r, 25));
+    assert.ok(events.find((e) => e.type === 'navigate' && e.url === 'https://maps/x'));
+    const a = events.find((e) => e.type === 'ask');
+    assert.strictEqual(a.kind, 'eta'); assert.strictEqual(a.destination, 'Home');
+    assert.strictEqual((await fetch(`${base}/api/answer`, { method: 'POST', body: '{}' })).status, 401);
+    await fetch(`${base}/api/answer`, { method: 'POST', headers: C, body: JSON.stringify({ id: a.id, ok: true, minutes: 23 }) });
+    assert.deepStrictEqual(await q, { ok: true, minutes: 23 });
+    const late = await fetch(`${base}/api/answer`, { method: 'POST', headers: C, body: JSON.stringify({ id: a.id, ok: true }) });
+    assert.strictEqual(late.status, 410);
+    ctrl.abort();
+    await new Promise((r) => setTimeout(r, 50));
+    assert.strictEqual(app.navigate('X', 'u'), 'none', 'nobody to reach');
+    assert.strictEqual(await app.ask('eta', {}, 100), null);
+  });
+
   await test('with the app closed a write is declined, never done unasked', async () => {
     await new Promise((r) => setTimeout(r, 50));
     const j = await (await fetch(`${base}/api/say`, { method: 'POST', headers: C, body: JSON.stringify({ text: 'trash it' }) })).json();

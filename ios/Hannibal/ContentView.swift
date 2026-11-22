@@ -282,7 +282,13 @@ struct LineView: View {
         case .error:
             Text(line.text).font(.callout).foregroundStyle(Color.orange)
         case .notify:
-            Text(line.text).textSelection(.enabled)
+            VStack(alignment: .leading, spacing: 10) {
+                Text(line.text).textSelection(.enabled)
+                if let url = line.url {
+                    Button { Nav.open(url) } label: { Label("Start route", systemImage: "car.fill").bold().frame(maxWidth: .infinity) }
+                        .buttonStyle(.borderedProminent).tint(Palette.cyan).controlSize(.large)
+                }
+            }
                 .padding(12).frame(maxWidth: .infinity, alignment: .leading)
                 .background(Palette.card, in: RoundedRectangle(cornerRadius: 14))
                 .overlay(RoundedRectangle(cornerRadius: 14).stroke(Palette.cyan.opacity(0.35)))
