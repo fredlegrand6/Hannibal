@@ -3597,15 +3597,24 @@ RULES:
     proactiveBusy = true;
     let ok = false;
     let briefText = '';
+    let startedWatch = null;
     try {
-      for (let w = 0; !isQuiet() && w < 600; w++) await new Promise((r) => setTimeout(r, 1000)); // ≤10 min
       // A nudge also waits until the conversation has paused for 2 minutes, so
-      // "improve your mail" never lands in the middle of a topic.
-      const between = () => Date.now() - Math.max(lastUserSpeakTs || 0, lastSpokeAt || 0) > 120000;
-      if (job.kind === 'nudge') for (let w = 0; !(isQuiet() && between()) && w < 600; w++) await new Promise((r) => setTimeout(r, 1000));
-      if (!isQuiet() || (job.kind === 'nudge' && !between())) { console.log('[proactive] never got a quiet moment — main will retry'); return; }
+      // "improve your mail" never lands in the middle of a topic. One deadline
+      // (10 min) for both, inside main's 12-minute delivery window.
+      const between = () => job.kind !== 'nudge' || Date.now() - Math.max(lastUserSpeakTs || 0, lastSpokeAt || 0) > 120000;
+      const deadline = Date.now() + 600000;
+      while (!(isQuiet() && between()) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 1000));
+      if (!isQuiet() || !between()) { console.log('[proactive] never got a quiet moment — main will retry'); return; }
       console.log(`[proactive] delivering ${job.kind === 'nudge' ? 'a nudge' : 'morning brief'}`);
-      if (job.kind === 'morning-brief') { try { await window.hannibal.proactiveDone({ kind: job.kind, day: job.day, started: true }); } catch (_) {} }
+      // The brief counts for the day once he actually starts speaking it.
+      if (job.kind === 'morning-brief') {
+        startedWatch = setInterval(() => {
+          if (!speaking) return;
+          clearInterval(startedWatch); startedWatch = null;
+          window.hannibal.proactiveDone({ kind: job.kind, day: job.day, started: true }).catch(() => {});
+        }, 200);
+      }
       if (phase === 'listening') abortListening();   // drop the open resting turn (no STT)
       if (cfg.claudeEnabled && cfg.claudeTools) {
         setPhase('thinking');
@@ -3629,6 +3638,7 @@ RULES:
     } catch (e) {
       console.warn('[proactive] brief failed', e);
     } finally {
+      if (startedWatch) clearInterval(startedWatch);
       proactiveBusy = false;
       try { await window.hannibal.proactiveDone({ kind: job.kind, day: job.day, id: job.id, ok, text: briefText }); } catch (_) {}
     }
