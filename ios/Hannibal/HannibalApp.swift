@@ -4,6 +4,7 @@ import SwiftUI
 
 @main
 struct HannibalApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var model = HannibalModel()
 
     init() { AudioSession.setUp() }
@@ -11,6 +12,7 @@ struct HannibalApp: App {
     var body: some Scene {
         WindowGroup {
             RootView().environment(model)
+                .onAppear { appDelegate.model = model }
         }
     }
 }

@@ -117,6 +117,66 @@ const app = createPhoneApp({
     assert.deepStrictEqual(voiceDrops, [{ stage: 'play', error: 'no sound started within 5 s', device: 'iPhone', where: 'phone' }]);
   });
 
+  // ── push: the native iPhone app closed ──
+  const pushed = [];
+  const fakePush = { configured: true, tokens: [], register(t, env) { if (!/^[0-9a-f]{64}$/.test(String(t))) return false; this.tokens.push({ t, env }); return true; },
+    count() { return this.tokens.length; }, async notify(p) { pushed.push(p); return 1; } };
+  const PORT2 = PORT + 1;
+  const base2 = `http://127.0.0.1:${PORT2}`;
+  const app2 = createPhoneApp({
+    token: TOKEN, hosts: ['127.0.0.1'], port: PORT2, persona: 'P', log: () => {}, push: fakePush,
+    chat: async (payload, _on, { runTool }) => { const ok = await runTool('mail_trash', {}); return { ok: true, text: ok ? 'Trashed.' : 'Left it.' }; },
+    runTool: async (name, input, { confirmer }) => confirmer({}, 'Trash the mail from Bob'),
+  });
+  app2.start();
+  await new Promise((r) => setTimeout(r, 100));
+
+  await test('the iPhone app registers its push token (needs the key, checks the format)', async () => {
+    assert.strictEqual((await fetch(`${base2}/api/push-token`, { method: 'POST', body: '{}' })).status, 401);
+    const bad = await fetch(`${base2}/api/push-token`, { method: 'POST', headers: C, body: JSON.stringify({ token: 'nope' }) });
+    assert.strictEqual(bad.status, 400);
+    const ok = await fetch(`${base2}/api/push-token`, { method: 'POST', headers: C, body: JSON.stringify({ token: 'a'.repeat(64), env: 'sandbox' }) });
+    assert.strictEqual(ok.status, 200);
+    assert.strictEqual(fakePush.count(), 1);
+  });
+
+  await test('with the app closed a reminder goes out as a push', async () => {
+    pushed.length = 0;
+    app2.notify('Call Jay at 19:00');
+    await new Promise((r) => setTimeout(r, 20));
+    assert.deepStrictEqual(pushed, [{ body: 'Call Jay at 19:00' }]);
+  });
+
+  await test('with the app open no push is sent (the app shows it)', async () => {
+    pushed.length = 0;
+    const ctrl = new AbortController();
+    await fetch(`${base2}/api/events`, { headers: C, signal: ctrl.signal });
+    await new Promise((r) => setTimeout(r, 30));
+    app2.notify('Brief');
+    await new Promise((r) => setTimeout(r, 20));
+    assert.strictEqual(pushed.length, 0);
+    ctrl.abort();
+    await new Promise((r) => setTimeout(r, 50));
+  });
+
+  await test('with the app closed a Yes/No goes to the lock screen and waits for the answer', async () => {
+    pushed.length = 0;
+    const said = fetch(`${base2}/api/say`, { method: 'POST', headers: C, body: JSON.stringify({ text: 'trash it' }) }).then((r) => r.json());
+    for (let i = 0; i < 40 && !pushed.length; i++) await new Promise((r) => setTimeout(r, 25));
+    assert.strictEqual(pushed[0].category, 'CONFIRM');
+    assert.match(pushed[0].body, /Trash the mail from Bob/);
+    const id = pushed[0].data.confirmId;
+    await fetch(`${base2}/api/confirm`, { method: 'POST', headers: C, body: JSON.stringify({ id, yes: true }) });
+    assert.strictEqual((await said).reply, 'Trashed.');
+  });
+
+  await test('if the Yes/No push cannot be delivered, the answer is no', async () => {
+    fakePush.notify = async (p) => { pushed.push(p); return 0; };
+    const j = await (await fetch(`${base2}/api/say`, { method: 'POST', headers: C, body: JSON.stringify({ text: 'trash it' }) })).json();
+    assert.strictEqual(j.reply, 'Left it.');
+  });
+  app2.stop();
+
   app.stop();
   console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ''}`);
   process.exit(process.exitCode || 0);

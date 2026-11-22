@@ -107,7 +107,10 @@ struct ChatView: View {
                 pickedItem = nil
             }
         }
-        .onAppear { model.startEvents() }
+        .onAppear {
+            model.startEvents()
+            AppDelegate.enable()            // notifications for when the app is closed
+        }
     }
 
     private var header: some View {

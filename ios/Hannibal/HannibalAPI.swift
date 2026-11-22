@@ -115,6 +115,15 @@ final class HannibalAPI {
         }
     }
 
+    func registerPush(token: String) async {
+        #if DEBUG
+        let env = "sandbox"
+        #else
+        let env = "production"
+        #endif
+        _ = try? await session.data(for: request("api/push-token", body: jsonBody(["token": token, "env": env]), timeout: 20))
+    }
+
     func voiceDrop(stage: String, error: String, recovered: Bool = false) {
         let req = request("api/voice-drop", body: jsonBody(["stage": stage, "error": String(error.prefix(200)), "device": "iPhone app", "recovered": recovered]), timeout: 10)
         Task { _ = try? await session.data(for: req) }

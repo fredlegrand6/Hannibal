@@ -56,7 +56,8 @@ function readBody(req, limit = MAX_BODY) {
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.json': 'application/manifest+json', '.png': 'image/png', '.svg': 'image/svg+xml' };
 
 // opts: token, hosts [], port, persona, chat(payload, onText, {runTool}), runTool(name, input, {confirmer}),
-//       transcribe(buffer, mime) -> text, speak(text) -> mp3 Buffer, memory {recall, store}, log
+//       transcribe(buffer, mime) -> text, speak(text) -> mp3 Buffer, memory {recall, store}, log,
+//       push (server/apns.js: iPhone notifications while the native app is closed)
 function createPhoneApp(opts = {}) {
   const log = opts.log || ((...a) => console.log('[phone]', ...a));
   const token = String(opts.token || '');
@@ -70,13 +71,23 @@ function createPhoneApp(opts = {}) {
     for (const res of clients) { try { res.write(line); } catch (_) {} }
   }
 
+  // Nobody has the app open, but the native iPhone app can be reached by push.
+  const canPush = () => !!(opts.push && opts.push.configured && opts.push.count() > 0);
+
   function confirmer(_step, summary) {
     return new Promise((resolve) => {
-      if (!clients.size) { resolve(false); return; }       // nobody to ask
+      const viaPush = !clients.size && canPush();
+      if (!clients.size && !viaPush) { resolve(false); return; }       // nobody to ask
       const id = crypto.randomBytes(8).toString('hex');
       const timer = setTimeout(() => { pending.delete(id); push({ type: 'confirm-closed', id, ok: false, note: 'No answer in 2 minutes, so I did not do it.' }); resolve(false); }, CONFIRM_TIMEOUT_MS);
       pending.set(id, { resolve, timer });
       push({ type: 'confirm', id, summary: String(summary || 'Shall I go ahead?') });
+      if (viaPush) {
+        // Yes/No on the lock screen (Yes needs Face ID). If the push can't go out, it's a no.
+        opts.push.notify({ title: 'Hannibal asks', body: `${summary || 'Shall I go ahead?'}\n\nShall I go ahead?`, category: 'CONFIRM', data: { confirmId: id } })
+          .then((n) => { if (!n && pending.has(id)) { clearTimeout(timer); pending.delete(id); resolve(false); } })
+          .catch(() => { if (pending.has(id)) { clearTimeout(timer); pending.delete(id); resolve(false); } });
+      }
     });
   }
 
@@ -203,6 +214,16 @@ function createPhoneApp(opts = {}) {
       return;
     }
 
+    // The native iPhone app registers for push notifications.
+    if (req.method === 'POST' && url.pathname === '/api/push-token') {
+      let body = {};
+      try { body = JSON.parse((await readBody(req, 4096)).toString('utf8')); } catch (_) {}
+      if (!opts.push) { json(res, 501, { ok: false, note: 'Push is not set up on the server.' }); return; }
+      const ok = opts.push.register(body.token, body.env);
+      json(res, ok ? 200 : 400, { ok, configured: !!opts.push.configured });
+      return;
+    }
+
     if (req.method === 'POST' && url.pathname === '/api/reset') { opts.onReset && opts.onReset(); json(res, 200, { ok: true }); return; }
 
     res.writeHead(404); res.end();
@@ -219,8 +240,14 @@ function createPhoneApp(opts = {}) {
   }
   function stop() { for (const s of servers) { try { s.close(); } catch (_) {} } for (const c of clients) { try { c.end(); } catch (_) {} } }
 
-  // Hannibal starts the conversation (reminders, brief) — shown if the app is open.
-  function notify(text) { if (text) push({ type: 'notify', text: String(text) }); return clients.size; }
+  // Hannibal starts the conversation (reminders, brief) — shown if the app is open,
+  // otherwise sent to the iPhone as a push notification.
+  function notify(text) {
+    if (!text) return clients.size;
+    push({ type: 'notify', text: String(text) });
+    if (!clients.size && canPush()) opts.push.notify({ body: String(text) }).catch((e) => log('push failed:', e.message));
+    return clients.size;
+  }
 
   return { start, stop, notify, handle, _confirmer: confirmer, _pending: pending };
 }
