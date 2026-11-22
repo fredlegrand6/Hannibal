@@ -180,13 +180,20 @@ async function runTool(apiName, input, opts = {}) {
   // Preflight (computer.*): the service looks at the real target first. It can
   // refuse, answer straight away, or turn this one call into a confirm-first
   // write with its own exact wording. Its resolved target rides along in params.
+  // Calendar (calendar-assist.js): past times, clashes, which calendar and
+  // which event are sorted out here, before Fred hears the question; a
+  // question for Fred comes back as status "question" (nothing was changed).
   let gated = false, summary = null;
   if (tool.preflight) {
-    if (!preflightImpl) return { tool: name, status: 'unavailable', is_error: true, content: `${name} is not available here.` };
-    let pf;
-    try { pf = (await preflightImpl(name, params, opts)) || {}; }
-    catch (e) { return { tool: name, status: 'error', is_error: true, content: `The check before ${name} failed: ${e.message}` }; }
+    const impl = preflightFor(name);
+    if (!impl && !tool.preflight_optional) return { tool: name, status: 'unavailable', is_error: true, content: `${name} is not available here.` };
+    let pf = {};
+    if (impl) {
+      try { pf = (await impl(name, params, opts)) || {}; }
+      catch (e) { return { tool: name, status: 'error', is_error: true, content: `The check before ${name} failed: ${e.message}` }; }
+    }
     if (pf.block) return { tool: name, status: 'blocked', is_error: true, content: pf.block };
+    if (pf.result && pf.result.ask) return { tool: name, status: 'question', is_error: false, content: toolResultContent(pf.result) };
     if (pf.result) {
       const ok = pf.result.ok !== false;
       return { tool: name, status: ok ? 'ok' : (pf.result.stopped ? 'stopped' : 'error'), is_error: !ok, content: toolResultContent(pf.result) };
@@ -232,9 +239,11 @@ async function runTool(apiName, input, opts = {}) {
   return { tool: name, status: 'error', is_error: true, content: `The action failed: ${why}` };
 }
 
-// The computer service's preflight(name, params, opts) (set by main on the Mac).
-let preflightImpl = null;
-function setPreflight(fn) { preflightImpl = typeof fn === 'function' ? fn : null; }
+// preflight(name, params, opts) per tool family: "computer" (the computer
+// service, set by main on the Mac) and "calendar" (info-handlers, desk and server).
+const preflights = {};
+function setPreflight(fn, family = 'computer') { preflights[family] = typeof fn === 'function' ? fn : null; }
+const preflightFor = (name) => preflights[String(name).split('.')[0]] || null;
 
 const enabled = () => !/^(0|false|off|no)$/i.test(process.env.HANNIBAL_CLAUDE_TOOLS || '');
 

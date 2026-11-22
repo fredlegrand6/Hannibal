@@ -42,7 +42,10 @@ function createReminderTools({ filePath = path.join(DATA, 'reminders.json'), not
   };
 
   // `at`: local date-time "YYYY-MM-DDTHH:MM" (or any Date-parsable string).
-  function add(message, at) {
+  // `link` (optional): the calendar event this reminder belongs to,
+  // { eventId, eventUid, title, offsetMin } — moving or deleting that event
+  // moves or cancels the reminder with it (createLinkedReminders below).
+  function add(message, at, link) {
     const msg = String(message || '').trim();
     if (!msg) return { ok: false, error: 'what should I remind Fred about?' };
     const ts = Date.parse(String(at || '').trim());
@@ -50,11 +53,15 @@ function createReminderTools({ filePath = path.join(DATA, 'reminders.json'), not
     if (ts < now() - 60000) return { ok: false, error: `${fmt(ts)} is in the past` };
     const list = read();
     const r = { id: `r-${now()}-${Math.random().toString(36).slice(2, 6)}`, message: msg, triggerTs: ts, createdTs: now(), fired: false, by: 'claude' };
+    if (link && link.eventId) {
+      r.event = { id: String(link.eventId), ...(link.eventUid ? { uid: String(link.eventUid) } : {}), ...(link.title ? { title: String(link.title) } : {}),
+        offsetMin: Math.max(0, Math.round(Number(link.offsetMin) || 0)) };
+    }
     list.push(r);
     write(list);
     // Check our own work: read the file back, the reminder must really be there.
     const verified = read().some((x) => x.id === r.id && !x.fired);
-    return verified ? { ok: true, verified: true, id: r.id, message: msg, when: fmt(ts) }
+    return verified ? { ok: true, verified: true, id: r.id, message: msg, when: fmt(ts), ...(r.event ? { forEvent: r.event.title || true } : {}) }
       : { ok: false, verified: false, error: 'the reminder did not stick: it is not in the list after saving' };
   }
 
@@ -72,12 +79,34 @@ function createReminderTools({ filePath = path.join(DATA, 'reminders.json'), not
     write(list.filter((r) => !gone.includes(r)));
     const left = read().filter((r) => gone.some((g) => g.id === r.id));
     if (left.length) return { ok: false, verified: false, error: 'the reminder is still in the list after cancelling it' };
-    return { ok: true, verified: true, cancelled: gone.map((r) => ({ message: r.message, when: fmt(r.triggerTs) })) };
+    // A reminder that belongs to a calendar event: the event itself stays. Say
+    // so, so "cancel my call with Jay" never ends with only the reminder gone.
+    const ev = gone.find((r) => r.event);
+    return { ok: true, verified: true, cancelled: gone.map((r) => ({ message: r.message, when: fmt(r.triggerTs) })),
+      ...(ev ? { note: `This reminder belonged to the calendar event “${ev.event.title || ev.message}”, which is still in the calendar. If Fred meant to cancel the event itself, use calendar.delete.` } : {}) };
   }
 
   function upcoming() {
     return { ok: true, reminders: read().filter((r) => !r.fired).sort((a, b) => a.triggerTs - b.triggerTs)
-      .map((r) => ({ id: r.id, message: r.message, when: fmt(r.triggerTs) })) };
+      .map((r) => ({ id: r.id, message: r.message, when: fmt(r.triggerTs), triggerTs: r.triggerTs,
+        ...(r.event ? { eventId: r.event.id, ...(r.event.uid ? { eventUid: r.event.uid } : {}), offsetMin: r.event.offsetMin, forEvent: r.event.title || '' } : {}) })) };
+  }
+
+  // The active (not fired, not cancelled) reminders linked to one event.
+  function forEvent(eventId, eventUid) {
+    return read().filter((r) => !r.fired && r.event && sameEvent(r.event, eventId, eventUid))
+      .map((r) => ({ id: r.id, message: r.message, triggerTs: r.triggerTs, offsetMin: r.event.offsetMin || 0, when: fmt(r.triggerTs) }));
+  }
+  // Give one reminder a new time (its event moved). Read back to check.
+  function retime(id, ts) {
+    const list = read();
+    const r = list.find((x) => x.id === id && !x.fired);
+    if (!r) return { ok: false, error: 'that reminder is not active any more' };
+    r.triggerTs = Number(ts);
+    write(list);
+    const back = read().find((x) => x.id === id);
+    return back && back.triggerTs === Number(ts) && !back.fired ? { ok: true, verified: true, id, when: fmt(ts) }
+      : { ok: false, verified: false, error: 'the reminder still shows its old time' };
   }
 
   // What happened to reminders lately, so Hannibal can check his own work:
@@ -121,7 +150,87 @@ function createReminderTools({ filePath = path.join(DATA, 'reminders.json'), not
     return due.map((r) => ({ id: r.id, message: r.message, triggerTs: r.triggerTs }));
   }
 
-  return { add, cancel, upcoming, recent, takeDue, markDelivered };
+  return { add, cancel, upcoming, recent, takeDue, markDelivered, forEvent, retime };
+}
+
+// Two ids for the same calendar event: its address (href or full URL) or its UID.
+function eventPath(id) {
+  try { return decodeURIComponent(new URL(String(id || ''), 'https://x.invalid').pathname).replace(/\/+$/, ''); }
+  catch (_) { return String(id || ''); }
+}
+function sameEvent(link, eventId, eventUid) {
+  if (!link) return false;
+  if (eventId && link.id && eventPath(link.id) === eventPath(eventId)) return true;
+  return !!(eventUid && link.uid && String(link.uid) === String(eventUid));
+}
+
+// ── reminders linked to calendar events ─────────────────────────────────────
+// Fred's brief (22 Nov): a booking can carry a reminder (e.g. 15 min before);
+// moving the event moves the reminder, deleting the event cancels it, and a
+// reminder that already fired or was cancelled is never mentioned again.
+// A reminder lives on the side that booked it (desk or server); `remote` is the
+// other side, when it is reachable: { list() → upcoming reminders, cancel(id),
+// retime?(id, ts) }. Everything is read back before it is reported.
+function createLinkedReminders({ local, remote = null, now = () => Date.now() } = {}) {
+  async function remoteFor(eventId, eventUid) {
+    if (!remote) return [];
+    try {
+      const list = (await remote.list()) || [];
+      return list.filter((r) => r.eventId && sameEvent({ id: r.eventId, uid: r.eventUid }, eventId, eventUid))
+        .map((r) => ({ id: r.id, message: r.message, triggerTs: Number(r.triggerTs), offsetMin: Number(r.offsetMin) || 0, when: r.when, there: true }));
+    } catch (_) { return []; }
+  }
+  async function forEvent(eventId, eventUid) {
+    return [...local.forEvent(eventId, eventUid), ...(await remoteFor(eventId, eventUid))];
+  }
+  function add(message, at, link) { return local.add(message, at, link); }
+  // The event now starts at newStartMs: each linked reminder keeps its offset.
+  // One that would now be in the past is dropped (said once, not fired late).
+  // Answers carry times (ms), so the caller can say them on Fred's own clock.
+  async function moveForEvent(eventId, newStartMs, { eventUid, title } = {}) {
+    const out = { moved: [], dropped: [], failed: [] };
+    for (const r of await forEvent(eventId, eventUid)) {
+      const ts = Number(newStartMs) - (r.offsetMin || 0) * 60000;
+      if (!Number.isFinite(ts)) { out.failed.push(r.triggerTs); continue; }
+      try {
+        if (ts <= now()) {
+          const c = r.there ? await remote.cancel(r.id) : local.cancel(r.id);
+          (c && c.ok ? out.dropped : out.failed).push(r.triggerTs);
+          continue;
+        }
+        let res;
+        if (!r.there) res = local.retime(r.id, ts);
+        else if (remote.retime) res = await remote.retime(r.id, ts);
+        else {        // the other side cannot change it: take it over here
+          const c = await remote.cancel(r.id);
+          res = c && c.ok ? local.add(r.message, new Date(ts).toISOString(), { eventId, eventUid, title, offsetMin: r.offsetMin }) : c;
+        }
+        (res && res.ok ? out.moved : out.failed).push(ts);
+      } catch (_) { out.failed.push(ts); }
+    }
+    return out;
+  }
+  async function cancelForEvent(eventId, { eventUid } = {}) {
+    const out = { cancelled: [], failed: [] };
+    for (const r of await forEvent(eventId, eventUid)) {
+      try {
+        const c = r.there ? await remote.cancel(r.id) : local.cancel(r.id);
+        (c && c.ok ? out.cancelled : out.failed).push(r.triggerTs);
+      } catch (_) { out.failed.push(r.triggerTs); }
+    }
+    // Check: none of them may still be active.
+    const left = await forEvent(eventId, eventUid);
+    if (left.length && !out.failed.length) out.failed.push(...left.map((r) => r.triggerTs));
+    return out;
+  }
+  // Every active linked reminder (to show next to its event in calendar.events).
+  async function all() {
+    const mine = local.upcoming().reminders.filter((r) => r.eventId);
+    let theirs = [];
+    if (remote) { try { theirs = ((await remote.list()) || []).filter((r) => r.eventId); } catch (_) {} }
+    return [...mine, ...theirs];
+  }
+  return { forEvent, add, moveForEvent, cancelForEvent, all };
 }
 
 // ── notes ───────────────────────────────────────────────────────────────────
@@ -333,4 +442,4 @@ function createReminderFirer({ reminders, toRenderer = () => {}, onReminder = nu
   };
 }
 
-module.exports = { createReminderTools, createNoteTools, createBriefScheduler, registerProactive, createReminderFirer, cancelAcross, BRIEF_PROMPT };
+module.exports = { createReminderTools, createLinkedReminders, sameEvent, createNoteTools, createBriefScheduler, registerProactive, createReminderFirer, cancelAcross, BRIEF_PROMPT };

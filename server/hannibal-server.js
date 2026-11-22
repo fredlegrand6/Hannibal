@@ -55,14 +55,18 @@ const registry = installToolTap(ipc);
 
 const { registerInfo } = require(path.join(SERVICES, 'info-handlers'));
 const { createFactStore, registerFacts } = require(path.join(SERVICES, 'memory-facts'));
-const { createReminderTools, createBriefScheduler, cancelAcross } = require(path.join(SERVICES, 'proactive'));
+const { createReminderTools, createLinkedReminders, createBriefScheduler, cancelAcross } = require(path.join(SERVICES, 'proactive'));
 const { createQdrantMemory } = require(path.join(SERVICES, 'qdrant-memory'));
 const { createTelegramBridge, makeElevenLabsTranscriber, PHONE_CONTEXT } = require(path.join(SERVICES, 'telegram'));
 const { registerWorld } = require(path.join(SERVICES, 'world'));
 const claudeBrain = require(path.join(SERVICES, 'claude-brain'));
 const claudeTools = require(path.join(SERVICES, 'claude-tools'));
 
-const info = registerInfo(ipc, { python: CFG.python, searxngUrl: CFG.searxngUrl, metricsLocal: true });
+// Reminders linked to calendar events: set below (linkedReminders), read lazily.
+const info = registerInfo(ipc, { python: CFG.python, searxngUrl: CFG.searxngUrl, metricsLocal: true, reminders: () => linkedReminders });
+// Past times, clashes, which calendar/event, reminders, repeats: sorted out
+// before Fred is asked (services/calendar-assist.js).
+claudeTools.setPreflight(info.calendarPreflight, 'calendar');
 registerWorld(ipc);   // views can't open here (no screen); the narrated read still works
 
 const facts = createFactStore({ filePath: path.join(CFG.dataDir, 'memory-facts.json') });
@@ -107,6 +111,15 @@ ipc.handle('reminders:cancel', async (_e, query) => cancelAcross({
   local: reminders, query, remote: await macUpcoming(),
   cancelRemote: (id) => hub.invoke('reminders.cancel', { query: id }, 15000),
 }));
+// A reminder booked with a calendar event can live on either side; moving or
+// deleting the event here takes the desk's one along too (through the link).
+const linkedReminders = createLinkedReminders({
+  local: reminders,
+  remote: {
+    list: macUpcoming,
+    cancel: (id) => hub.invoke('reminders.cancel', { query: id }, 15000),
+  },
+});
 ipc.handle('reminders:upcoming', async () => {
   const here = reminders.upcoming();
   const mac = await macUpcoming();
@@ -335,6 +348,10 @@ if (process.env.BODY_LINK_TOKEN) {
         'nudge.sync': ({ keys } = {}) => { nudger.markSaid(keys); return { keys: nudger.said() }; },
         // The desk sends something to Fred's phone (a reminder that fired there).
         'phone.notify': async ({ text, voice } = {}) => { await tellFred(String(text || ''), { voice: !!voice }); return { ok: true }; },
+        // The desk moves or deletes a calendar event whose reminder was set here (from the phone).
+        'reminders.linked': () => ({ reminders: reminders.upcoming().reminders.filter((r) => r.eventId) }),
+        'reminders.cancelId': ({ id } = {}) => reminders.cancel(String(id || '')),
+        'reminders.retime': ({ id, ts } = {}) => reminders.retime(String(id || ''), Number(ts)),
       },
     });
   } catch (e) { console.warn('[body] link disabled:', e.message); hub = null; }

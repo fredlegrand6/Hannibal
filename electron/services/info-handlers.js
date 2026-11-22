@@ -10,9 +10,15 @@
 const { spawn } = require('child_process');
 const path = require('path');
 const { createCalendarAccount } = require('./caldav');
+const assist = require('./calendar-assist');
 
 function registerInfo(ipcMain, opts = {}) {
   const calendarAccount = opts.calendarAccount || createCalendarAccount();
+  // Reminders linked to events (proactive.js createLinkedReminders), when this
+  // side has them: an object, or a function that returns one (wired later).
+  const linkedReminders = () => { try { return typeof opts.reminders === 'function' ? opts.reminders() : opts.reminders || null; } catch (_) { return null; } };
+  const tz = () => assist.fredTz(opts.env || process.env);
+  const nowFn = opts.now || (() => Date.now());   // tests pin the clock
 // ── SYSTEM METRICS: ssh to GEX131, return a raw snapshot for the right-rail gauges.
 // One ssh round-trip returns four @@-delimited sections. CPU% and NET rate are
 // computed in the renderer from deltas between polls (cumulative counters here).
@@ -69,7 +75,7 @@ ipcMain.handle('system:metrics', async () => {
 // REPORT (calendar-query) with a time-range filter returns matching VEVENTs as
 // raw iCalendar, which we unfold + parse minimally (DTSTART/SUMMARY). Creds live
 // in .env as an app password (never the main account password). ──
-function parseICalEvents(xml, now) {
+function parseICalEvents(xml, now, tz = assist.fredTz()) {
   const unesc = (s) => s.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').replace(/&#13;|&#x0?d;/gi, '\r').replace(/&#10;|&#x0?a;/gi, '\n').replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
   const events = [];
   // pull each <...calendar-data>…</…calendar-data> block regardless of ns prefix
@@ -85,35 +91,40 @@ function parseICalEvents(xml, now) {
       if (!dtLine[2]) continue;
       const params = dtLine[1] || '', v = dtLine[2];
       const allDay = /VALUE=DATE\b/.test(params) || /^\d{8}$/.test(v);
-      let when, time;
-      if (allDay) {
-        when = new Date(+v.slice(0, 4), +v.slice(4, 6) - 1, +v.slice(6, 8));
-        time = 'All day';
-      } else if (/Z$/.test(v)) {                       // UTC → local
-        when = new Date(Date.UTC(+v.slice(0, 4), +v.slice(4, 6) - 1, +v.slice(6, 8), +v.slice(9, 11), +v.slice(11, 13)));
-        time = when.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
-      } else {                                          // floating / TZID → treat as wall-clock
-        when = new Date(+v.slice(0, 4), +v.slice(4, 6) - 1, +v.slice(6, 8), +v.slice(9, 11), +v.slice(11, 13));
-        time = `${v.slice(9, 11)}:${v.slice(11, 13)}`;
-      }
+      // Every time is placed in Fred's own time zone (Bussum / Ibiza), whatever
+      // zone the machine runs in: UTC, a TZID of the event's own, or floating.
+      const instant = (prm, val) => {
+        if (/^\d{8}$/.test(val)) return assist.wallMs(+val.slice(0, 4), +val.slice(4, 6), +val.slice(6, 8), 0, 0, tz);
+        if (/Z$/.test(val) || /TZID=/.test(prm)) { const i = lineInstant(`X${prm}:${val}`); if (i && i.ms != null) return i.ms; }
+        return assist.wallMs(+val.slice(0, 4), +val.slice(4, 6), +val.slice(6, 8), +val.slice(9, 11), +val.slice(11, 13), tz);
+      };
+      const ms = instant(params, v);
+      const when = new Date(ms);
+      const time = allDay ? 'All day' : assist.fmtTime(ms, tz);
+      // Its end (DTEND or DURATION), for the clash check.
+      const endLine = body.match(/(?:^|\n)DTEND([^:\n]*):([0-9TZ]+)/);
+      const durLine = (body.match(/(?:^|\n)DURATION[^:\n]*:P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?)?/) || null);
+      let endTs = endLine ? instant(endLine[1] || '', endLine[2]) : null;
+      if (endTs == null && durLine) endTs = ms + ((+durLine[1] || 0) * 7 * 1440 + (+durLine[2] || 0) * 1440 + (+durLine[3] || 0) * 60 + (+durLine[4] || 0)) * 60000;
       // A repeat of a recurring event (the server expanded it): keep which one it
       // is, so delete/move can change just this one.
       const rid = ((body.match(/(?:^|\n)RECURRENCE-ID[^:\n]*:([0-9TZ]+)/) || [])[1] || '').trim();
-      events.push({ ts: when.getTime(), time, allDay, title: (summary || '(no title)').trim(), ...(uid ? { uid } : {}), ...(rid ? { repeats: true, occurrence: rid } : {}) });
+      events.push({ ts: when.getTime(), ...(endTs > when.getTime() ? { endTs } : {}), time, allDay, title: unesc2((summary || '(no title)').trim()), ...(uid ? { uid } : {}), ...(rid ? { repeats: true, occurrence: rid } : {}) });
     }
   }
-  const todayKey = new Date(now); todayKey.setHours(0, 0, 0, 0);
-  const dayMs = 864e5;
+  const today = assist.dayOf(now.getTime(), tz);
+  const dayN = (ts) => Math.round((Date.UTC(...ymd(assist.dayOf(ts, tz))) - Date.UTC(...ymd(today))) / 864e5);
   return events
     .filter((e) => e.allDay || e.ts >= now.getTime() - 30 * 60 * 1000)   // drop past timed events (30m grace)
     .sort((a, b) => a.ts - b.ts)
     .map((e) => {
-      const n = Math.floor((e.ts - todayKey.getTime()) / dayMs);
-      const day = n <= 0 ? 'today' : n === 1 ? 'tomorrow'
-        : new Date(e.ts).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' });
+      const n = dayN(e.ts);
+      const day = n <= 0 ? 'today' : n === 1 ? 'tomorrow' : assist.fmtDate(assist.dayOf(e.ts, tz));
       return { ...e, day };
     });
 }
+const ymd = (d) => [d.y, d.mo - 1, d.d];
+const unesc2 = (t) => String(t).replace(/\\([,;\\])/g, '$1').replace(/\\n/gi, ' ');
 
 // Events from today through `days` days ahead (default 2 = today + tomorrow, max 31),
 // from every calendar of the account (Apple Calendar: Home, Work, shared...).
@@ -123,9 +134,10 @@ async function fetchCalendar(days) {
   if (a.error) return { ok: false, error: a.error };
   const n = Math.min(Math.max(Math.round(Number(days) || 2), 1), 31);
   const fmt = (d) => d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
-  const now = new Date();
-  const start = new Date(now); start.setHours(0, 0, 0, 0);
-  const end = new Date(start); end.setDate(end.getDate() + n);
+  const now = new Date(nowFn());
+  const t0 = assist.dayOf(now.getTime(), tz()); const t1 = assist.addDays(t0, n);
+  const start = new Date(assist.wallMs(t0.y, t0.mo, t0.d, 0, 0, tz()));
+  const end = new Date(assist.wallMs(t1.y, t1.mo, t1.d, 0, 0, tz()));
   const range = `start="${fmt(start)}" end="${fmt(end)}"`;
   const body = `<?xml version="1.0"?><c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><c:calendar-data><c:expand ${range}/></c:calendar-data></d:prop><c:filter><c:comp-filter name="VCALENDAR"><c:comp-filter name="VEVENT"><c:time-range ${range}/></c:comp-filter></c:comp-filter></c:filter></c:calendar-query>`;
   const one = async (cal) => {
@@ -140,7 +152,7 @@ async function fetchCalendar(days) {
     const xml = await res.text();
     return String(xml).split(/<(?:[a-z0-9]+:)?response[\s>]/i).slice(1).flatMap((block) => {
       const href = ((block.match(/<(?:[a-z0-9]+:)?href[^>]*>([\s\S]*?)<\//i) || [])[1] || '').trim();
-      return parseICalEvents(block, now).map((e) => ({ ...e, calendar: cal.name, ...(href ? { href } : {}) }));
+      return parseICalEvents(block, now, tz()).map((e) => ({ ...e, calendar: cal.name, ...(href ? { href } : {}) }));
     });
   };
   const got = await Promise.allSettled(a.read.map(one));
@@ -156,33 +168,65 @@ async function fetchCalendar(days) {
   const list = events.sort((x, y) => x.ts - y.ts).filter((e) => {
     if (!e.uid) return true;
     const k = `${e.uid}|${e.ts}`; if (seen.has(k)) return false; seen.add(k); return true;
-  }).map(({ uid, href, ...e }) => (href ? { ...e, id: href } : e));
+  }).map(({ uid, href, ...e }) => (href ? { ...e, id: href, ...(uid ? { uid } : {}) } : e));
   if (failed.length) console.log('[calendar] skipped:', failed.join('; '));
+  // Each event's own reminder, when Hannibal set one with it and it is still
+  // to come. A reminder that fired or was cancelled is not shown at all.
+  const lr = linkedReminders();
+  if (lr && lr.all) {
+    try {
+      const rems = await lr.all();
+      const { sameEvent } = require('./proactive');
+      for (const e of list) {
+        const mine = rems.filter((r) => sameEvent({ id: r.eventId, uid: r.eventUid }, e.id, e.uid));
+        if (mine.length) e.reminder = mine.map((r) => assist.fmtTime(Number(r.triggerTs), tz())).join(', ');
+      }
+    } catch (_) {}
+  }
   return { ok: true, events: list };
 }
 ipcMain.handle('calendar:events', (_e, days) => fetchCalendar(days));
 
 // Book an event. Only ever reached after Fred's yes (catalog: confirm, ceiling 'never').
-// start: local "YYYY-MM-DDTHH:MM" (or "YYYY-MM-DD" for all day).
-ipcMain.handle('calendar:add', async (_e, title, start, minutes, location, notes) => {
+// start: local "YYYY-MM-DDTHH:MM" (or "YYYY-MM-DD" for all day) in Fred's time zone.
+// calendar: the calendar Fred named; default "Werk" (calendar-assist pickCalendar).
+// remind_minutes: a reminder that many minutes before, linked to the event.
+// Done only when it reads back from iCloud exactly as booked (verified true).
+ipcMain.handle('calendar:add', async (_e, title, start, minutes, location, notes, calendar, remindMinutes) => {
   const a = await calendarAccount.get();
   if (a.error) return { ok: false, error: a.error };
-  const ev = buildEvent({ title, start, minutes, location, notes });
+  const picked = assist.pickCalendar(a, calendar, { env: opts.env || process.env });
+  if (picked.error) return { ok: false, error: picked.error };
+  const cal = picked.calendar;
+  const ev = buildEvent({ title, start, minutes, location, notes, tz: tz(), now: nowFn() });
   if (!ev.ok) return ev;
+  const url = `${cal.url.replace(/\/?$/, '/')}${ev.uid}.ics`;
   try {
-    const res = await fetch(`${a.write.url.replace(/\/?$/, '/')}${ev.uid}.ics`, {
+    const res = await fetch(url, {
       method: 'PUT',
       headers: { Authorization: a.auth, 'Content-Type': 'text/calendar; charset=utf-8', 'If-None-Match': '*' },
       body: ev.ics, signal: AbortSignal.timeout(10000),
     });
     if (res.status === 401) calendarAccount.forget();
-    if (!res.ok) return { ok: false, error: `caldav ${res.status}` };
-    const back = await readBack(a, `${a.write.url.replace(/\/?$/, '/')}${ev.uid}.ics`);
-    if (back === null || (back && back.uid !== ev.uid)) return { ok: false, verified: false, error: 'the calendar accepted the booking but it is not there when I look again' };
-    console.log(`[calendar] booked "${ev.title}" ${ev.when} in ${a.write.name}${back ? ' (checked)' : ' (could not check)'}`);
-    return { ok: true, verified: !!back, title: ev.title, when: ev.when, calendar: a.write.name };
+    if (!res.ok) return { ok: false, verified: false, error: `caldav ${res.status}` };
+    const back = await readBack(a, url);
+    if (back === undefined) return { ok: false, verified: false, could_not_check: true, error: `iCloud took the booking of "${ev.title}" but I could not read it back to check it. It may well be there: do NOT book it again; look with calendar.events first.` };
+    if (back === null || back.uid !== ev.uid) return { ok: false, verified: false, error: 'the calendar accepted the booking but it is not there when I look again' };
+    if (timesOf(back.ics) !== timesOf(ev.ics) || !sameTitle(back.title, ev.title)) return { ok: false, verified: false, error: `"${ev.title}" is in the calendar, but not with the time or title I booked: check it in the Calendar app` };
+    console.log(`[calendar] booked "${ev.title}" ${ev.when} in ${cal.name} (checked)`);
+    const out = { ok: true, verified: true, id: new URL(url).pathname, title: ev.title, when: ev.when, calendar: cal.name };
+    // The reminder that goes with it (linked, so a move or delete takes it along).
+    const mins = Math.round(Number(remindMinutes) || 0);
+    if (mins > 0 && ev.startMs) {
+      const lr = linkedReminders();
+      const r = lr ? await Promise.resolve(lr.add(ev.title, new Date(ev.startMs - mins * 60000).toISOString(), { eventId: out.id, eventUid: ev.uid, title: ev.title, offsetMin: mins })).catch((e) => ({ ok: false, error: e.message })) : { ok: false, error: 'reminders are not available here' };
+      if (r && r.ok && r.verified !== false) out.reminder = `${assist.fmtTime(ev.startMs - mins * 60000, tz())} (${mins} minutes before)`;
+      else out.reminder_failed = `the event is booked, but its reminder did not stick${r && r.error ? `: ${r.error}` : ''}. Tell Fred.`;
+    }
+    out.done = `Booked “${ev.title}” ${ev.when} in ${cal.name}${out.reminder ? `, reminder at ${out.reminder}` : ''} (checked in the calendar)`;
+    return out;
   } catch (e) {
-    return { ok: false, error: e.message };
+    return { ok: false, verified: false, error: e.message };
   }
 });
 
@@ -243,7 +287,7 @@ async function locate(id, title, { scope } = {}) {
   const ev = await findEvent(a, String(id || '').trim());
   if (!ev) return { error: 'that event is not in the calendar any more (check calendar.events for its id)' };
   if (title && !sameTitle(ev.title, title)) return { error: `that id belongs to "${ev.title}", not "${title}": nothing changed` };
-  if (ev.recurring && !scope) return { error: `"${ev.title}" repeats: say whether to change only this one (scope "this", with its occurrence from calendar.events) or the whole series (scope "all")` };
+  if (ev.recurring && !scope) return { error: `"${ev.title}" repeats: ask Fred "just this one or the whole series?", then call again with scope "this" (with its occurrence from calendar.events) or scope "all"` };
   if (ev.cal.writable === false) return { error: `"${ev.title}" is in ${ev.cal.name}, a calendar Fred can only read` };
   return { a, ev };
 }
@@ -256,9 +300,39 @@ async function putBack(a, ev, ics) {
   return { back: await readBack(a, ev.url) };
 }
 
+// Reminders that go with an event: cancelled with it, moved with it. The
+// answer only ever names reminders that were still to come (never one that
+// already fired or was cancelled earlier).
+async function remindersAfterDelete(ev) {
+  const lr = linkedReminders();
+  if (!lr) return {};
+  try {
+    const r = await lr.cancelForEvent(new URL(ev.url).pathname, { eventUid: ev.uid });
+    const at = (list) => list.map((ts) => assist.fmtTime(Number(ts), tz())).join(', ');
+    return { ...(r.cancelled.length ? { reminder: `cancelled (it was set for ${at(r.cancelled)})` } : {}),
+      ...(r.failed.length ? { reminder_failed: `the event is gone, but its reminder (${at(r.failed)}) could not be cancelled. Tell Fred.` } : {}) };
+  } catch (e) { return { reminder_failed: `could not check the event's reminder: ${e.message}` }; }
+}
+async function remindersAfterMove(ev, start) {
+  const lr = linkedReminders();
+  if (!lr) return {};
+  const r0 = assist.resolveWhen(start, { tz: tz(), now: nowFn() });
+  if (!r0.ok) return {};
+  try {
+    const r = await lr.moveForEvent(new URL(ev.url).pathname, r0.ms, { eventUid: ev.uid, title: ev.title });
+    const at = (list) => list.map((ts) => assist.fmtTime(Number(ts), tz())).join(', ');
+    return { ...(r.moved.length ? { reminder: `moved to ${at(r.moved)}` } : {}),
+      ...(r.dropped.length ? { reminder: 'dropped: at the new time it would already be in the past' } : {}),
+      ...(r.failed.length ? { reminder_failed: `the event moved, but its reminder could not be moved with it (${at(r.failed)}). Tell Fred.` } : {}) };
+  } catch (e) { return { reminder_failed: `could not move the event's reminder: ${e.message}` }; }
+}
+const notChecked = (what) => ({ ok: false, verified: false, could_not_check: true, error: `iCloud said yes to ${what}, but I could not read the calendar back to check it. It may have worked: do NOT do it again; look with calendar.events first.` });
+
 ipcMain.handle('calendar:delete', async (_e, id, title, _when, occurrence, scope) => {
-  const one = scope === 'this' || (!scope && occurrence);
-  const { a, ev, error } = await locate(id, title, { scope: one ? 'this' : scope });
+  if (!id) return { ok: false, error: 'which event? Look it up with calendar.events first (or describe it with find and day)' };
+  // Repeating: only ever with Fred's explicit choice ("this" or "all"), never guessed from an occurrence.
+  const one = scope === 'this';
+  const { a, ev, error } = await locate(id, title, { scope: one ? 'this' : scope === 'all' ? 'all' : undefined });
   if (error) return { ok: false, error };
   try {
     if (ev.recurring && one) {
@@ -267,52 +341,75 @@ ipcMain.handle('calendar:delete', async (_e, id, title, _when, occurrence, scope
       if (!skip.ok) return skip;
       const { back, error: err } = await putBack(a, ev, skip.ics);
       if (err) return { ok: false, error: err };
+      if (back === undefined) return notChecked(`skipping that "${ev.title}"`);
       const st = back ? occurrenceState(back.ics, occurrence) : null;
       if (back === null || (st && st.gone)) return { ok: false, verified: false, error: `the whole "${ev.title}" series disappeared: check the Calendar app` };
-      if (st && (!st.skipped || st.override)) return { ok: false, verified: false, error: `that "${ev.title}" is still in the calendar after skipping it` };
-      console.log(`[calendar] skipped one "${ev.title}" (${occurrence})${st ? ' (checked)' : ' (could not check)'}`);
-      return { ok: true, verified: !!st, deleted: ev.title, only: 'this one', calendar: ev.cal.name };
+      if (!st.skipped || st.override) return { ok: false, verified: false, error: `that "${ev.title}" is still in the calendar after skipping it` };
+      console.log(`[calendar] skipped one "${ev.title}" (${occurrence}) (checked)`);
+      return { ok: true, verified: true, deleted: ev.title, only: 'this one', calendar: ev.cal.name, done: `Deleted only this one “${ev.title}” from ${ev.cal.name}; the other repeats stay (checked)` };
     }
     const res = await fetch(ev.url, { method: 'DELETE', headers: { Authorization: a.auth, ...(ev.etag ? { 'If-Match': ev.etag } : {}) }, signal: AbortSignal.timeout(10000) });
     if (!res.ok && res.status !== 404) return { ok: false, error: `caldav ${res.status}` };
     const back = await readBack(a, ev.url);
+    if (back === undefined) return notChecked(`deleting "${ev.title}"`);
     if (back) return { ok: false, verified: false, error: `"${ev.title}" is still in the calendar after deleting it` };
-    console.log(`[calendar] deleted "${ev.title}"${ev.recurring ? ' (whole series)' : ''} (${ev.cal.name})${back === null ? ' (checked)' : ' (could not check)'}`);
-    return { ok: true, verified: back === null, deleted: ev.title, ...(ev.recurring ? { only: 'the whole series' } : {}), calendar: ev.cal.name };
+    console.log(`[calendar] deleted "${ev.title}"${ev.recurring ? ' (whole series)' : ''} (${ev.cal.name}) (checked)`);
+    const rem = await remindersAfterDelete(ev);
+    return { ok: true, verified: true, deleted: ev.title, ...(ev.recurring ? { only: 'the whole series' } : {}), calendar: ev.cal.name, ...rem,
+      done: `Deleted “${ev.title}”${ev.recurring ? ' (the whole series)' : ''} from ${ev.cal.name}${rem.reminder ? `; its reminder ${rem.reminder}` : ''} (checked)` };
   } catch (e) { return { ok: false, error: e.message }; }
 });
 
 ipcMain.handle('calendar:move', async (_e, id, start, minutes, title, occurrence, scope) => {
-  const one = scope === 'this' || (!scope && occurrence);
-  if (scope === 'all') return { ok: false, error: 'moving a whole repeating series is not something Hannibal does yet: Fred can change it in the Calendar app, or move one repeat at a time' };
-  const { a, ev, error } = await locate(id, title, { scope: one ? 'this' : undefined });
+  if (!id) return { ok: false, error: 'which event? Look it up with calendar.events first (or describe it with find and day)' };
+  const one = scope === 'this';
+  const { a, ev, error } = await locate(id, title, { scope: one ? 'this' : scope === 'all' ? 'all' : undefined });
   if (error) return { ok: false, error };
-  if (ev.recurring && one) {
-    // Only this repeat: an override with RECURRENCE-ID; the series stays.
-    const mv = moveOccurrence(ev.ics, occurrence, { start, minutes });
+  const opt = { start, minutes, tz: tz(), now: nowFn() };
+  if (ev.recurring && scope === 'all') {
+    // The whole series to a new time: the series' own start moves, every repeat with it.
+    const mv = moveSeries(ev.ics, occurrence, opt);
     if (!mv.ok) return mv;
     try {
       const { back, error: err } = await putBack(a, ev, mv.ics);
       if (err) return { ok: false, error: err };
+      if (back === undefined) return notChecked(`moving the "${ev.title}" series`);
+      if (back === null) return { ok: false, verified: false, error: `the whole "${ev.title}" series disappeared: check the Calendar app` };
+      if (timesOf(back.ics) !== timesOf(mv.ics)) return { ok: false, verified: false, error: `the "${ev.title}" series still shows its old time after moving it` };
+      console.log(`[calendar] moved the "${ev.title}" series to ${mv.when} (checked)`);
+      return { ok: true, verified: true, title: ev.title, when: mv.when, only: 'the whole series', calendar: ev.cal.name, done: `Moved the whole “${ev.title}” series to ${mv.when} in ${ev.cal.name} (checked)` };
+    } catch (e) { return { ok: false, error: e.message }; }
+  }
+  if (ev.recurring && one) {
+    // Only this repeat: an override with RECURRENCE-ID; the series stays.
+    const mv = moveOccurrence(ev.ics, occurrence, opt);
+    if (!mv.ok) return mv;
+    try {
+      const { back, error: err } = await putBack(a, ev, mv.ics);
+      if (err) return { ok: false, error: err };
+      if (back === undefined) return notChecked(`moving that "${ev.title}"`);
       const want = occurrenceState(mv.ics, occurrence).override;
       const st = back ? occurrenceState(back.ics, occurrence) : null;
       if (back === null || (st && st.gone)) return { ok: false, verified: false, error: `the whole "${ev.title}" series disappeared: check the Calendar app` };
-      if (st && st.override !== want) return { ok: false, verified: false, error: `that "${ev.title}" still shows its old time after moving it` };
-      console.log(`[calendar] moved one "${ev.title}" to ${mv.when}${st ? ' (checked)' : ' (could not check)'}`);
-      return { ok: true, verified: !!st, title: ev.title, when: mv.when, only: 'this one', calendar: ev.cal.name };
+      if (st.override !== want) return { ok: false, verified: false, error: `that "${ev.title}" still shows its old time after moving it` };
+      console.log(`[calendar] moved one "${ev.title}" to ${mv.when} (checked)`);
+      return { ok: true, verified: true, title: ev.title, when: mv.when, only: 'this one', calendar: ev.cal.name, done: `Moved only this one “${ev.title}” to ${mv.when} in ${ev.cal.name} (checked)` };
     } catch (e) { return { ok: false, error: e.message }; }
   }
-  const moved = moveEvent(ev.ics, { start, minutes });
+  const moved = moveEvent(ev.ics, opt);
   if (!moved.ok) return moved;
   try {
     const res = await fetch(ev.url, { method: 'PUT', headers: { Authorization: a.auth, 'Content-Type': 'text/calendar; charset=utf-8', ...(ev.etag ? { 'If-Match': ev.etag } : {}) }, body: moved.ics, signal: AbortSignal.timeout(10000) });
     if (res.status === 412) return { ok: false, error: 'the event changed in the meantime: look it up again' };
     if (!res.ok) return { ok: false, error: `caldav ${res.status}` };
     const back = await readBack(a, ev.url);
+    if (back === undefined) return notChecked(`moving "${ev.title}"`);
     if (back === null) return { ok: false, verified: false, error: `"${ev.title}" is gone from the calendar after moving it` };
-    if (back && timesOf(back.ics) !== timesOf(moved.ics)) return { ok: false, verified: false, error: `"${ev.title}" still shows its old time or length after moving it` };
-    console.log(`[calendar] moved "${ev.title}" to ${moved.when}${back ? ' (checked)' : ' (could not check)'}`);
-    return { ok: true, verified: !!back, title: ev.title, when: moved.when, calendar: ev.cal.name };
+    if (timesOf(back.ics) !== timesOf(moved.ics)) return { ok: false, verified: false, error: `"${ev.title}" still shows its old time or length after moving it` };
+    console.log(`[calendar] moved "${ev.title}" to ${moved.when} (checked)`);
+    const rem = await remindersAfterMove(ev, start);
+    return { ok: true, verified: true, title: ev.title, when: moved.when, calendar: ev.cal.name, ...rem,
+      done: `Moved “${ev.title}” to ${moved.when} in ${ev.cal.name}${rem.reminder ? `; its reminder ${rem.reminder}` : ''} (checked)` };
   } catch (e) { return { ok: false, error: e.message }; }
 });
 
@@ -453,12 +550,22 @@ ipcMain.handle('mail:seen', (_e, uid) => zoho(['seen', String(uid || '')]));
 // For the nudges (nudges.js): the same reads, called directly.
 return {
   calendar: (days) => fetchCalendar(days),
+  // Run by claude-tools before the voice gate for calendar.add/move/delete
+  // (calendar-assist.js): past times, clashes, which calendar, the reminder,
+  // which event Fred means, "this one or the whole series".
+  calendarPreflight: assist.createCalendarPreflight({
+    events: (days) => fetchCalendar(days),
+    account: () => calendarAccount.get(),
+    reminders: { forEvent: async (id) => { const lr = linkedReminders(); return lr ? lr.forEvent(id) : []; } },
+    env: opts.env || process.env,
+    now: nowFn,
+  }),
   waitingMail: (hours = 48, days = 7) => zoho(['waiting', String(hours), String(days)]),
 };
 }
 
 // One VEVENT, times in UTC. Pure, so it can be tested.
-function buildEvent({ title, start, minutes, location, notes, now = Date.now(), uid } = {}) {
+function buildEvent({ title, start, minutes, location, notes, now = Date.now(), uid, tz = assist.fredTz() } = {}) {
   const t = String(title || '').replace(/\s+/g, ' ').trim().slice(0, 200);
   if (!t) return { ok: false, error: 'the event needs a title' };
   const s = String(start || '').trim();
@@ -466,27 +573,33 @@ function buildEvent({ title, start, minutes, location, notes, now = Date.now(), 
   const utc = (ms) => new Date(ms).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
   const id = uid || `hannibal-${now.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   let dtStart, dtEnd, when;
+  let startMs;
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
     const [y, m, d] = s.split('-').map(Number);
-    const day = new Date(y, m - 1, d);
-    if (day.getTime() < new Date(now).setHours(0, 0, 0, 0)) return { ok: false, error: `${s} is in the past` };
-    const next = new Date(y, m - 1, d + 1);
-    const ymd = (x) => `${x.getFullYear()}${String(x.getMonth() + 1).padStart(2, '0')}${String(x.getDate()).padStart(2, '0')}`;
-    dtStart = `DTSTART;VALUE=DATE:${ymd(day)}`; dtEnd = `DTEND;VALUE=DATE:${ymd(next)}`;
-    when = day.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' }) + ' (all day)';
+    const day = { y, mo: m, d };
+    const today = assist.dayOf(now, tz);
+    if (Date.UTC(y, m - 1, d) < Date.UTC(today.y, today.mo - 1, today.d)) return { ok: false, error: `${s} is in the past` };
+    const next = assist.addDays(day, 1);
+    const ymd8 = (x) => `${x.y}${String(x.mo).padStart(2, '0')}${String(x.d).padStart(2, '0')}`;
+    dtStart = `DTSTART;VALUE=DATE:${ymd8(day)}`; dtEnd = `DTEND;VALUE=DATE:${ymd8(next)}`;
+    when = assist.fmtDate(assist.addDays(day, 0)) + ' (all day)';
+    startMs = assist.wallMs(y, m, d, 0, 0, tz);
   } else {
-    const ms = Date.parse(s);
-    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(s) || !Number.isFinite(ms)) return { ok: false, error: `could not read the time "${s}": use YYYY-MM-DDTHH:MM local time` };
-    if (ms < now - 5 * 60000) return { ok: false, error: 'that time is in the past' };
+    // A local time on Fred's clock (Bussum / Ibiza), not the machine's.
+    const mt = s.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+    const ms = mt ? assist.wallMs(+mt[1], +mt[2], +mt[3], +mt[4], +mt[5], tz) : NaN;
+    if (!mt || !Number.isFinite(ms)) return { ok: false, error: `could not read the time "${s}": use YYYY-MM-DDTHH:MM local time` };
+    if (ms < now - 5 * 60000) return { ok: false, error: 'that time is in the past: ask Fred which day he means, never pick one yourself' };
     const mins = Math.min(Math.max(Math.round(Number(minutes) || 60), 5), 24 * 60);
     dtStart = `DTSTART:${utc(ms)}`; dtEnd = `DTEND:${utc(ms + mins * 60000)}`;
-    when = new Date(ms).toLocaleString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' }) + ` (${mins} min)`;
+    when = `${assist.fmtWhen(ms, tz)} (${mins} min)`;
+    startMs = ms;
   }
   const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Hannibal//EN', 'BEGIN:VEVENT', `UID:${id}`, `DTSTAMP:${utc(now)}`,
     dtStart, dtEnd, `SUMMARY:${esc(t)}`,
     ...(location ? [`LOCATION:${esc(location)}`] : []), ...(notes ? [`DESCRIPTION:${esc(notes)}`] : []),
     'END:VEVENT', 'END:VCALENDAR'];
-  return { ok: true, uid: id, title: t, when, ics: lines.join('\r\n') + '\r\n' };
+  return { ok: true, uid: id, title: t, when, startMs, ics: lines.join('\r\n') + '\r\n' };
 }
 
 // Event objects in a calendar-query answer: [{ href, etag, ics, uid, title, recurring }].
@@ -515,7 +628,7 @@ function describeIcs(raw) {
 
 // The event's own text with new times. start: local "YYYY-MM-DDTHH:MM" (or
 // "YYYY-MM-DD" for all day); minutes: new length, default = the old length.
-function moveEvent(ics, { start, minutes, now = Date.now() } = {}) {
+function moveEvent(ics, { start, minutes, now = Date.now(), tz = assist.fredTz() } = {}) {
   const text = String(ics || '').replace(/\r?\n[ \t]/g, '');
   const a = text.indexOf('BEGIN:VEVENT'); const b = text.indexOf('END:VEVENT', a);
   if (a < 0 || b < 0) return { ok: false, error: 'could not read that event' };
@@ -534,7 +647,7 @@ function moveEvent(ics, { start, minutes, now = Date.now() } = {}) {
   const oldMins = oldStart != null && oldEnd != null ? Math.round((oldEnd - oldStart) / 60000)
     : dur.length ? (+dur[1] || 0) * 1440 + (+dur[2] || 0) * 60 + (+dur[3] || 0) : 60;
   const keep = !(Number(minutes) > 0);         // no new length given → keep the event's own length
-  const fresh = buildEvent({ title: 'x', start, minutes: keep ? (oldMins > 0 && oldMins < 1440 ? oldMins : 60) : minutes, now, uid: 'x' });
+  const fresh = buildEvent({ title: 'x', start, minutes: keep ? (oldMins > 0 && oldMins < 1440 ? oldMins : 60) : minutes, now, uid: 'x', tz });
   if (!fresh.ok) return fresh;
   const lines2 = fresh.ics.split('\r\n');
   if (keep && oldMins > 0) {
@@ -548,7 +661,7 @@ function moveEvent(ics, { start, minutes, now = Date.now() } = {}) {
       lines2[i] = `DTEND;VALUE=DATE:${ymd(new Date(y, m - 1, d + days))}`;
       if (days > 1) fresh.when = fresh.when.replace('(all day)', `(${days} days)`);
     } else if (oldMins >= 1440) {
-      const ms = Date.parse(s) + oldMins * 60000;
+      const ms = fresh.startMs + oldMins * 60000;
       lines2[i] = `DTEND:${new Date(ms).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '')}`;
       const h = Math.round(oldMins / 60);
       fresh.when = fresh.when.replace(/\(\d+ min\)$/, `(${h} hours)`);
@@ -568,7 +681,7 @@ function moveEvent(ics, { start, minutes, now = Date.now() } = {}) {
     if (l === 'BEGIN:VEVENT') out.push(pick('DTSTART'), pick('DTEND'), `DTSTAMP:${utc}`, `SEQUENCE:${seq}`);
   }
   const ics2 = (text.slice(0, a) + out.join('\r\n') + '\r\n' + text.slice(b)).replace(/\r?\n/g, '\r\n');
-  return { ok: true, ics: ics2, when: fresh.when };
+  return { ok: true, ics: ics2, when: fresh.when, startMs: fresh.startMs };
 }
 
 // ── REPEATING EVENTS ────────────────────────────────────────────────────────
@@ -672,14 +785,14 @@ function skipOccurrence(ics, occurrence) {
   return { ok: true, ics: text };
 }
 
-function moveOccurrence(ics, occurrence, { start, minutes, now = Date.now() } = {}) {
+function moveOccurrence(ics, occurrence, { start, minutes, now = Date.now(), tz = assist.fredTz() } = {}) {
   const s = seriesOf(ics); if (s.error) return { ok: false, error: s.error };
   const inst = occInstant(occurrence);
   const bad = checkSlot(s.dtstart, inst); if (bad) return { ok: false, error: bad };
   const existing = s.blocks.find((b) => b.rid && sameInstant(b.rid, inst));
   const base = existing || s.master;
   // the new times: reuse the one-event mover on just this block (keeps its length)
-  const one = moveEvent(`BEGIN:VCALENDAR\r\n${base.text}\r\nEND:VCALENDAR\r\n`, { start, minutes, now });
+  const one = moveEvent(`BEGIN:VCALENDAR\r\n${base.text}\r\nEND:VCALENDAR\r\n`, { start, minutes, now, tz });
   if (!one.ok) return one;
   const moved = veventBlocks(one.ics)[0].lines;
   const drop = /^(RRULE|RDATE|EXDATE|EXRULE|RECURRENCE-ID)[;:]/;
@@ -696,6 +809,65 @@ function moveOccurrence(ics, occurrence, { start, minutes, now = Date.now() } = 
   return { ok: true, ics: text, when: one.when };
 }
 
+// The WHOLE series to a new time (Fred said "the whole series"). The repeat
+// Fred picked (occurrence; the series' first one if none) lands on `start`;
+// every other repeat shifts the same way, in the series' own time zone, so
+// "every Tuesday 9:00" becomes "every Tuesday 10:00" through summer and winter.
+// Skipped repeats (EXDATE) shift with it. Refused, with a plain reason, when
+// it cannot be done safely here: repeats already changed one by one, or a
+// move to another weekday of a series that repeats on named days.
+function moveSeries(ics, occurrence, { start, minutes, now = Date.now(), tz = assist.fredTz() } = {}) {
+  const s = seriesOf(ics); if (s.error) return { ok: false, error: s.error };
+  if (s.blocks.some((b) => b.rid)) return { ok: false, error: 'some repeats of this series were already changed one by one, so moving the whole series is safer in the Calendar app: tell Fred' };
+  const first = lineInstant(s.dtstart);
+  const inst = occurrence ? occInstant(occurrence) : first;
+  if (occurrence) { const bad = checkSlot(s.dtstart, inst); if (bad) return { ok: false, error: bad }; }
+  const target = assist.resolveWhen(start, { now, tz });
+  if (!target.ok) return { ok: false, error: target.error };
+  if (!!first.date !== !!target.allDay) return { ok: false, error: 'a series cannot switch between all-day and timed here: change it in the Calendar app' };
+  if (target.hasTime && target.ms < now - 5 * 60000) return { ok: false, error: 'that time is in the past: ask Fred which day he means' };
+  const seriesTz = (s.dtstart.match(/TZID=([^;:]+)/) || [])[1] || tz;
+  const dayOfInst = (x) => (x.date ? { y: +x.key.slice(0, 4), mo: +x.key.slice(4, 6), d: +x.key.slice(6, 8) } : assist.dayOf(x.ms, seriesTz));
+  const shiftDays = Math.round((Date.UTC(target.day.y, target.day.mo - 1, target.day.d) - Date.UTC(...(() => { const d = dayOfInst(inst); return [d.y, d.mo - 1, d.d]; })())) / 864e5);
+  const rrule = s.master.top.find((l) => /^RRULE[;:]/.test(l)) || '';
+  if (shiftDays && /BY(DAY|MONTHDAY|YEARDAY|WEEKNO|SETPOS)=/.test(rrule)) return { ok: false, error: 'moving this series to another day changes its repeat rule: Fred can do that in the Calendar app, or move one repeat at a time' };
+  const tp = target.allDay ? null : assist.partsIn(target.ms, tz);
+  // Each instant of the series → the same day shifted, at the new time of day.
+  const shift = (x) => {
+    if (x.date) { const d = assist.addDays(dayOfInst(x), shiftDays); return { date: true, key: `${d.y}${pad2(d.mo)}${pad2(d.d)}` }; }
+    const d = assist.addDays(dayOfInst(x), shiftDays);
+    const wallTp = assist.partsIn(assist.wallMs(target.day.y, target.day.mo, target.day.d, tp.h, tp.mi, tz), seriesTz);
+    return { ms: assist.wallMs(d.y, d.mo, d.d, wallTp.h, wallTp.mi, seriesTz) };
+  };
+  const newStart = shift(first);
+  const endLine = s.master.top.find((l) => /^DTEND[;:]/.test(l));
+  const oldEnd = endLine ? lineInstant(endLine) : null;
+  const oldMins = oldEnd && !first.date ? Math.round((oldEnd.ms - first.ms) / 60000) : null;
+  const oldDays = oldEnd && first.date ? Math.max(1, Math.round((Date.UTC(+oldEnd.key.slice(0, 4), +oldEnd.key.slice(4, 6) - 1, +oldEnd.key.slice(6, 8)) - Date.UTC(+first.key.slice(0, 4), +first.key.slice(4, 6) - 1, +first.key.slice(6, 8))) / 864e5)) : 1;
+  const mins = Number(minutes) > 0 ? Math.round(Number(minutes)) : (oldMins || 60);
+  const newEnd = newStart.date ? (() => { const d = assist.addDays({ y: +newStart.key.slice(0, 4), mo: +newStart.key.slice(4, 6), d: +newStart.key.slice(6, 8) }, oldDays); return { date: true, key: `${d.y}${pad2(d.mo)}${pad2(d.d)}` }; })()
+    : { ms: newStart.ms + mins * 60000 };
+  const seq = Number((String(s.master.top.find((l) => /^SEQUENCE[;:]/.test(l)) || '').match(/:(\d+)/) || [])[1] || 0) + 1;
+  const out = []; let depth = 0;
+  for (const l of s.master.lines) {
+    if (/^BEGIN:/.test(l)) depth += 1;
+    const top = depth === 1;
+    if (top && /^(DTSTART|DTEND|DURATION|SEQUENCE|DTSTAMP)[;:]/.test(l)) { if (/^END:/.test(l)) depth -= 1; continue; }
+    if (top && /^EXDATE[;:]/.test(l)) {
+      const [, params, values] = l.match(/^EXDATE((?:;[^:]*)?):(.*)$/) || [];
+      out.push(String(values || '').split(',').map((v) => formatLike(s.dtstart, shift(lineInstant(`EXDATE${params || ''}:${v.trim()}`)), 'EXDATE')).join('\r\n'));
+    } else out.push(l);
+    if (/^END:/.test(l)) depth -= 1;
+    if (l === 'BEGIN:VEVENT') {
+      out.push(formatLike(s.dtstart, newStart, 'DTSTART'), formatLike(s.dtstart, newEnd, 'DTEND'),
+        `DTSTAMP:${digits(new Date(now))}Z`, `SEQUENCE:${seq}`);
+    }
+  }
+  const text = s.text.slice(0, s.master.start) + out.join('\r\n') + s.text.slice(s.master.end);
+  const when = newStart.date ? `${assist.fmtDate(target.day)} (all day), every repeat` : `${assist.fmtWhen(target.ms, tz)} (${mins} min), every repeat`;
+  return { ok: true, ics: text, when };
+}
+
 // After a change, read back: is this repeat skipped / where is it now?
 function occurrenceState(ics, occurrence) {
   const s = seriesOf(ics); if (s.error) return { gone: true };
@@ -708,4 +880,4 @@ function occurrenceState(ics, occurrence) {
   return { skipped, override: override ? override.top.filter((l) => /^(DTSTART|DTEND|DURATION)[;:]/.test(l)).join('|') : null };
 }
 
-module.exports = { registerInfo, buildEvent, moveEvent, parseEventObjects, skipOccurrence, moveOccurrence, occurrenceState };
+module.exports = { registerInfo, buildEvent, moveEvent, parseEventObjects, skipOccurrence, moveOccurrence, moveSeries, occurrenceState };
