@@ -39,7 +39,7 @@ Tailscale must be on on the iPhone, same as for the web app.
 
 Open Hannibal once after installing, so iOS learns the shortcuts.
 
-- **Siri:** "Hey Siri, talk to Hannibal" starts live talk. "Hey Siri, ask Hannibal" lets Siri ask
+- **Siri:** "Hey Siri, start Hannibal" (or "Hannibal live") starts live talk. Not "talk to": Siri takes that as calling a contact. "Hey Siri, ask Hannibal" lets Siri ask
   for the question and reads his answer out without opening the app (Siri's voice; same brain).
 - **Action Button:** Settings › Action Button › Controls (or Shortcut) › *Talk to Hannibal*.
 - **Lock screen / Control Center:** long-press the lock screen › Customize › Lock Screen › tap a

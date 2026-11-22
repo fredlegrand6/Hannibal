@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────
-// SIRI + ACTION BUTTON — "Hey Siri, talk to Hannibal" starts live talk;
+// SIRI + ACTION BUTTON — "Hey Siri, start Hannibal" starts live talk;
 // "Hey Siri, ask Hannibal" lets Siri ask for the question, sends it to the
 // same brain (/api/say: tools, facts, memory, Yes/No gate) and reads the
 // answer out without opening the app. Both show up in the Shortcuts app and
@@ -103,7 +103,9 @@ struct AskHannibalIntent: AppIntent {
 struct HannibalShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(intent: StartLiveTalkIntent(),
-                    phrases: ["Talk to \(.applicationName)", "Start \(.applicationName)", "Open live talk in \(.applicationName)"],
+                    // No "Talk to …": Siri takes that as calling a contact.
+                    phrases: ["Start \(.applicationName)", "\(.applicationName) live", "Live talk with \(.applicationName)",
+                              "Wake up \(.applicationName)", "Start live talk in \(.applicationName)"],
                     shortTitle: "Talk to Hannibal",
                     systemImageName: "waveform")
         AppShortcut(intent: AskHannibalIntent(),
