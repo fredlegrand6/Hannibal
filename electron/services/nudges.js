@@ -124,7 +124,7 @@ function createZoneWatcher({ sample, windowSamples = 10 } = {}) {
 }
 
 function createNudger({ getEvents, getMail, deliver, statePath, now = () => new Date(), env = process.env, onSaid = null, everyMs = 20 * MIN,
-  isKnown = () => false, zone = () => ({ zone: false }), quietText = null } = {}) {
+  isKnown = () => false, zone = () => ({ zone: false }), quietText = null, skip = null } = {}) {
   const file = statePath || path.join(__dirname, '..', '..', 'data', 'nudges.json');
   let state = { said: {}, days: {} };
   try { const j = JSON.parse(fs.readFileSync(file, 'utf8')); state = { said: j.said || {}, days: j.days || {} }; } catch (_) {}
@@ -164,8 +164,15 @@ function createNudger({ getEvents, getMail, deliver, statePath, now = () => new 
       ]);
       const list = findNudges({ events: (ev && ev.events) || [], mail: (ml && ml.messages) || [], now: d.getTime(),
         said: new Set(Object.keys(state.said)), isKnown });
-      if (!list.length) return 'nothing';
-      const n = list[0];
+      // Never about a thread Fred finished or dropped (threads.js).
+      let n = null;
+      for (const c of list) {
+        let closed = null;
+        try { closed = skip ? await skip(c) : null; } catch (_) { closed = null; }
+        if (closed) { console.log(`[nudge] not bringing up "${c.text}": ${closed.title || 'that thread'} is ${closed.status || 'closed'}`); markSaid([c.key]); continue; }
+        n = c; break;
+      }
+      if (!n) return 'nothing';
       const z = zone() || {};
       let ok;
       if (z.zone) {

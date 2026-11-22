@@ -745,8 +745,31 @@ const TOOLS = [
     returns: '{ ok, removed:[{ id, text }] }  (refuses if more than 5 facts match)' },
   // Past CONVERSATIONS (electron/services/conversation-journal.js): a summarized
   // diary of every stretch of conversation, desk and phone.
+  // THREADS (electron/services/threads.js): each thing Fred and Hannibal are
+  // working on, with its current status (open, in progress, waiting, done, dropped, snoozed).
+  { name: 'memory.threads', domain: 'memory',
+    description: "Find the threads (things Fred and you are working on) about a topic, by meaning, with their CURRENT status and the key steps so far. Use it when Fred asks what was said or decided about something, or before bringing something up.",
+    params: [
+      { name: 'query', type: 'string', required: false, desc: 'topic, person or project, e.g. "morning brief"; empty = the most recent threads' },
+      { name: 'limit', type: 'number', required: false, desc: 'default 6' },
+      { name: 'include_closed', type: 'boolean', required: false, desc: 'also done and dropped ones (default true)' },
+    ], side_effect: SIDE_EFFECT.READ, executor: EXECUTOR.MAIN,
+    via: { channel: 'threads:find' },
+    returns: '{ ok, count, threads:[{ id, title, status, waiting_on?, until?, note, people, projects, updated, steps[] }] }' },
+  { name: 'memory.thread', domain: 'memory',
+    description: "Update a thread's status the moment Fred says so: done (fixed, tested, sent, happened), dropped (forget it, not needed), snoozed (later, with until), waiting_on (someone else's move), in_progress or open. Fred's word wins, no proof needed. Creates the thread if nothing matches.",
+    params: [
+      { name: 'thread', type: 'string', required: true, desc: 'the thread id from THREADS, or what it is about in a few words, e.g. "reminders firing"' },
+      { name: 'status', type: 'enum', required: true, enum: ['open', 'in_progress', 'waiting_on', 'done', 'dropped', 'snoozed'] },
+      { name: 'note', type: 'string', required: false, desc: 'one short line: what happened, e.g. "Fred: fixed and tested this morning"' },
+      { name: 'waiting_on', type: 'string', required: false, desc: 'who, for waiting_on' },
+      { name: 'until', type: 'string', required: false, desc: 'YYYY-MM-DD, for snoozed' },
+    ], side_effect: SIDE_EFFECT.WRITE, confirm: false, executor: EXECUTOR.MAIN,
+    via: { channel: 'threads:update' },
+    returns: '{ ok, created, title, status }',
+    note: 'Housekeeping write (Hannibal\'s own memory), not gated.' },
   { name: 'memory.conversations', domain: 'memory',
-    description: 'Search past conversations with Fred (desk, phone and Telegram) by person, project or topic; returns when it was, a summary, and what was left open.',
+    description: 'Search past conversations with Fred (desk, phone and Telegram) by person, project or topic, by meaning (other words and languages work too); returns when it was and a summary. For what is open or done now, use memory.threads.',
     params: [
       { name: 'query', type: 'string', required: true, desc: 'names, projects or topic words, e.g. "Jay Mutuele launch"' },
       { name: 'limit', type: 'number', required: false, desc: 'default 5' },

@@ -77,7 +77,7 @@ async function test(name, fn) {
     });
     const m = /Hannibal server up: (\d+) tools/.exec(out);
     assert.ok(m, out);
-    assert.strictEqual(Number(m[1]), 25, out);   // incl. mail.*, memory.conversations, calendar.add/delete/move, reminders.recent
+    assert.strictEqual(Number(m[1]), 27, out);   // incl. mail.*, memory.conversations, memory.threads/thread, calendar.add/delete/move, reminders.recent
     assert.ok(/SIGTERM, stopping/.test(out), out);
   });
 
