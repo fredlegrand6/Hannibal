@@ -10,8 +10,10 @@
   'use strict';
   function initOrb(canvas) {
     const ctx = canvas.getContext('2d');
-    // Respect "Reduce Motion": draw a calm still frame instead of animating.
-    const still = !!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches);
+    // With the iPhone's "Reduce Motion" on, it still lives but moves more gently
+    // (Fred wants it alive; a still frame looked broken).
+    const calm = !!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches);
+    const still = false;
     const N = 170, LINK = 0.55, LMAX = 4;
     const rnd = Math.random;
     const noise3 = (x, y, z) => (Math.sin(x + y * 1.7 + z * 0.3) + Math.sin(y * 1.3 + z * 1.9 + x * 0.5) + Math.sin(z * 1.1 + x * 2.1 + y * 0.7)) / 3;
@@ -71,8 +73,8 @@
 
       breathe += dt * (Math.PI * 2 / 4) * (1 + w8.listening * 1.4 + w8.thinking * 0.8);
       const scale = 1 + 0.02 * (1 + w8.listening * 0.6 + w8.speaking * 0.3) * Math.sin(breathe);
-      rot += dt * 0.12 * (1 + w8.thinking * 0.8);
-      fireAcc += dt * (2.5 + w8.thinking * 6);
+      rot += dt * 0.12 * (calm ? 0.6 : 1) * (1 + w8.thinking * 0.8);
+      fireAcc += dt * (2.5 + w8.thinking * 6) * (calm ? 0.5 : 1);
       while (fireAcc >= 1) { pts[(rnd() * N) | 0].fire = t; fireAcc -= 1; }
 
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
