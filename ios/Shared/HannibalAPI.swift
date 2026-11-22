@@ -192,6 +192,7 @@ final class HannibalAPI {
     func listen(_ onEvent: @escaping @MainActor (HannibalEvent) -> Void) async throws {
         var req = request("api/events", method: "GET", contentType: nil)
         req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        req.setValue("ios", forHTTPHeaderField: "X-Hannibal-Client")   // can open routes / answer drive times
         let (bytes, resp) = try await streamSession.bytes(for: req)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
         if code == 401 || code == 403 { throw APIError.unauthorized }

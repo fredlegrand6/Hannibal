@@ -150,7 +150,13 @@ const app = createPhoneApp({
 
   await test('navigation: open app gets the route; ask() is answered by the phone', async () => {
     const ctrl = new AbortController();
-    const es = await fetch(`${base}/api/events`, { headers: C, signal: ctrl.signal });
+    // A browser (web app) can't open routes: not counted.
+    const web = new AbortController();
+    await fetch(`${base}/api/events`, { headers: C, signal: web.signal });
+    await new Promise((r) => setTimeout(r, 50));
+    assert.strictEqual(app.navigate('X', 'u'), 'none', 'the web app cannot open Google Maps');
+    web.abort();
+    const es = await fetch(`${base}/api/events`, { headers: { ...C, 'X-Hannibal-Client': 'ios' }, signal: ctrl.signal });
     const reader = es.body.getReader();
     const events = [];
     (async () => { let buf = ''; for (;;) { const { value, done } = await reader.read().catch(() => ({ done: true })); if (done) break; buf += Buffer.from(value).toString(); let i; while ((i = buf.indexOf('\n\n')) >= 0) { const chunk = buf.slice(0, i); buf = buf.slice(i + 2); if (chunk.startsWith('data: ')) events.push(JSON.parse(chunk.slice(6))); } } })();

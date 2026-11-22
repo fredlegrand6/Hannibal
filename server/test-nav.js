@@ -64,15 +64,19 @@ async function test(name, fn) {
     assert.match(told[1][0], /You'll be late for "Lunch with Jay"/);
   });
 
-  await test('already there (a few minutes away): no warning', async () => {
+  await test('already there: no warning, but checked again (he may leave)', async () => {
     const told = [];
+    let t = T0, minutes = 2;
     const nav = createNav({
-      phone: { navigate: () => 'none', ask: async () => ({ ok: true, minutes: 2 }) },
-      events: async () => ({ ok: true, events: [{ ts: T0 + 5 * 60e3, title: 'Meeting', time: '10:05', location: 'Office', uid: 'm' }] }),
-      notify: async (text) => told.push(text), now: () => T0,
+      phone: { navigate: () => 'none', ask: async () => ({ ok: true, minutes }) },
+      events: async () => ({ ok: true, events: [{ ts: T0 + 120 * 60e3, title: 'Meeting', time: '12:00', location: 'Office', uid: 'm' }] }),
+      notify: async (text) => told.push(text), now: () => t,
     });
     await nav.tick();
     assert.strictEqual(told.length, 0);
+    t = T0 + 90 * 60e3; minutes = 35; await nav.tick();   // he left the office; 30 min to go
+    assert.strictEqual(told.length, 1);
+    assert.match(told[0], /You'll be late for "Meeting"/);
   });
 
   console.log(process.exitCode ? 'some FAILED' : `${passed} passed`);
