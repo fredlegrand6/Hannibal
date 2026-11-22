@@ -249,21 +249,31 @@ function summarizeAction(step, params) {
       const body = String(p.body || '').trim();
       return `Send an email to ${p.to} about “${p.subject || ''}”: “${body.length > 1200 ? body.slice(0, 1200) + '…' : body}” — send it?`;
     }
+    // Calendar questions read back everything (Fred, 22 Nov): title, weekday +
+    // date, time, length, calendar. Claude's path gets an even fuller one from
+    // the calendar preflight (calendar-assist.js); this is the fallback wording.
     case 'calendar.add': {
-      const when = /^\d{4}-\d{2}-\d{2}$/.test(String(p.start || '')) ? `${p.start} (all day)`
-        : (() => { const t = Date.parse(p.start); return Number.isFinite(t) ? new Date(t).toLocaleString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' }) : String(p.start || ''); })();
-      const len = /T/.test(String(p.start || '')) ? `, ${Math.round(Number(p.minutes) || 60)} minutes` : '';
-      return `Put ${q(p.title)} in your calendar on ${when}${len}${p.location ? `, at ${p.location}` : ''} — book it?`;
+      const A = require('../calendar-assist');
+      const tz = A.fredTz();
+      const r = A.resolveWhen(p.start, { tz });
+      const cal = p.calendar || process.env.HANNIBAL_DEFAULT_CALENDAR || 'Werk';
+      if (r.ok) {
+        return A.bookingQuestion({ title: p.title, startMs: r.ms, allDay: r.allDay, day: r.day, minutes: Number(p.minutes) || 60,
+          calendar: cal, remindMinutes: Number(p.remind_minutes) || 0, location: p.location, tz });
+      }
+      return `Book ${q(p.title)} on ${p.start}${p.location ? `, at ${p.location}` : ''} in your ${cal} calendar — book it?`;
     }
     case 'calendar.delete':
       if (p.scope === 'all') return `Delete the whole repeating ${q(p.title)}, every time it happens, from your calendar — delete it?`;
-      if (p.scope === 'this' || p.occurrence) return `Delete only this one ${q(p.title)}${p.when ? ` (${p.when})` : ''}; the other repeats stay — delete it?`;
+      if (p.scope === 'this') return `Delete only this one ${q(p.title)}${p.when ? ` (${p.when})` : ''}; the other repeats stay — delete it?`;
       return `Delete ${q(p.title)}${p.when ? ` (${p.when})` : ''} from your calendar — delete it?`;
     case 'calendar.move': {
-      const when = /^\d{4}-\d{2}-\d{2}$/.test(String(p.start || '')) ? `${p.start} (all day)`
-        : (() => { const t = Date.parse(p.start); return Number.isFinite(t) ? new Date(t).toLocaleString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' }) : String(p.start || ''); })();
-      const only = p.scope === 'this' || p.occurrence ? ' (only this one; the other repeats stay)' : '';
-      return `Move ${q(p.title)}${only} to ${when}${p.minutes ? `, ${Math.round(Number(p.minutes))} minutes` : ''} — move it?`;
+      const A = require('../calendar-assist');
+      const tz = A.fredTz();
+      const r = A.resolveWhen(p.start, { tz });
+      const when = !r.ok ? String(p.start || '') : r.allDay ? `${A.fmtDate(r.day)} (all day)` : A.fmtWhen(r.ms, tz);
+      const only = p.scope === 'this' ? ' (only this one; the other repeats stay)' : p.scope === 'all' ? ' (the whole series, every repeat)' : '';
+      return `Move ${q(p.title)}${only} to ${when}${p.minutes ? ` for ${A.fmtLength(p.minutes)}` : ''} — move it?`;
     }
     case 'file.trash':    return `Move ${p.path} to the Trash — go ahead?`;
     case 'mac.emptyTrash':return `Empty the Trash permanently — go ahead?`;

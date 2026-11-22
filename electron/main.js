@@ -56,7 +56,7 @@ app.on('second-instance', () => {
 let bodyLink = null;
 const linked = () => !!(bodyLink && bodyLink.ready);
 
-registerProactive(ipcMain, {
+const proactive = registerProactive(ipcMain, {
   getWindow: () => win,
   // Briefs and reminders also reach Fred's phone, wherever he is. With the
   // always-on server, it sends its own morning brief; desk reminders go via it.
@@ -181,6 +181,9 @@ const computer = createComputer({
 });
 computer.register(ipcMain);   // 'computer' (actions), 'computer:stop', 'computer:status'
 claudeTools.setPreflight((name, params) => computer.preflight(String(name).replace(/^computer\./, ''), params));
+// Calendar: past times, clashes, which calendar/event, reminders, repeats are
+// sorted out before Fred is asked (services/calendar-assist.js). Set below,
+// once the calendar handlers are registered.
 registerWorld(ipcMain);    // 'world:crypto' (after registerControls so EYES can reuse 'browser-action' open)
 // The coordinator (single owner of the gimbal) is returned so we can stop its
 // follow-watchdog on quit. See camera-coordinator.js.
@@ -462,7 +465,20 @@ registerVoiceDrops(ipcMain, voiceDrops, { where: 'desk' });
 
 // System metrics, calendar, mail and web live in services/info-handlers.js
 // (shared with the always-on server, server/hannibal-server.js).
-const info = registerInfo(ipcMain, { python: CONFIG.pythonTTS, searxngUrl: CONFIG.searxngUrl });
+// Reminders linked to calendar events (booked "with a reminder 15 minutes
+// before"): the desk's own list, plus the server's while linked (one booked
+// from the phone lives there).
+const { createLinkedReminders } = require('./services/proactive');
+const linkedReminders = proactive && proactive.reminders ? createLinkedReminders({
+  local: proactive.reminders,
+  remote: {
+    list: async () => (linked() ? ((await bodyLink.request('reminders.linked', {})) || {}).reminders || [] : []),
+    cancel: (id) => bodyLink.request('reminders.cancelId', { id }),
+    retime: (id, ts) => bodyLink.request('reminders.retime', { id, ts }),
+  },
+}) : null;
+const info = registerInfo(ipcMain, { python: CONFIG.pythonTTS, searxngUrl: CONFIG.searxngUrl, reminders: linkedReminders });
+claudeTools.setPreflight(info.calendarPreflight, 'calendar');
 
 // NUDGES (services/nudges.js): Hannibal brings things up himself (a meeting
 // about to start, a trip, a person's mail waiting days for an answer), at a
@@ -1077,7 +1093,8 @@ function makeIpcConfirmer(timeoutMs = 120000) {
     ipcMain.once(channel, (_e, ok) => {
       clearTimeout(timer);
       const ans = (ok && typeof ok === 'object') ? { approved: ok.approved === true, answer: ok.answer } : { approved: ok === true };
-      console.log(`[gate] ${step.tool}: ${ans.approved ? 'YES → running it' : `${ans.answer === 'unheard' ? 'no clear answer' : 'NO'} → not done`}`);
+      // The log says what the yes (or no) was to: the exact question Fred heard.
+      console.log(`[gate] ${step.tool}: ${ans.approved ? 'YES → running it' : `${ans.answer === 'unheard' ? 'no clear answer' : 'NO'} → not done`} (asked: "${String(summary || '').slice(0, 200)}")`);
       resolve(ans);
     });
     // expiresAt lets a request that waited in the renderer's queue too long be

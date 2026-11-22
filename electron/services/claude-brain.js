@@ -62,14 +62,19 @@ Eyes: you can see. If Fred asks about anything you'd have to look at — himself
 Memory: the saved facts below are things you know for sure. When Fred tells you something lasting — about a person, a project or client, how he likes things done, a decision, a place, a routine — save it with memory__remember as one short self-contained fact (do it quietly, no need to announce it unless he asked you to remember). If a saved fact is wrong or outdated, forget it and save the correct one. When he says "forget that", use memory__forget. Don't save small talk, passing moods or things that only matter right now.
 Conversations: your diary of recent conversations with Fred (desk and phone) is below. Use it to follow the thread: pick up where you left off, remember what you promised, and don't make him repeat himself. It is history: what is still open or already closed is in THREADS. For older conversations search with memory__conversations (it finds them by meaning, not only by exact words).
 Threads: the THREADS list below has the CURRENT status of each thing you and Fred are working on. Reason from it, not from older diary lines or memories: never suggest redoing, testing or chasing something listed as done or dropped. The moment Fred says something is done, fixed, tested, cancelled, to forget, for later, or waiting on someone, call memory__thread with that thread and the new status (his word wins, no proof needed). Asked what was said or decided about something, call memory__threads and answer with its current status and the key steps, not raw quotes.
+Calendar: to book, move or cancel, just call calendar__add / calendar__move / calendar__delete with what Fred said (pass his own words for the day and time in "said" or "day"); to cancel or move, you may describe the event (find "call with Jay", day "tomorrow") instead of looking up its id. Those tools check the time has not passed, look for clashes, pick the calendar (Werk unless Fred names another), offer a reminder and ask "just this one or the whole series" for repeats. When one comes back with status "question", nothing was changed: put that exact question to Fred and call again with his answer. Never move a time to another day, or pick a free slot, by yourself. A booking is only done when its result says verified true; say what it says (day, date, time, calendar, reminder), nothing more. Only mention a reminder that reminders__upcoming or a calendar result shows as still to come: never one that already went off or was cancelled.
 Hands (computer__* tools, at the desk only): you can operate any app on Fred's Mac with keyboard and mouse. Work in a loop: look (computer__screen), do ONE action, read its result (verified true/false and the screenshot after), then the next. Prefer computer__clickText over clicking by position; when you click by position, pass the display number and x/y in pixels of the last screenshot of that display. Bring the app forward first (the app parameter, or app__open). Never say it is done unless the last result is verified or you looked and saw it. When Fred asks to put something in Claude Code, use computer__pasteToClaudeCode with the exact text (his ask is the approval); if it says busy, tell him it is busy and you'll wait, then call it again with wait_seconds. If it lists several sessions, ask him which. Never type passwords or secrets unless he explicitly says so, and stay out of System Settings, Keychain and password managers unless he explicitly asks. If a result says Fred said stop, stop at once and say so in a few words.
 You are spoken aloud: before a slow or multi-step task say one short sentence about what you're doing, and when done give the result in one or two plain sentences (no lists, no markdown).`;
 
+// The moment on Fred's own clock (HANNIBAL_TZ, else the machine's zone), so
+// "tomorrow" and "Sunday at 11" resolve where he is (Bussum or Ibiza).
 function nowStamp(d = new Date()) {
+  const A = require('./calendar-assist');
+  const tz = A.fredTz();
+  const p = A.partsIn(d.getTime(), tz);
   const pad = (n) => String(n).padStart(2, '0');
-  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  return `${d.toLocaleDateString('en-GB', { weekday: 'long' })} ${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} `
-    + `${pad(d.getHours())}:${pad(d.getMinutes())} (${tz})`;
+  const wd = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][p.wd];
+  return `${wd} ${p.y}-${pad(p.mo)}-${pad(p.d)} ${pad(p.h)}:${pad(p.mi)} (${tz})`;
 }
 let factStore = getDefaultFactStore;
 
@@ -327,8 +332,12 @@ async function chatTurn({ system, context, user, images }, onText, opts, me) {
         const r = await runTool(c.name, c.input);
         toolsUsed.push({ tool: r.tool, status: r.status });
         // A change that went through is an event the threads can close on.
+        // Logged as what really happened (the checked result), not what was asked:
+        // a booking Fred said yes to that did not verify is not "done".
         if (threads && r.status === 'ok' && isWriteTool(r.tool) && !/^memory\./.test(r.tool)) {
-          try { threads.observe(`${r.tool} done: ${JSON.stringify(c.input || {}).slice(0, 200)}`, 'event'); } catch (_) {}
+          const line = doneLine(r);
+          if (line) { try { threads.observe(line, 'event'); } catch (_) {} }
+          else { try { threads.observe(`${r.tool} done: ${JSON.stringify(c.input || {}).slice(0, 200)}`, 'event'); } catch (_) {} }
         }
         console.log(`[claude] tool ${r.tool} → ${r.status}`);
         try { onToolEvent && onToolEvent({ phase: 'finish', tool: r.tool, status: r.status }); } catch (_) {}
@@ -371,6 +380,15 @@ async function chatTurn({ system, context, user, images }, onText, opts, me) {
   }
 }
 
+// What a write really did, from its own result ({ done, verified }).
+// null = the result has no such line (the input is logged instead).
+function doneLine(r) {
+  let out;
+  try { out = typeof r.content === 'string' ? JSON.parse(r.content) : null; } catch (_) { out = null; }
+  if (!out || typeof out !== 'object' || !out.done) return null;
+  return out.verified === true ? `${r.tool}: ${String(out.done).slice(0, 240)}` : null;
+}
+
 // After a finished turn: note it in the diary and save the running conversation.
 function remember(opts, user, text) {
   lastTurnAt = Date.now();
@@ -398,5 +416,5 @@ function registerClaudeBrain(ipcMain, opts = {}) {
   ipcMain.handle('llm:reset', () => { history = []; saveLive(); return { ok: true }; });
 }
 
-module.exports = { registerClaudeBrain, chat, interrupt, noteEvent, enabled, model, toolsEnabled: () => !!runToolImpl && claudeTools.enabled(),
+module.exports = { nowStamp, doneLine, registerClaudeBrain, chat, interrupt, noteEvent, enabled, model, toolsEnabled: () => !!runToolImpl && claudeTools.enabled(),
   resetHistory: () => { history = []; saveLive(); }, setJournal, setThreads, summarizeForJournal, closeEpisode, _setClient: (c) => { client = c; }, _setFactStore: (f) => { factStore = () => f; } };

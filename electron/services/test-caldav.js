@@ -92,9 +92,11 @@ function fakeIcloud({ status = 207 } = {}) {
     const ev = (title, uid = title) => `<cal:calendar-data><![CDATA[BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:${uid}\r\nDTSTART:${z(soon)}\r\nSUMMARY:${title}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n]]></cal:calendar-data>`;
     const seen = [];
     const realFetch = global.fetch;
+    const booked = {};
     global.fetch = async (url, o) => {
       seen.push({ url, method: o.method, body: o.body });
-      if (o.method === 'PUT') return { ok: true, status: 201, text: async () => '' };
+      if (o.method === 'PUT') { booked[url] = o.body; return { ok: true, status: 201, text: async () => '' }; }
+      if (!o.method && booked[url]) return { ok: true, status: 200, text: async () => booked[url] };   // the read-back
       if (url.includes('notification')) return { ok: false, status: 403, text: async () => '' };   // iCloud's odd one
       const body = url.includes('home') ? ev('Dinner with Gaian') + ev('Shared invite') + ev('Appointment', 'a-home') : ev('Shared invite') + ev('Appointment', 'a-work');
       return { ok: false, status: 207, text: async () => ms(`<response><href>/e.ics</href><propstat><prop xmlns:cal="urn:ietf:params:xml:ns:caldav">${body}</prop></propstat></response>`) };
@@ -112,6 +114,7 @@ function fakeIcloud({ status = 207 } = {}) {
       const start = `${tomorrow.getFullYear()}-${pad(tomorrow.getMonth() + 1)}-${pad(tomorrow.getDate())}T10:00`;
       const b = await handlers['calendar:add']({}, 'Call Jean-Marc', start, 30);
       assert.strictEqual(b.ok, true, JSON.stringify(b));
+      assert.strictEqual(b.verified, true, 'read back from the calendar');
       assert.strictEqual(b.calendar, 'Work');
       const put = seen.find((s) => s.method === 'PUT');
       assert.match(put.url, /^https:\/\/c\/work\/[^/]+\.ics$/);
@@ -244,7 +247,7 @@ function fakeIcloud({ status = 207 } = {}) {
       r = await handlers['calendar:move']({}, '/werk/yoga.ics', '2099-11-25T19:00', 30, 'Yoga', '20991124T080000Z', 'this');
       assert.ok(r.ok && (store['/werk/yoga.ics'].match(/BEGIN:VEVENT/g) || []).length === 2, 'moving it again replaces the override');
       r = await handlers['calendar:move']({}, '/werk/team.ics', '2099-11-25T18:00', undefined, 'Team call', undefined, 'all');
-      assert.ok(!r.ok && /whole repeating series/.test(r.error));
+      assert.ok(!r.ok && /repeat rule/.test(r.error), 'a weekly-on-Tuesday series cannot be moved to a Wednesday here: ' + JSON.stringify(r));
       r = await handlers['calendar:delete']({}, '/werk/team.ics', 'Team call', 'x', undefined, 'all');
       assert.ok(r.ok && r.verified && !store['/werk/team.ics'] && r.only === 'the whole series', JSON.stringify(r));
       r = await handlers['calendar:delete']({}, '/werk/stuckgym.ics', 'Stuck gym', 'x', '20991124T080000Z', 'this');
