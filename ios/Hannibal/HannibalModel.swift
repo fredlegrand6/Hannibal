@@ -27,6 +27,8 @@ final class HannibalModel {
     var online = false
     var recording = false
     var speaking = false
+    var live = false                 // hands-free conversation is on
+    var liveHearing = false          // ...and Fred is talking right now
     var looking = false
     var waiting = 0
     var level: Float = 0
@@ -38,7 +40,7 @@ final class HannibalModel {
     var openConfirms: Int { lines.filter { $0.kind == .confirm && $0.outcome == nil }.count }
 
     var orbState: String {
-        if recording { return "listening" }
+        if recording || liveHearing { return "listening" }
         if speaking { return "speaking" }
         if openConfirms > 0 { return "confirm" }
         if looking { return "looking" }
@@ -53,7 +55,9 @@ final class HannibalModel {
         case "confirm": return "Waiting for your yes"
         case "looking": return "Looking"
         case "thinking": return "Thinking"
-        default: return online ? "Ready" : "Connecting…"
+        default:
+            if live { return "Live · just talk" }
+            return online ? "Ready" : "Connecting…"
         }
     }
 
@@ -64,6 +68,9 @@ final class HannibalModel {
     @ObservationIgnored private var meterTask: Task<Void, Never>?
     @ObservationIgnored private var wantRecording = false
     @ObservationIgnored private var backoff: Double = 1
+    @ObservationIgnored private let liveVoice = LiveVoice()
+    @ObservationIgnored private var liveActiveAt = Date()
+    @ObservationIgnored private var liveWatch: Task<Void, Never>?
     private static let historyKey = "history.v1"
 
     init() {
@@ -74,7 +81,87 @@ final class HannibalModel {
             guard let api = self?.api else { throw APIError.badReply }
             return try await api.speak(text)
         }
+        liveVoice.onBargeIn = { [weak self] in self?.speaker.stop() }
+        liveVoice.onCapture = { [weak self] on in
+            guard let self else { return }
+            self.liveHearing = on
+            self.liveActiveAt = Date()
+            if !on { self.level = 0 }
+        }
+        liveVoice.onLevel = { [weak self] l in self?.level = l }
+        liveVoice.onUtterance = { [weak self] wav in self?.sendLive(wav) }
+        liveVoice.onStopped = { [weak self] why in self?.stopLive(why) }
         if let c = ConnectionStore.load() { use(c) }
+    }
+
+    // MARK: Live talk (hands-free, interruptible)
+
+    func toggleLive() { if live { stopLive() } else { startLive() } }
+
+    func startLive() {
+        guard api != nil, !live else { return }
+        Task {
+            guard await AudioSession.askMicPermission() else {
+                add(.error, "Hannibal needs the microphone. Turn it on in Settings › Hannibal.")
+                return
+            }
+            guard !live else { return }
+            speaker.stop()
+            do { try liveVoice.start() } catch {
+                add(.error, "Live talk couldn't start: \(error.localizedDescription)")
+                return
+            }
+            speaker.clip = LiveClipPlayer(liveVoice)
+            live = true
+            liveActiveAt = Date()
+            UIApplication.shared.isIdleTimerDisabled = true
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            add(.note, "Live talk on. Just talk, and talk over him to interrupt. Tap the orb to stop.")
+            liveWatch = Task { [weak self] in
+                // Falls asleep after 3 quiet minutes, to save the battery.
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 20_000_000_000)
+                    guard let self, self.live else { return }
+                    if self.speaking || self.waiting > 0 || self.liveHearing { self.liveActiveAt = Date(); continue }
+                    if Date().timeIntervalSince(self.liveActiveAt) > 180 { self.stopLive("Live talk went to sleep after 3 quiet minutes."); return }
+                }
+            }
+        }
+    }
+
+    func stopLive(_ note: String? = "Live talk off.") {
+        guard live else { return }
+        live = false
+        liveHearing = false
+        level = 0
+        liveWatch?.cancel()
+        liveWatch = nil
+        speaker.stop()
+        liveVoice.stop()
+        speaker.clip = SimpleClipPlayer()
+        UIApplication.shared.isIdleTimerDisabled = false
+        if let note { add(.note, note) }
+    }
+
+    private func sendLive(_ wav: Data) {
+        guard let api, live else { return }
+        liveVoice.setAccepting(false)        // one question at a time
+        liveActiveAt = Date()
+        waiting += 1
+        Task {
+            defer {
+                waiting -= 1
+                liveActiveAt = Date()
+                if live { liveVoice.setAccepting(true) }
+            }
+            do {
+                let r = try await api.voice(wav, mime: "audio/wav")
+                let heard = (r.heard ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if heard.isEmpty { return }     // a cough or a door: ignore quietly in live talk
+                add(.me, "🎙 " + heard)
+                show(r, spoken: true)
+            } catch { add(.error, friendly(error)) }
+        }
     }
 
     // MARK: Connection
@@ -211,7 +298,7 @@ final class HannibalModel {
     }
 
     func startRecording() {
-        guard api != nil else { return }
+        guard api != nil, !live else { return }
         wantRecording = true
         speaker.stop()                                  // talking over him stops him
         speaker.hold = true                             // and nothing new plays into the mic

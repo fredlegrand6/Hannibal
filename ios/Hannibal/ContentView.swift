@@ -27,7 +27,11 @@ struct RootView: View {
         .preferredColorScheme(.dark)
         .onChange(of: scenePhase) { _, phase in
             // The live stream only runs while the app is on screen (iOS pauses it anyway).
-            if phase == .active { model.startEvents() } else if phase == .background { model.stopEvents(); model.stopRecording(send: false) }
+            // Live talk keeps going with the screen locked; everything else pauses.
+            if phase == .active { model.startEvents() } else if phase == .background {
+                model.stopRecording(send: false)
+                if !model.live { model.stopEvents() }
+            }
         }
     }
 }
@@ -111,6 +115,11 @@ struct ChatView: View {
             Circle().fill(model.online ? Color.green : Color.orange).frame(width: 8, height: 8)
             Text(model.online ? "Hannibal" : "Connecting…").font(.headline)
             Spacer()
+            Button { model.toggleLive() } label: {
+                Image(systemName: model.live ? "waveform.circle.fill" : "waveform.circle")
+                    .font(.system(size: 22))
+            }
+            .accessibilityLabel(model.live ? "Stop live talk" : "Start live talk")
             Button { model.voiceAlways.toggle() } label: {
                 Image(systemName: model.voiceAlways ? "speaker.wave.2.fill" : "speaker.slash")
             }
@@ -130,7 +139,10 @@ struct ChatView: View {
             OrbView(state: model.orbState, level: model.level, pulses: model.pulses)
                 .frame(height: typing ? 120 : 250)
                 .contentShape(Rectangle())
-                .onTapGesture { model.stopSpeaking() }
+                .onTapGesture {
+                    // Tap while he talks = stop him; otherwise live talk on/off.
+                    if model.speaking { model.stopSpeaking() } else { model.toggleLive() }
+                }
                 .animation(.easeInOut(duration: 0.25), value: typing)
             Text(model.phase)
                 .font(.caption.weight(.semibold))
@@ -167,14 +179,20 @@ struct ChatView: View {
                 Image(systemName: "camera.fill").font(.system(size: 18)).frame(width: 40, height: 40)
                     .background(Palette.card, in: Circle())
             }
-            TextField(model.recording ? "Listening… slide up to cancel" : "Talk to Hannibal", text: $draft, axis: .vertical)
+            TextField(model.recording ? "Listening… slide up to cancel" : (model.live ? "Live talk on, or type" : "Talk to Hannibal"), text: $draft, axis: .vertical)
                 .lineLimit(1...4)
                 .focused($typing)
                 .padding(.horizontal, 12).padding(.vertical, 9)
                 .background(Palette.card, in: RoundedRectangle(cornerRadius: 18))
                 .submitLabel(.send)
                 .onSubmit(sendDraft)
-            if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if model.live && draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Button { model.stopLive() } label: {
+                    Image(systemName: "stop.fill").font(.system(size: 18, weight: .bold)).foregroundStyle(.black)
+                        .frame(width: 44, height: 44).background(Color.red, in: Circle())
+                }
+                .accessibilityLabel("Stop live talk")
+            } else if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 MicButton()
             } else {
                 Button(action: sendDraft) {

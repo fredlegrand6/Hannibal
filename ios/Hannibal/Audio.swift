@@ -69,75 +69,41 @@ final class Recorder {
     }
 }
 
+/// Plays one clip of his voice and returns when it has finished (or was stopped).
 @MainActor
-final class Speaker: NSObject, AVAudioPlayerDelegate {
-    var fetch: ((String) async throws -> Data)?
-    var onSpeaking: ((Bool) -> Void)?
-    var onDrop: ((String, String) -> Void)?
+protocol ClipPlayer: AnyObject {
+    func play(_ mp3: Data) async throws
+    func stop()
+}
 
-    private var queue: [String] = []
-    private var running = false
+/// Normal mode: a plain AVAudioPlayer, with a time limit so a stuck clip can
+/// never freeze him.
+@MainActor
+final class SimpleClipPlayer: NSObject, ClipPlayer, AVAudioPlayerDelegate {
     private var player: AVAudioPlayer?
     private var finished: CheckedContinuation<Void, Never>?
-    private var generation = 0
 
-    /// While Fred holds the mic nothing new is played (it would end up in his
-    /// recording); anything that arrives waits and plays once he lets go.
-    var hold = false {
-        didSet { if !hold && !queue.isEmpty && !running { Task { await run() } } }
+    func play(_ mp3: Data) async throws {
+        AudioSession.setUp()
+        let p = try AVAudioPlayer(data: mp3)
+        p.delegate = self
+        player = p
+        guard p.play() else { player = nil; throw NSError(domain: "Hannibal", code: 2, userInfo: [NSLocalizedDescriptionKey: "the phone refused to play"]) }
+        let limit = max(3, p.duration + 4)
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(limit * 1_000_000_000))
+            guard let self, self.player === p else { return }
+            p.stop()
+            self.finishNow()
+        }
+        await withCheckedContinuation { c in finished = c }
+        if player === p { player = nil }
     }
 
-    func say(_ text: String) {
-        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !t.isEmpty else { return }
-        queue.append(String(t.prefix(1500)))
-        if !running && !hold { Task { await run() } }
-    }
-
-    /// Stops now and forgets anything still waiting.
     func stop() {
-        generation += 1
-        queue.removeAll()
         player?.stop()
         player = nil
         finishNow()
-        onSpeaking?(false)
-    }
-
-    private func run() async {
-        running = true
-        defer { running = false }
-        while !queue.isEmpty && !hold {
-            let gen = generation
-            let text = queue.removeFirst()
-            guard let fetch else { return }
-            let data: Data
-            do { data = try await fetch(text) } catch {
-                if gen == generation { onDrop?("fetch", error.localizedDescription) }
-                continue
-            }
-            guard gen == generation else { continue }
-            if hold { queue.insert(text, at: 0); break }   // mic went on while fetching
-            AudioSession.setUp()
-            let p: AVAudioPlayer
-            do { p = try AVAudioPlayer(data: data) } catch { onDrop?("decode", error.localizedDescription); continue }
-            p.delegate = self
-            player = p
-            guard p.play() else { onDrop?("play", "the phone refused to play"); player = nil; continue }
-            onSpeaking?(true)
-            // Never wait forever on one clip: its length plus a margin.
-            let limit = max(3, p.duration + 4)
-            Task { [weak self] in
-                try? await Task.sleep(nanoseconds: UInt64(limit * 1_000_000_000))
-                guard let self, self.player === p else { return }
-                self.onDrop?("stuck", "playback ran past \(Int(limit)) s")
-                p.stop()
-                self.finishNow()
-            }
-            await withCheckedContinuation { c in finished = c }
-            if player === p { player = nil }
-            if queue.isEmpty || gen != generation { onSpeaking?(false) }
-        }
     }
 
     private func finishNow() {
@@ -151,9 +117,95 @@ final class Speaker: NSObject, AVAudioPlayerDelegate {
     }
 
     nonisolated func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
-        Task { @MainActor in
-            self.onDrop?("decode", error?.localizedDescription ?? "decode error")
-            self.finishNow()
+        Task { @MainActor in self.finishNow() }
+    }
+}
+
+/// His voice. Long answers are cut into sentences: the first one is fetched
+/// and played straight away while the next is already being fetched, so he
+/// starts talking much sooner. Stop = everything waiting is forgotten.
+@MainActor
+final class Speaker {
+    var fetch: ((String) async throws -> Data)?
+    var onSpeaking: ((Bool) -> Void)?
+    var onDrop: ((String, String) -> Void)?
+    /// Swapped for the live-conversation player (echo cancelled) in live mode.
+    var clip: ClipPlayer = SimpleClipPlayer()
+
+    private struct Item { let text: String; let gen: Int; var task: Task<Data, Error>? }
+    private var queue: [Item] = []
+    private var running = false
+    private var generation = 0
+
+    /// While Fred holds the mic nothing new is played (it would end up in his
+    /// recording); anything that arrives waits and plays once he lets go.
+    var hold = false {
+        didSet { if !hold && !queue.isEmpty && !running { Task { await run() } } }
+    }
+
+    func say(_ text: String) {
+        for chunk in Self.chunks(text) { queue.append(Item(text: chunk, gen: generation, task: nil)) }
+        if !running && !hold { Task { await run() } }
+    }
+
+    /// Stops now and forgets anything still waiting.
+    func stop() {
+        generation += 1
+        for item in queue { item.task?.cancel() }
+        queue.removeAll()
+        clip.stop()
+        onSpeaking?(false)
+    }
+
+    private func startFetch(_ i: Int) {
+        guard i < queue.count, queue[i].task == nil, let fetch else { return }
+        let text = queue[i].text
+        queue[i].task = Task { try await fetch(text) }
+    }
+
+    private func run() async {
+        running = true
+        defer { running = false }
+        while !queue.isEmpty && !hold {
+            startFetch(0)
+            startFetch(1)                                // the next sentence loads while this one plays
+            let item = queue.removeFirst()
+            guard item.gen == generation, let task = item.task else { continue }
+            let data: Data
+            do { data = try await task.value } catch {
+                if item.gen == generation && !(error is CancellationError) { onDrop?("fetch", error.localizedDescription) }
+                continue
+            }
+            guard item.gen == generation else { continue }
+            if hold { queue.insert(item, at: 0); break }  // mic went on while fetching
+            onSpeaking?(true)
+            do { try await clip.play(data) } catch { onDrop?("play", error.localizedDescription) }
         }
+        onSpeaking?(false)
+    }
+
+    /// Sentences, joined up to ~240 characters; the first piece is kept short
+    /// so his voice starts quickly.
+    static func chunks(_ raw: String) -> [String] {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines).prefix(4000)
+        guard !text.isEmpty else { return [] }
+        var sentences: [String] = []
+        var cur = ""
+        for ch in text {
+            cur.append(ch)
+            if ".!?…\n".contains(ch), cur.trimmingCharacters(in: .whitespaces).count > 1 {
+                sentences.append(cur); cur = ""
+            }
+        }
+        if !cur.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { sentences.append(cur) }
+        var out: [String] = []
+        var piece = ""
+        for s in sentences {
+            let limit = out.isEmpty ? 90 : 240
+            if !piece.isEmpty && piece.count + s.count > limit { out.append(piece); piece = "" }
+            piece += s
+        }
+        if !piece.isEmpty { out.append(piece) }
+        return out.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }.map { String($0.prefix(1500)) }
     }
 }
