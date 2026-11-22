@@ -196,6 +196,14 @@ final class HannibalAPI {
         return ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any])?["note"] as? String ?? "Got it."
     }
 
+    /// A remembered photo (photo memory).
+    func spotPhoto(_ id: String) async -> Data? {
+        var r = request("api/spot-photo", method: "GET", contentType: nil)
+        r.url = r.url.flatMap { URL(string: $0.absoluteString + "?id=" + (id.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? id)) }
+        guard let (data, resp) = try? await session.data(for: r), (resp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+        return data
+    }
+
     /// The phone's answer to a server question (drive time…).
     func answer(_ reply: [String: Any]) async {
         _ = try? await session.data(for: request("api/answer", body: jsonBody(reply), timeout: 20))

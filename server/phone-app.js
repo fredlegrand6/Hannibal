@@ -94,8 +94,10 @@ function createPhoneApp(opts = {}) {
   }
 
   let glanceCache = null;
+  let lastImage = null;                      // { b64, at }: the latest photo Fred sent (photo memory)
 
   async function turn(text, { spoken = false, images } = {}) {
+    if (images && images[0]) lastImage = { b64: String(images[0]), at: Date.now() };
     let memories = '';
     if (opts.memory) { try { memories = await opts.memory.recall(text); } catch (_) {} }
     const r = await opts.chat(
@@ -313,6 +315,15 @@ function createPhoneApp(opts = {}) {
       return;
     }
 
+    // A remembered photo (photo memory), for the chat in the app.
+    if (req.method === 'GET' && url.pathname === '/api/spot-photo') {
+      const jpg = opts.spots ? opts.spots.photo(String(url.searchParams.get('id') || '')) : null;
+      if (!jpg) { res.writeHead(404); res.end(); return; }
+      res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Content-Length': jpg.length, 'Cache-Control': 'private, max-age=86400' });
+      res.end(jpg);
+      return;
+    }
+
     // A recorded meeting (raw audio). Answered at once; the write-up comes as a message.
     if (req.method === 'POST' && url.pathname === '/api/meeting') {
       if (!opts.meetings) { json(res, 501, { ok: false, note: 'Meeting memory is not set up on the server.' }); return; }
@@ -399,7 +410,10 @@ function createPhoneApp(opts = {}) {
     if (!clients.size && canPush() && opts.push.wake) opts.push.wake({ sync: 'places' }).catch((e) => log('silent push failed:', e.message));
   }
 
-  return { start, stop, notify, navigate, ask, think, placesChanged, handle, _confirmer: confirmer, _pending: pending, _places: opts.places };
+  /** Show a remembered photo in the open app. */
+  function showPhoto(id, caption) { push({ type: 'photo', id: String(id), text: String(caption || '') }, nativeClients); }
+
+  return { start, stop, notify, navigate, ask, think, showPhoto, lastPhoto: () => lastImage, placesChanged, handle, _confirmer: confirmer, _pending: pending, _places: opts.places };
 }
 
 module.exports = { createPhoneApp, PHONE_APP_CONTEXT };

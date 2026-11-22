@@ -18,6 +18,7 @@ struct Line: Identifiable, Codable, Equatable {
     var expires: Date? = nil        // the server gives up on a Yes/No after 2 minutes
     var sending = false             // Yes/No answer on its way
     var url: String? = nil          // a route Fred can start (Google Maps)
+    var photoId: String? = nil      // a remembered photo to show (photo memory)
 }
 
 @MainActor
@@ -449,6 +450,10 @@ final class HannibalModel {
             lines.append(Line(kind: .notify, text: ev.text ?? "🚗 Route ready.", url: u))
             saveHistory()
             Nav.start(url: u, text: ev.text ?? "Tap to start the route in Google Maps.")
+        case "photo":
+            guard let id = ev.id else { return }
+            lines.append(Line(kind: .notify, text: ev.text ?? "📍", photoId: id))
+            saveHistory()
         case "ask":
             guard let id = ev.id else { return }
             var q: [String: Any] = ["id": id, "kind": ev.kind ?? ""]
@@ -457,6 +462,11 @@ final class HannibalModel {
         default:
             break
         }
+    }
+
+    func spotPhoto(_ id: String) async -> UIImage? {
+        guard let api, let d = await api.spotPhoto(id) else { return nil }
+        return UIImage(data: d)
     }
 
     func answer(_ line: Line, yes: Bool) {

@@ -518,6 +518,9 @@ ipcMain.handle('nav:eta', (_e, destination) => viaServer('nav.eta', { destinatio
 ipcMain.handle('meetings:recent', (_e, limit) => viaServer('meetings.recent', { limit }));
 ipcMain.handle('meetings:find', (_e, query) => viaServer('meetings.find', { query }));
 ipcMain.handle('meetings:retry', (_e, query) => viaServer('meetings.retry', { query }));
+ipcMain.handle('spots:save', (_e, label, note, withPhoto) => viaServer('spots.save', { label, note, with_photo: withPhoto }));
+ipcMain.handle('spots:find', (_e, query) => viaServer('spots.find', { query }));
+ipcMain.handle('spots:forget', (_e, query) => viaServer('spots.forget', { query }));
 
 // (shared with the always-on server, server/hannibal-server.js).
 // Reminders linked to calendar events (booked "with a reminder 15 minutes

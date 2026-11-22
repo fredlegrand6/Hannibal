@@ -335,6 +335,7 @@ struct LineView: View {
         case .notify:
             VStack(alignment: .leading, spacing: 10) {
                 Text(line.text).textSelection(.enabled)
+                if let pid = line.photoId { SpotPhoto(id: pid) }
                 if let url = line.url {
                     Button { Nav.open(url) } label: { Label("Start route", systemImage: "car.fill").bold().frame(maxWidth: .infinity) }
                         .buttonStyle(.borderedProminent).tint(Palette.cyan).controlSize(.large)
@@ -370,6 +371,24 @@ struct LineView: View {
         Text(line.text).textSelection(.enabled)
             .padding(.horizontal, 12).padding(.vertical, 9)
             .background(color, in: RoundedRectangle(cornerRadius: 16))
+    }
+}
+
+/// A remembered photo, loaded from the server (with the app's key).
+struct SpotPhoto: View {
+    @Environment(HannibalModel.self) private var model
+    let id: String
+    @State private var image: UIImage?
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image).resizable().scaledToFit().clipShape(RoundedRectangle(cornerRadius: 10))
+            } else {
+                RoundedRectangle(cornerRadius: 10).fill(Palette.him).frame(height: 160).overlay(ProgressView())
+            }
+        }
+        .task(id: id) { image = await model.spotPhoto(id) }
     }
 }
 
