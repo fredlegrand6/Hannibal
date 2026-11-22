@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		BB000000000000000000000B /* HannibalWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000001 /* HannibalWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		CC000000000000000000000B /* HannibalShare.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = CC0000000000000000000001 /* HannibalShare.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -17,6 +18,13 @@
 			proxyType = 1;
 			remoteGlobalIDString = BB0000000000000000000007;
 			remoteInfo = HannibalWidgets;
+		};
+		CC000000000000000000000D /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AA0000000000000000000009 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = CC0000000000000000000007;
+			remoteInfo = HannibalShare;
 		};
 /* End PBXContainerItemProxy section */
 
@@ -28,6 +36,7 @@
 			dstSubfolderSpec = 13;
 			files = (
 				BB000000000000000000000B /* HannibalWidgets.appex in Embed Foundation Extensions */,
+				CC000000000000000000000B /* HannibalShare.appex in Embed Foundation Extensions */,
 			);
 			name = "Embed Foundation Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -37,6 +46,7 @@
 /* Begin PBXFileReference section */
 		AA0000000000000000000001 /* Hannibal.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Hannibal.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		BB0000000000000000000001 /* HannibalWidgets.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = HannibalWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		CC0000000000000000000001 /* HannibalShare.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = HannibalShare.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -48,6 +58,11 @@
 		BB0000000000000000000002 /* HannibalWidgets */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = HannibalWidgets;
+			sourceTree = "<group>";
+		};
+		CC0000000000000000000002 /* HannibalShare */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = HannibalShare;
 			sourceTree = "<group>";
 		};
 		BB0000000000000000000003 /* Shared */ = {
@@ -72,6 +87,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		CC0000000000000000000004 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -81,6 +103,7 @@
 				AA0000000000000000000002 /* Hannibal */,
 				BB0000000000000000000003 /* Shared */,
 				BB0000000000000000000002 /* HannibalWidgets */,
+				CC0000000000000000000002 /* HannibalShare */,
 				AA0000000000000000000005 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -90,6 +113,7 @@
 			children = (
 				AA0000000000000000000001 /* Hannibal.app */,
 				BB0000000000000000000001 /* HannibalWidgets.appex */,
+				CC0000000000000000000001 /* HannibalShare.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -110,6 +134,7 @@
 			);
 			dependencies = (
 				BB000000000000000000000E /* PBXTargetDependency */,
+				CC000000000000000000000E /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				AA0000000000000000000002 /* Hannibal */,
@@ -145,6 +170,29 @@
 			productReference = BB0000000000000000000001 /* HannibalWidgets.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
+		CC0000000000000000000007 /* HannibalShare */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CC0000000000000000000008 /* Build configuration list for PBXNativeTarget "HannibalShare" */;
+			buildPhases = (
+				CC0000000000000000000005 /* Sources */,
+				CC0000000000000000000004 /* Frameworks */,
+				CC0000000000000000000006 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				CC0000000000000000000002 /* HannibalShare */,
+				BB0000000000000000000003 /* Shared */,
+			);
+			name = HannibalShare;
+			packageProductDependencies = (
+			);
+			productName = HannibalShare;
+			productReference = CC0000000000000000000001 /* HannibalShare.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -159,6 +207,9 @@
 						CreatedOnToolsVersion = 16.0;
 					};
 					BB0000000000000000000007 = {
+						CreatedOnToolsVersion = 16.0;
+					};
+					CC0000000000000000000007 = {
 						CreatedOnToolsVersion = 16.0;
 					};
 				};
@@ -179,6 +230,7 @@
 			targets = (
 				AA0000000000000000000006 /* Hannibal */,
 				BB0000000000000000000007 /* HannibalWidgets */,
+				CC0000000000000000000007 /* HannibalShare */,
 			);
 		};
 /* End PBXProject section */
@@ -192,6 +244,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		BB0000000000000000000006 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CC0000000000000000000006 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -215,6 +274,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		CC0000000000000000000005 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -222,6 +288,11 @@
 			isa = PBXTargetDependency;
 			target = BB0000000000000000000007 /* HannibalWidgets */;
 			targetProxy = BB000000000000000000000D /* PBXContainerItemProxy */;
+		};
+		CC000000000000000000000E /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = CC0000000000000000000007 /* HannibalShare */;
+			targetProxy = CC000000000000000000000D /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -339,6 +410,7 @@
 		BB0000000000000000000009 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = HannibalWidgets.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
@@ -364,6 +436,7 @@
 		BB000000000000000000000A /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = HannibalWidgets.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
@@ -378,6 +451,58 @@
 				);
 				MARKETING_VERSION = 0.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.revalisgroup.hannibal.widgets;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		CC0000000000000000000009 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = HannibalShare.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "HannibalShare-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = Hannibal;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = com.revalisgroup.hannibal.share;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		CC000000000000000000000A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = HannibalShare.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "HannibalShare-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = Hannibal;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = com.revalisgroup.hannibal.share;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -412,6 +537,15 @@
 			buildConfigurations = (
 				BB0000000000000000000009 /* Debug */,
 				BB000000000000000000000A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		CC0000000000000000000008 /* Build configuration list for PBXNativeTarget "HannibalShare" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CC0000000000000000000009 /* Debug */,
+				CC000000000000000000000A /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

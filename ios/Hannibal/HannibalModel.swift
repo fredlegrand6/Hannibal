@@ -95,6 +95,7 @@ final class HannibalModel {
         liveVoice.onLevel = { [weak self] l in self?.level = l }
         liveVoice.onUtterance = { [weak self] wav in self?.sendLive(wav) }
         liveVoice.onStopped = { [weak self] why in self?.stopLive(why) }
+        ConnectionStore.moveToSharedGroup()
         if let c = ConnectionStore.load() { use(c) }
         // Action Button / Siri / lock screen button / Dynamic Island stop.
         NotificationCenter.default.addObserver(forName: LiveRequest.start, object: nil, queue: .main) { [weak self] _ in
@@ -518,16 +519,3 @@ final class HannibalModel {
     }
 }
 
-extension UIImage {
-    /// Same size the desk and web app send: longest side 1568 px, JPEG.
-    func forHannibal() -> Data? {
-        let maxSide: CGFloat = 1568
-        let longest = max(size.width, size.height)
-        let scale = longest > maxSide ? maxSide / longest : 1
-        let target = CGSize(width: (size.width * scale).rounded(), height: (size.height * scale).rounded())
-        let format = UIGraphicsImageRendererFormat()
-        format.scale = 1
-        let img = UIGraphicsImageRenderer(size: target, format: format).image { _ in draw(in: CGRect(origin: .zero, size: target)) }
-        return img.jpegData(compressionQuality: 0.75)
-    }
-}
