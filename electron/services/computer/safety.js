@@ -67,7 +67,7 @@ function protectedApp(name, bundle) {
 // ── app classes for keys ──
 const TERMINAL_RE = /\b(terminal|iterm2?|warp|alacritty|kitty|wezterm|hyper|ghostty|tabby)\b/i;
 // Apps where Enter just makes a new line / confirms an edit (no send, no submit).
-const EDITOR_RE = /^(notes|notities|notes\.app|textedit|teksteditor|pages|microsoft word|word|numbers|microsoft excel|excel|keynote|stickies|cursor|visual studio code|code|xcode|sublime text|zed|bbedit|nova|obsidian|finder|reminders|herinneringen|rappels|recordatorios|calculator|rekenmachine|preview|voorvertoning|spotlight|bear|craft|notion|google docs)$/i;
+const EDITOR_RE = /^(notes|notities|notes\.app|textedit|teksteditor|pages|microsoft word|word|numbers|microsoft excel|excel|keynote|stickies|cursor|visual studio code|code|xcode|sublime text|zed|bbedit|nova|obsidian|finder|reminders|herinneringen|rappels|recordatorios|calculator|rekenmachine|preview|voorvertoning|bear|craft|notion|google docs)$/i;
 
 const isTerminal = (app) => TERMINAL_RE.test(String(app || ''));
 const isEditor = (app) => EDITOR_RE.test(String(app || '').trim());
@@ -86,7 +86,7 @@ function keyNeedsGate(combo, ctx = {}) {
   if (k === 'delete' && m.has('cmd') && m.has('shift')) return `${combo.label} empties the Trash`;
   if (k === 'return') {
     if (isTerminal(app)) return `Enter runs the command in ${app}`;
-    if (isEditor(app)) return null;
+    if (isEditor(app) || isLauncher(app)) return null;   // a launcher's protected targets: stepGate
     return `Enter may send or submit in ${app}`;
   }
   if (k === 'delete' || k === 'forwarddelete') {
@@ -96,12 +96,53 @@ function keyNeedsGate(combo, ctx = {}) {
   return null;
 }
 
+// ── focus changes inside a key sequence ──
+// A combo can move Hannibal into another app, window or field (cmd+tab, cmd+`,
+// Spotlight, a space switch, Tab …). Everything after it must be judged where
+// it really lands, so it is re-checked at that moment, not up front.
+function mayMoveFocus(combo) {
+  const m = new Set(combo.mods || []);
+  if (m.has('cmd') || m.has('ctrl')) return true;
+  if (combo.name === 'tab') return true;
+  if (/^f\d+$/.test(combo.name)) return true;   // F3 Mission Control, F4 Launchpad …
+  return false;
+}
+// How many steps of a sequence can be judged on the context read before it:
+// up to and including the first one that may move focus.
+function stepsCheckable(combos) {
+  const i = (combos || []).findIndex(mayMoveFocus);
+  return i < 0 ? (combos || []).length : i + 1;
+}
+
+// Launchers (Spotlight, Raycast, Alfred …): Enter opens what is typed there.
+const LAUNCHER_RE = /^(spotlight|raycast|alfred|launchbar)$/i;
+const isLauncher = (app) => LAUNCHER_RE.test(String(app || '').trim());
+// Would Enter in this launcher open a protected app?
+function launcherOpensProtected(ctx = {}, text) {
+  if (!isLauncher(ctx.app)) return false;
+  const v = text != null ? text : (ctx.element && ctx.element.value);
+  return PROTECTED_RE.test(String(v || ''));
+}
+
+// The full check for one key combo in one context, the same one a direct
+// action gets. → null | { block } | { confirm: reason }
+function stepGate(combo, ctx = {}, { explicit = false } = {}) {
+  const prot = protectedApp(ctx.app, ctx.bundle) || (combo.name === 'return' && launcherOpensProtected(ctx));
+  if (prot) {
+    const what = protectedApp(ctx.app, ctx.bundle) ? ctx.app : 'a protected app (settings, keychain or passwords)';
+    if (!explicit) return { block: `${combo.label} would act in ${what}. Hannibal does not touch settings, keychain or passwords unless Fred explicitly asks.` };
+    return { confirm: `${combo.label} acts in ${what}` };
+  }
+  const r = keyNeedsGate(combo, ctx);
+  return r ? { confirm: r } : null;
+}
+
 // Does typing this text need a yes? A newline is an Enter.
 function typeNeedsGate(text, ctx = {}) {
   if (!/[\r\n]/.test(String(text || ''))) return null;
   const app = ctx.app || 'the front app';
   if (isTerminal(app)) return `the text has a new line, which runs it as a command in ${app}`;
-  if (isEditor(app)) return null;
+  if (isEditor(app) || isLauncher(app)) return null;
   return `the text has a new line, which may send or submit it in ${app}`;
 }
 
@@ -142,6 +183,6 @@ function mask(text) {
 }
 
 module.exports = {
-  riskyLabel, riskyElement, labelsOf, protectedApp, keyNeedsGate, typeNeedsGate,
+  riskyLabel, riskyElement, labelsOf, protectedApp, keyNeedsGate, typeNeedsGate, stepGate, stepsCheckable, mayMoveFocus, isLauncher, launcherOpensProtected,
   looksSecret, mask, isTerminal, isEditor, isTextBox, RISKY,
 };

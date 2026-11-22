@@ -175,6 +175,12 @@ function createComputer(deps = {}) {
   // ── apps ──
   async function front() { return hands.call('front'); }
   async function focusedInfo() { return hands.call('focused'); }
+  // Spotlight's panel does not become the front app, so remember when Hannibal
+  // opened it (cmd+space) and what he typed there: Enter then opens that.
+  const LAUNCH_MS = 30000;
+  const launcherOpen = () => state.launcher && now() - state.launcher.at < LAUNCH_MS;
+  const withLauncher = (ctx) => (launcherOpen() && !safety.isLauncher(ctx.app)
+    ? { ...ctx, app: 'Spotlight', bundle: '', element: { role: 'AXTextField', value: state.launcher.typed || '' } } : ctx);
   const isSelf = (info) => info && (Number(info.pid) === selfPid || /^(electron|hannibal)$/i.test(String(info.app || '')));
   async function activate(app) {
     if (!app) return front();
@@ -201,13 +207,17 @@ function createComputer(deps = {}) {
       const image = cb.readImage();
       saved = { text: cb.readText(), html: cb.readHTML(), rtf: cb.readRTF(), image: image && !image.isEmpty() ? image : undefined };
     } catch (_) {}
+    const restore = () => {
+      if (!saved) return;
+      try { cb.write({ text: saved.text || '', ...(saved.html ? { html: saved.html } : {}), ...(saved.rtf ? { rtf: saved.rtf } : {}), ...(saved.image ? { image: saved.image } : {}) }); } catch (_) {}
+    };
     cb.writeText(String(text));
     await sleep(80);
+    // Fred may have said stop while the clipboard was being prepared: never paste after that.
+    if (state.aborted) { restore(); return { ok: false, stopped: true, error: 'Fred said stop' }; }
     const r = await hands.call('key', { code: keys.CODES.v, mods: ['cmd'] });
     await sleep(700);
-    if (saved) {
-      try { cb.write({ text: saved.text || '', ...(saved.html ? { html: saved.html } : {}), ...(saved.rtf ? { rtf: saved.rtf } : {}), ...(saved.image ? { image: saved.image } : {}) }); } catch (_) {}
-    }
+    restore();
     return r && r.error ? { ok: false, error: r.error } : { ok: true };
   }
 
@@ -251,7 +261,7 @@ function createComputer(deps = {}) {
       } catch (_) {}
       const risk = safety.riskyElement(info, near);
       const label = (risk.label || safety.labelsOf(info)[0] || near[0] || '').slice(0, 60);
-      extra._resolved = { point, display: d.index, label, app: info.app || '' };
+      extra._resolved = { point, display: d.index, label, app: info.app || '', risky: !!risk.risky, explicit };
       const what = `${p.double ? 'Double-click' : 'Click'} ${label ? `“${label}”` : `at ${Math.round(p.x)},${Math.round(p.y)}`} in ${info.app || 'the app'} on the ${d.name} screen`;
       if (risk.risky) return { confirm: `${what}. That ${risk.word === 'delete' || risk.word === 'remove' ? 'deletes something' : 'can send, pay or submit something'} — go ahead?`, extra };
       if (g && g.confirm) return { confirm: `${g.confirm}: ${what} — go ahead?`, extra };
@@ -267,7 +277,7 @@ function createComputer(deps = {}) {
       if (g && g.block) return g;
       const risk = safety.riskyLabel(t.label).risky ? safety.riskyLabel(t.label) : safety.riskyLabel(p.text).risky ? safety.riskyLabel(p.text) : safety.riskyElement(info);
       const d = geo.displayAt(displays(), t.center);
-      extra._resolved = { point: t.center, display: d ? d.index : null, label: t.label, app: info.app || found.app || '', source: t.source };
+      extra._resolved = { point: t.center, display: d ? d.index : null, label: t.label, app: info.app || found.app || '', source: t.source, risky: !!risk.risky, explicit };
       const what = `Click “${String(t.label).slice(0, 60)}” in ${info.app || found.app || 'the app'}${d ? ` on the ${d.name} screen` : ''}`;
       if (risk.risky) return { confirm: `${what}. That can send, delete, pay or submit something — go ahead?`, extra };
       if (g && g.confirm) return { confirm: `${g.confirm}: ${what} — go ahead?`, extra };
@@ -284,12 +294,17 @@ function createComputer(deps = {}) {
       if (g && g.block) return g;
       const foc = await focusedInfo().catch(() => ({}));
       const el = foc.element || {};
-      const ctx = { app: fr.app, bundle: fr.bundle, element: el };
+      const ctx = withLauncher({ app: fr.app, bundle: fr.bundle, element: el });
       extra._app = fr.app;
       if (action === 'type') {
         const text = String(p.text || '');
         const secret = el.secure || safety.looksSecret(text);
         if (secret && p.secret_ok !== true) return { block: 'That looks like a password or secret (or the field is a password field). Hannibal never types those unless Fred explicitly tells him to; if he did, call again with secret_ok true.' };
+        if (/[\r\n]/.test(text) && (safety.launcherOpensProtected(ctx, text) || safety.launcherOpensProtected({ app: 'Spotlight' }, text.split(/[\r\n]/)[0]) && text.trim().length <= 40)) {
+          if (!explicit) return { block: `Typing “${text.trim().slice(0, 60)}” and Enter in ${fr.app} would open a protected app (settings, keychain or passwords). Hannibal does not unless Fred explicitly asks.` };
+          return { confirm: `Open “${text.trim().slice(0, 60)}” from ${fr.app} — go ahead?`, extra };
+        }
+        extra._checked = { app: fr.app, secure: !!el.secure, launcherProtected: safety.launcherOpensProtected(ctx, text) };
         const reason = safety.typeNeedsGate(text, ctx);
         const shown = secret ? `a password (${text.length} characters)` : `“${text.length > 140 ? text.slice(0, 140) + '…' : text}”`;
         if (secret) return { confirm: `Type ${shown} into ${fr.app}${el.secure ? ' (password field)' : ''} — go ahead?`, extra };
@@ -299,9 +314,19 @@ function createComputer(deps = {}) {
       }
       let combos;
       try { combos = keys.parseKeys(p.keys); } catch (e) { return { block: e.message } }
-      const reasons = combos.map((c) => safety.keyNeedsGate(c, ctx)).filter(Boolean);
-      if (reasons.length) return { confirm: `Press ${combos.map((c) => c.label).join(', ')} in ${fr.app}: ${reasons[0]} — go ahead?`, extra };
-      if (g && g.confirm) return { confirm: `${g.confirm}: press ${combos.map((c) => c.label).join(', ')} — go ahead?`, extra };
+      // Only the steps up to the first focus change can be judged now; the
+      // rest are checked one by one, where they land, while running (perform).
+      const n = safety.stepsCheckable(combos);
+      const first = combos.slice(0, n);
+      const later = combos.length > n ? ` (then ${combos.slice(n).map((c) => c.label).join(', ')}, checked again where they land)` : '';
+      extra._checked = { app: fr.app, steps: n };
+      for (const c of first) {
+        const sg = safety.stepGate(c, ctx, { explicit });
+        if (sg && sg.block) return { block: sg.block };
+      }
+      const reasons = first.map((c) => safety.stepGate(c, ctx, { explicit })).filter(Boolean).map((x) => x.confirm);
+      if (reasons.length) return { confirm: `Press ${first.map((c) => c.label).join(', ')} in ${fr.app}${later}: ${reasons[0]} — go ahead?`, extra };
+      if (g && g.confirm) return { confirm: `${g.confirm}: press ${first.map((c) => c.label).join(', ')}${later} — go ahead?`, extra };
       return { extra };
     }
 
@@ -326,7 +351,11 @@ function createComputer(deps = {}) {
     const pid = app ? await pidOf(app) : Number(fr.pid);
     if (pid && !(pid === selfPid)) {
       const r = await hands.call('find', { pid, text: q, ms: 2500 }, 8000).catch(() => ({}));
-      const ranked = match.rankAx(r.items || [], q).filter((c) => geo.displayAt(displays(), c.center));
+      const wantD = geo.pickDisplay(displays(), display);
+      const ranked = match.rankAx(r.items || [], q).filter((c) => {
+        const on = geo.displayAt(displays(), c.center);
+        return on && (!wantD || on.index === wantD.index);
+      });
       if (ranked.length && ranked[0].score >= 0.7) return { ...match.choose(ranked, { index }), app: appName };
     }
     const ds = displays();
@@ -395,6 +424,15 @@ function createComputer(deps = {}) {
     return { d: d || ds.find((x) => x.bounds.x === 0 && x.bounds.y === 0) || ds[0], foc };
   }
 
+  // ── re-checks right before the real keystroke / click ──
+  // The safety check ran on what was in front BEFORE the action. Focus can move
+  // in between (a key combo, Fred, a pop-up), so look again and refuse rather
+  // than type or click blind.
+  const sameApp = (a, b) => !a || !b || match.norm(a) === match.norm(b) || match.norm(a).includes(match.norm(b)) || match.norm(b).includes(match.norm(a));
+  const moved = (why, extraInfo = {}) => ({ ok: false, focus_changed: true, error: `Stopped before acting: ${why} Nothing was typed or pressed there. Look with computer.screen and try again.`, ...extraInfo });
+  const needsYes = (why, remaining) => ({ ok: false, needs_confirmation: true, remaining,
+    error: `Stopped before ${remaining ? `pressing ${remaining}` : 'acting'}: ${why}. To go on, call computer.key again with only “${remaining}” so it goes through Fred's yes/no first.` });
+
   async function perform(action, p) {
     switch (action) {
       case 'screen': {
@@ -424,6 +462,14 @@ function createComputer(deps = {}) {
         const region = geo.regionAround(ds, r.point, Math.min(900, d.bounds.width), Math.min(600, d.bounds.height)) || d.bounds;
         const before = await signature(region);
         if (state.aborted) return stopped();
+        const here = await hands.call('axAt', r.point).catch(() => ({}));
+        if (here && here.app && r.app && !sameApp(here.app, r.app)) return moved(`${here.app} is now under that spot, not ${r.app} (which was checked).`);
+        if (here && safety.protectedApp(here.app, here.bundle) && !r.explicit) return moved(`${here.app} is protected (settings, keychain or passwords).`);
+        if (!r.risky && action === 'click' && here && here.found !== false) {
+          const rk = safety.riskyElement(here);
+          if (rk.risky) return { ok: false, needs_confirmation: true, error: `Stopped before clicking: the spot is now “${rk.label}”, which can send, delete, pay or submit. Call computer.click again so Fred's yes/no is asked first.` };
+        }
+        state.launcher = null;
         const c = await hands.call('click', { x: r.point.x, y: r.point.y, button: p.button === 'right' ? 'right' : 'left', count: p.double ? 2 : 1 });
         if (c.error) return { ok: false, error: c.error };
         await sleep(550);
@@ -439,6 +485,15 @@ function createComputer(deps = {}) {
         const { d } = await frontDisplay();
         const foc0 = await focusedInfo().catch(() => ({}));
         const before = d ? await signature(d.bounds) : null;
+        if (state.aborted) return stopped();
+        const ck = p._checked || {};
+        const el0 = foc0.element || {};
+        if (ck.app && !sameApp(foc0.app, ck.app)) return moved(`${foc0.app || 'another app'} is in front now, not ${ck.app} (which was checked).`, { app: foc0.app });
+        if (p.app && foc0.app && !sameApp(foc0.app, p.app)) return moved(`${foc0.app} is in front, not ${p.app}.`, { app: foc0.app });
+        if (safety.protectedApp(foc0.app, foc0.bundle) && p.fred_asked_explicitly !== true) return moved(`${foc0.app} is protected (settings, keychain or passwords).`);
+        if (el0.secure && !ck.secure && p.secret_ok !== true) return moved('the focused field is now a password field.');
+        if (/[\r\n]/.test(text) && safety.launcherOpensProtected(withLauncher({ app: foc0.app }), text) && p.fred_asked_explicitly !== true) return moved('that would open a protected app.');
+        if (launcherOpen()) state.launcher.typed = /[\r\n]/.test(text) ? '' : (state.launcher.typed || '') + text;
         if (text.length <= 60 && !/[\r\n]/.test(text)) {
           const r = await hands.call('type', { text }, 30000);
           if (r.stopped || state.aborted) return stopped();
@@ -471,10 +526,29 @@ function createComputer(deps = {}) {
         const { d } = await frontDisplay();
         const before = d ? await signature(d.bounds) : null;
         const fr0 = await front().catch(() => ({}));
-        for (const c of combos) {
-          if (state.aborted) return stopped();
+        const ck = p._checked || { app: fr0.app, steps: safety.stepsCheckable(combos) };
+        const explicit = p.fred_asked_explicitly === true;
+        const pressed = [];
+        for (let i = 0; i < combos.length; i++) {
+          const c = combos[i];
+          if (state.aborted) return { ...stopped(), pressed: pressed.map((x) => x.label) };
+          // Look again before every step: where would this one land?
+          const foc = await focusedInfo().catch(() => ({}));
+          if (state.aborted) return { ...stopped(), pressed: pressed.map((x) => x.label) };
+          const ctx = withLauncher({ app: foc.app, bundle: foc.bundle, element: foc.element || null });
+          const rest = combos.slice(i).map((x) => x.label).join(', ');
+          const covered = i < ck.steps && sameApp(foc.app, ck.app);
+          if (i < ck.steps && !sameApp(foc.app, ck.app)) {
+            return moved(`${foc.app || 'another app'} came to the front instead of ${ck.app}.`, { pressed: pressed.map((x) => x.label), front_app: foc.app });
+          }
+          const sg = safety.stepGate(c, ctx, { explicit });
+          if (sg && sg.block) return { ok: false, refused: true, error: `Stopped before ${c.label}: ${sg.block}`, pressed: pressed.map((x) => x.label), front_app: foc.app };
+          if (sg && sg.confirm && !covered) return { ...needsYes(`${sg.confirm} (it would land in ${foc.app || 'the front app'})`, rest), pressed: pressed.map((x) => x.label), front_app: foc.app };
           const r = await hands.call('key', { code: c.code, mods: c.mods });
-          if (r.error) return { ok: false, error: r.error };
+          if (r.error) return { ok: false, error: r.error, pressed: pressed.map((x) => x.label) };
+          pressed.push(c);
+          if (c.name === 'space' && (c.mods || []).includes('cmd')) state.launcher = { at: now(), typed: '' };
+          else if (c.name === 'escape' || c.name === 'return') state.launcher = null;
           await sleep(120);
         }
         await sleep(450);
