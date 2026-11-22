@@ -199,7 +199,10 @@ ipcMain.handle('calendar:add', async (_e, title, start, minutes, location, notes
   const picked = assist.pickCalendar(a, calendar, { env: opts.env || process.env });
   if (picked.error) return { ok: false, error: picked.error };
   const cal = picked.calendar;
-  const ev = buildEvent({ title, start, minutes, location, notes, tz: tz(), now: nowFn() });
+  // Fred's devices ring at the start, and at the reminder time when he chose one.
+  const rm = Number(remindMinutes);
+  const alarms = [0, ...(Number.isFinite(rm) && rm > 0 ? [rm] : [])];
+  const ev = buildEvent({ title, start, minutes, location, notes, tz: tz(), now: nowFn(), alarms });
   if (!ev.ok) return ev;
   const url = `${cal.url.replace(/\/?$/, '/')}${ev.uid}.ics`;
   try {
@@ -566,7 +569,8 @@ return {
 }
 
 // One VEVENT, times in UTC. Pure, so it can be tested.
-function buildEvent({ title, start, minutes, location, notes, now = Date.now(), uid, tz = assist.fredTz() } = {}) {
+// alarms: minutes before the start at which Fred's phone and Mac ring (0 = at the start). Timed events only.
+function buildEvent({ title, start, minutes, location, notes, now = Date.now(), uid, tz = assist.fredTz(), alarms = [] } = {}) {
   const t = String(title || '').replace(/\s+/g, ' ').trim().slice(0, 200);
   if (!t) return { ok: false, error: 'the event needs a title' };
   const s = String(start || '').trim();
@@ -574,7 +578,7 @@ function buildEvent({ title, start, minutes, location, notes, now = Date.now(), 
   const utc = (ms) => new Date(ms).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
   const id = uid || `hannibal-${now.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   let dtStart, dtEnd, when;
-  let startMs;
+  let startMs, allDay = false;
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
     const [y, m, d] = s.split('-').map(Number);
     const day = { y, mo: m, d };
@@ -585,6 +589,7 @@ function buildEvent({ title, start, minutes, location, notes, now = Date.now(), 
     dtStart = `DTSTART;VALUE=DATE:${ymd8(day)}`; dtEnd = `DTEND;VALUE=DATE:${ymd8(next)}`;
     when = assist.fmtDate(assist.addDays(day, 0)) + ' (all day)';
     startMs = assist.wallMs(y, m, d, 0, 0, tz);
+    allDay = true;
   } else {
     // A local time on Fred's clock (Bussum / Ibiza), not the machine's.
     const mt = s.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
@@ -599,8 +604,17 @@ function buildEvent({ title, start, minutes, location, notes, now = Date.now(), 
   const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Hannibal//EN', 'BEGIN:VEVENT', `UID:${id}`, `DTSTAMP:${utc(now)}`,
     dtStart, dtEnd, `SUMMARY:${esc(t)}`,
     ...(location ? [`LOCATION:${esc(location)}`] : []), ...(notes ? [`DESCRIPTION:${esc(notes)}`] : []),
+    ...(allDay ? [] : alarmLines(alarms, t, esc)),
     'END:VEVENT', 'END:VCALENDAR'];
   return { ok: true, uid: id, title: t, when, startMs, ics: lines.join('\r\n') + '\r\n' };
+}
+
+// VALARM blocks so the iPhone / Mac calendar itself rings, even when Hannibal's own reminder is off.
+function alarmLines(alarms, title, esc) {
+  const mins = [...new Set((Array.isArray(alarms) ? alarms : [alarms]).map((m) => Math.round(Number(m)))
+    .filter((m) => Number.isFinite(m) && m >= 0 && m <= 7 * 24 * 60))].sort((x, y) => x - y);
+  return mins.flatMap((m) => ['BEGIN:VALARM', 'ACTION:DISPLAY', `DESCRIPTION:${esc(title)}`,
+    m === 0 ? 'TRIGGER;RELATED=START:PT0M' : `TRIGGER;RELATED=START:-PT${m}M`, 'END:VALARM']);
 }
 
 // Event objects in a calendar-query answer: [{ href, etag, ics, uid, title, recurring }].
