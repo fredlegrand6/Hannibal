@@ -40,6 +40,25 @@ t('a 2-second clip with only a tiny blip (< 250 ms of voice) is dropped as silen
   assert.strictEqual(r.text, '');
   assert.strictEqual(r.dropped, 'silence');
 });
+// exact zeros where it's quiet: the ffmpeg padding, or a noise-suppressed mic
+function cleanWav(parts) {
+  const samples = [];
+  for (const [ms, amp] of parts) for (let i = 0; i < ms * 16; i++) samples.push(amp ? Math.round(amp * Math.sin(i / 16000 * 2 * Math.PI * 220)) : 0);
+  const b = Buffer.alloc(44 + samples.length * 2);
+  b.write('RIFF', 0, 'ascii');
+  samples.forEach((v, i) => b.writeInt16LE(v, 44 + i * 2));
+  return b;
+}
+t('clean speech with zero padding (noise-suppressed mic) is kept, not taken for silence', async () => {
+  const v = F.audioVerdict(cleanWav([[400, 0], [1000, 1000], [300, 0]]));
+  assert.strictEqual(v.keep, true, JSON.stringify(v));
+  assert.ok(v.speechMs >= 900, JSON.stringify(v));
+  const r = await run(cleanWav([[400, 0], [1000, 1000], [300, 0]]), [seg(' Hannibal, what time is it?')]);
+  assert.strictEqual(r.text, 'Hannibal, what time is it?');
+});
+t('clean speech with no silence around it at all is kept too', () => {
+  assert.strictEqual(F.audioVerdict(cleanWav([[1500, 1000]])).keep, true);
+});
 t('a short clear "ja" (~300 ms) still gets through', async () => {
   const r = await run(wav([[500, 0], [320, 5000], [500, 0]]), [seg(' Ja.')]);
   assert.strictEqual(r.text, 'Ja.');
