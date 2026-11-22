@@ -81,11 +81,17 @@ final class Speaker: NSObject, AVAudioPlayerDelegate {
     private var finished: CheckedContinuation<Void, Never>?
     private var generation = 0
 
+    /// While Fred holds the mic nothing new is played (it would end up in his
+    /// recording); anything that arrives waits and plays once he lets go.
+    var hold = false {
+        didSet { if !hold && !queue.isEmpty && !running { Task { await run() } } }
+    }
+
     func say(_ text: String) {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty else { return }
         queue.append(String(t.prefix(1500)))
-        if !running { Task { await run() } }
+        if !running && !hold { Task { await run() } }
     }
 
     /// Stops now and forgets anything still waiting.
@@ -101,7 +107,7 @@ final class Speaker: NSObject, AVAudioPlayerDelegate {
     private func run() async {
         running = true
         defer { running = false }
-        while !queue.isEmpty {
+        while !queue.isEmpty && !hold {
             let gen = generation
             let text = queue.removeFirst()
             guard let fetch else { return }
@@ -111,6 +117,7 @@ final class Speaker: NSObject, AVAudioPlayerDelegate {
                 continue
             }
             guard gen == generation else { continue }
+            if hold { queue.insert(text, at: 0); break }   // mic went on while fetching
             AudioSession.setUp()
             let p: AVAudioPlayer
             do { p = try AVAudioPlayer(data: data) } catch { onDrop?("decode", error.localizedDescription); continue }

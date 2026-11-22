@@ -14,6 +14,8 @@ struct Line: Identifiable, Codable, Equatable {
     var text: String
     var confirmId: String? = nil
     var outcome: String? = nil      // for a Yes/No card once it's answered or expired
+    var expires: Date? = nil        // the server gives up on a Yes/No after 2 minutes
+    var sending = false             // Yes/No answer on its way
 }
 
 @MainActor
@@ -133,6 +135,7 @@ final class HannibalModel {
         case "hello":
             online = true
             backoff = 1
+            expireOldConfirms()          // a close may have been missed while away
         case "notify":
             guard let t = ev.text, !t.isEmpty else { return }
             add(.notify, t)
@@ -141,8 +144,9 @@ final class HannibalModel {
             speaker.say(t)
         case "confirm":
             guard let id = ev.id else { return }
-            lines.append(Line(kind: .confirm, text: (ev.summary ?? "Shall I go ahead?"), confirmId: id))
+            lines.append(Line(kind: .confirm, text: (ev.summary ?? "Shall I go ahead?"), confirmId: id, expires: Date().addingTimeInterval(120)))
             pulses += 1
+            scheduleExpiry()
             UINotificationFeedbackGenerator().notificationOccurred(.warning)
         case "confirm-closed":
             guard let id = ev.id, let i = lines.firstIndex(where: { $0.confirmId == id }) else { return }
@@ -154,14 +158,41 @@ final class HannibalModel {
     }
 
     func answer(_ line: Line, yes: Bool) {
-        guard let id = line.confirmId, let api else { return }
-        if let i = lines.firstIndex(where: { $0.id == line.id }) { lines[i].outcome = yes ? "Going ahead." : "Not done." }
+        guard let id = line.confirmId, let api,
+              let start = lines.firstIndex(where: { $0.id == line.id }), !lines[start].sending else { return }
+        lines[start].sending = true
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         Task {
-            if !(await api.confirm(id: id, yes: yes)) {
-                if let i = lines.firstIndex(where: { $0.id == line.id }) { lines[i].outcome = "That question had already expired, so nothing was done." }
+            let result = await api.confirm(id: id, yes: yes)
+            guard let i = lines.firstIndex(where: { $0.id == line.id }) else { return }
+            lines[i].sending = false
+            switch result {
+            case .done:
+                if lines[i].outcome == nil { lines[i].outcome = yes ? "Going ahead." : "Not done." }
+            case .expired:
+                if lines[i].outcome == nil { lines[i].outcome = "That question had already closed, so nothing new was done." }
+            case .unknown:
+                // Keep the buttons: the server keeps only one answer per question,
+                // so tapping again can never make him do it twice.
+                add(.error, "I couldn't reach Hannibal with your answer. Tap it again, or check before asking again.")
             }
             saveHistory()
+        }
+    }
+
+    private func expireOldConfirms() {
+        let now = Date()
+        var changed = false
+        for i in lines.indices where lines[i].kind == .confirm && lines[i].outcome == nil {
+            if let e = lines[i].expires, e <= now { lines[i].outcome = "No answer in 2 minutes, so I did not do it."; changed = true }
+        }
+        if changed { saveHistory() }
+    }
+
+    private func scheduleExpiry() {
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 122_000_000_000)
+            self?.expireOldConfirms()
         }
     }
 
@@ -183,14 +214,16 @@ final class HannibalModel {
         guard api != nil else { return }
         wantRecording = true
         speaker.stop()                                  // talking over him stops him
+        speaker.hold = true                             // and nothing new plays into the mic
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         Task {
             guard await AudioSession.askMicPermission() else {
+                speaker.hold = false
                 add(.error, "Hannibal needs the microphone. Turn it on in Settings › Hannibal.")
                 return
             }
             guard wantRecording else { return }          // let go before the mic was ready
-            do { try recorder.start() } catch { add(.error, friendly(error)); return }
+            do { try recorder.start() } catch { speaker.hold = false; add(.error, friendly(error)); return }
             recording = true
             meterTask = Task { [weak self] in
                 while let self, self.recording, !Task.isCancelled {
@@ -204,6 +237,7 @@ final class HannibalModel {
     /// send = false when Fred slides away to cancel.
     func stopRecording(send: Bool) {
         wantRecording = false
+        defer { speaker.hold = false }                  // waiting reminders play now
         guard recording else { return }
         recording = false
         meterTask?.cancel()

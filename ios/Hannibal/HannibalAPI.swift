@@ -103,10 +103,16 @@ final class HannibalAPI {
         return data
     }
 
-    @discardableResult
-    func confirm(id: String, yes: Bool) async -> Bool {
-        guard let result = try? await session.data(for: request("api/confirm", body: jsonBody(["id": id, "yes": yes]), timeout: 20)) else { return false }
-        return (result.1 as? HTTPURLResponse)?.statusCode == 200
+    enum ConfirmResult { case done, expired, unknown }
+
+    /// .unknown = the answer may or may not have reached the server (network).
+    func confirm(id: String, yes: Bool) async -> ConfirmResult {
+        guard let result = try? await session.data(for: request("api/confirm", body: jsonBody(["id": id, "yes": yes]), timeout: 20)) else { return .unknown }
+        switch (result.1 as? HTTPURLResponse)?.statusCode ?? 0 {
+        case 200: return .done
+        case 410: return .expired
+        default: return .unknown
+        }
     }
 
     func voiceDrop(stage: String, error: String, recovered: Bool = false) {

@@ -258,6 +258,7 @@ struct LineView: View {
                             .buttonStyle(.bordered).tint(.white)
                     }
                     .controlSize(.large)
+                    .disabled(line.sending)
                 }
             }
             .padding(12).frame(maxWidth: .infinity, alignment: .leading)
