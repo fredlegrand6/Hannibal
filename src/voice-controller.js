@@ -2197,6 +2197,7 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
       console.warn(`[barge] heard ${JSON.stringify(heard)} → ${d.barge ? 'STOP' : 'keep talking'} (${d.why})`);
       if (!d.barge || phase !== 'speaking' || confirmInFlight) return;
       bargeStop();
+      if (d.stopOnly && driveSession) { try { window.hannibal.computerStop(`Fred said "${heard}"`); } catch (_) {} }
       if (d.stopOnly) { setPhase('idle'); startListening({ conversation: true }); }          // "stop" → quiet, ears open
       else if (stillTalking) startListening({ conversation: true, fromMark: clipMark });      // he's mid-sentence: hear him out
       else {
@@ -2212,6 +2213,72 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
       bargeTimer = setInterval(() => { if (tap && tap.alive()) onFrame(B.rms(tap.ring.read(tap.mark() - frame))); else stopBargeWatch(); }, 50);
     }
   }
+  // ── DRIVE STOP ───────────────────────────────────────────────────────────
+  // While Hannibal operates the Mac (computer.* tools), the mic is watched for
+  // "Hannibal stop" (src/drive-stop.js). A burst of speech goes to Whisper; a
+  // stop calls main's computer:stop, which cuts the action and Claude's turn at
+  // once. Esc×3 and the wake word stop him too (handled in main).
+  let driveSession = null, driveTimer = null, driveStream = null, driveTap = null, driveBusy = 0;
+  function stopDriveWatch() {
+    driveSession = null;
+    if (driveTimer) { clearInterval(driveTimer); driveTimer = null; }
+    if (driveTap) { try { driveTap.close(); } catch (_) {} driveTap = null; }
+    if (driveStream) { driveStream.getTracks().forEach((t) => t.stop()); driveStream = null; }
+  }
+  async function startDriveWatch() {
+    if (driveSession || !window.DriveStop || !window.BargeIn) return;
+    const session = {};
+    driveSession = session;
+    let t = tap && tap.alive() ? tap : null;
+    if (!t) {
+      try {
+        driveStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        driveTap = window.AudioTap ? window.AudioTap.attach(audioCtx, driveStream) : null;
+        t = driveTap;
+      } catch (e) { console.warn('[drive-stop] no mic to listen for "Hannibal stop":', e && e.message); }
+    }
+    if (driveSession !== session) { if (driveTap && driveTap === t) stopDriveWatch(); return; }
+    if (!t) { console.warn('[drive-stop] voice stop unavailable (Esc×3 still works)'); return; }
+    console.warn('[drive-stop] listening for "Hannibal stop" while he drives');
+    const B = window.BargeIn;
+    const sr = t.ring.sampleRate;
+    const frame = Math.floor(sr * 0.05);
+    const w = B.createWatcher({ minBar: Number(cfg.bargeMinBar) || 0.006, onsetMs: 150, quietMs: 300, maxMs: 2500 });
+    let frames = 0, onsetMark = 0;
+    driveTimer = setInterval(async () => {
+      if (driveSession !== session) return;
+      if (!t.alive()) return;
+      const level = B.rms(t.ring.read(t.mark() - frame));
+      if (++frames <= 8) { w.learn(level); return; }
+      const ev = w.push(level);
+      if (ev === 'onset') { onsetMark = Math.max(0, t.mark() - Math.floor(sr * 0.45)); return; }
+      if (ev !== 'done' && ev !== 'long') return;
+      const clip = t.wav(onsetMark, 0, 0);
+      w.reset();
+      if (driveBusy >= 2 || !clip || clip.length <= 44) return;
+      driveBusy++;
+      let heard = '';
+      try {
+        const lang = cfg.sttLanguage && cfg.sttLanguage !== 'auto' && cfg.sttLanguage !== 'follow' ? cfg.sttLanguage : (LANG_CODE[currentLanguage] || 'en');
+        const r = await fetch(`${cfg.whisperUrl}/transcribe?language=${lang}`, { method: 'POST', body: new Blob([clip], { type: 'audio/wav' }) });
+        heard = (((await r.json()) || {}).transcript || '').trim();
+      } catch (e) { console.warn('[drive-stop] whisper failed', e && e.message); }
+      finally { driveBusy--; }
+      if (driveSession !== session || !heard) return;
+      const d = window.DriveStop.decide(heard, { mentionsName: window.NameGate && window.NameGate.mentionsName });
+      console.warn(`[drive-stop] heard ${JSON.stringify(heard)} → ${d.stop ? 'STOP' : 'carry on'} (${d.why})`);
+      if (d.stop) { try { await window.hannibal.computerStop(`Fred said "${heard}"`); } catch (_) {} }
+    }, 50);
+  }
+  if (window.hannibal.onComputerDriving) {
+    window.hannibal.onComputerDriving((m) => { if (m && m.on) startDriveWatch(); else stopDriveWatch(); });
+    window.hannibal.onComputerStopped(() => {
+      stopDriveWatch();
+      bargeStop();
+      setTimeout(() => { speakLine('Stopped.').catch(() => {}); }, 150);
+    });
+  }
+
   // Stop talking now: drop the queue, cut the sound, stop Claude's reply.
   function bargeStop() {
     stopBargeWatch();

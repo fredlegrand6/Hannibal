@@ -367,6 +367,88 @@ const TOOLS = [
     params: [], side_effect: SIDE_EFFECT.READ, executor: EXECUTOR.MAIN,
     via: { channel: 'mac-control', action: 'screenshot-window' } },
 
+  // ═══════════════════════ COMPUTER CONTROL (Hannibal's hands) ═══════════════════════
+  // Keyboard + mouse on any app (electron/services/computer/). Typing and clicking
+  // in general are 'read' (trivially reversible UI input, like the clipboard), BUT
+  // every call goes through computer preflight first: a Send/Delete/Pay/Submit/
+  // Merge target, Enter in a chat app or Terminal, cmd+Enter, a password … turns
+  // that one call into a confirm-first write (the same voice yes/no gate).
+  //   preflight:true   → claude-tools asks the computer service before the gate
+  //   claude_only:true → never offered to the Ollama planner (plannerTools())
+  //   desk_only:true   → only from the desk chat, not Telegram / the phone
+  { name: 'computer.screen', domain: 'computer',
+    description: "Look at Fred's screen to operate apps: a screenshot of one display (default: where the front window is) plus the display list. Use it before clicking by position, and to check your work.",
+    params: [{ name: 'display', type: 'string', required: false, desc: 'display number (1 = leftmost), "left", "right", "laptop", or "all"' }],
+    side_effect: SIDE_EFFECT.READ, executor: EXECUTOR.MAIN, via: { channel: 'computer', action: 'screen', raw: true },
+    preflight: true, claude_only: true, desk_only: true, permission: { ceiling: 'never' },
+    returns: '{ ok, display, image:{width,height}, b64 (the screenshot), front_app, displays:[{display,name}], how_to_click }' },
+  { name: 'computer.click', domain: 'computer',
+    description: 'Click a spot you saw in the LAST computer.screen picture of a display: x/y are pixels in that picture. Prefer computer.clickText when the thing has a visible label.',
+    params: [
+      { name: 'x', type: 'number', required: true, desc: 'pixels from the left of the screenshot' },
+      { name: 'y', type: 'number', required: true, desc: 'pixels from the top of the screenshot' },
+      { name: 'display', type: 'string', required: false, desc: 'the display number the screenshot was of (always pass it with several displays)' },
+      { name: 'button', type: 'enum', required: false, enum: ['left', 'right'] },
+      { name: 'double', type: 'boolean', required: false, desc: 'double-click' },
+      { name: 'fred_asked_explicitly', type: 'boolean', required: false, desc: 'true ONLY when Fred explicitly asked you to work in System Settings / Keychain / a password manager' },
+    ], side_effect: SIDE_EFFECT.READ, executor: EXECUTOR.MAIN, via: { channel: 'computer', action: 'click', raw: true },
+    preflight: true, claude_only: true, desk_only: true, permission: { ceiling: 'never' },
+    returns: '{ ok, verified (screen reacted), clicked:{label, display}, b64 (screenshot after) }',
+    note: 'A click on a Send / Delete / Pay / Submit / Merge button is confirmed with Fred first, automatically.' },
+  { name: 'computer.clickText', domain: 'computer',
+    description: 'Click on-screen text or a labelled button/link/menu item, found through the accessibility tree or OCR, in any app on any display. The best way to click.',
+    params: [
+      { name: 'text', type: 'string', required: true, desc: 'the visible text or button label, e.g. "New Note"' },
+      { name: 'app', type: 'string', required: false, desc: 'the app it is in (brought to the front first)' },
+      { name: 'display', type: 'string', required: false, desc: 'limit the search to one display' },
+      { name: 'index', type: 'number', required: false, desc: 'when several match: which one (1 = first in the list you got back)' },
+      { name: 'double', type: 'boolean', required: false },
+      { name: 'button', type: 'enum', required: false, enum: ['left', 'right'] },
+      { name: 'fred_asked_explicitly', type: 'boolean', required: false, desc: 'true ONLY when Fred explicitly asked you to work in System Settings / Keychain / a password manager' },
+    ], side_effect: SIDE_EFFECT.READ, executor: EXECUTOR.MAIN, via: { channel: 'computer', action: 'clickText', raw: true },
+    preflight: true, claude_only: true, desk_only: true, permission: { ceiling: 'never' },
+    returns: '{ ok, verified, clicked:{label, display}, b64 }  or { ok:false, ambiguous, options[] } / not found + closest texts' },
+  { name: 'computer.type', domain: 'computer',
+    description: 'Type text into the focused field of an app (long text is pasted; Fred\'s clipboard is put back). Give app to bring it to the front first.',
+    params: [
+      { name: 'text', type: 'string', required: true },
+      { name: 'app', type: 'string', required: false, desc: 'app name, e.g. "Notes"' },
+      { name: 'secret_ok', type: 'boolean', required: false, desc: 'true ONLY when Fred explicitly told you to type this password/secret' },
+      { name: 'fred_asked_explicitly', type: 'boolean', required: false, desc: 'true ONLY when Fred explicitly asked you to work in System Settings / Keychain / a password manager' },
+    ], side_effect: SIDE_EFFECT.READ, executor: EXECUTOR.MAIN, via: { channel: 'computer', action: 'type', raw: true },
+    preflight: true, claude_only: true, desk_only: true, permission: { ceiling: 'never' },
+    returns: '{ ok, verified (the text is in the field / on screen), how }',
+    note: 'Never type passwords or secrets unless Fred explicitly said so. A new line in a chat app or Terminal is confirmed first.' },
+  { name: 'computer.key', domain: 'computer',
+    description: 'Press keys / shortcuts in the front app (or app): e.g. "cmd+n", "enter", "cmd+tab", "esc", "cmd+a, delete" (comma = one after the other).',
+    params: [
+      { name: 'keys', type: 'string', required: true },
+      { name: 'app', type: 'string', required: false },
+      { name: 'fred_asked_explicitly', type: 'boolean', required: false, desc: 'true ONLY when Fred explicitly asked you to work in System Settings / Keychain / a password manager' },
+    ], side_effect: SIDE_EFFECT.READ, executor: EXECUTOR.MAIN, via: { channel: 'computer', action: 'key', raw: true },
+    preflight: true, claude_only: true, desk_only: true, permission: { ceiling: 'never' },
+    returns: '{ ok, verified (screen changed), pressed[], front_app, b64 }',
+    note: 'Enter in chat apps / Terminal / browsers, cmd+Enter, cmd+Q, Delete outside a text box are confirmed with Fred first.' },
+  { name: 'computer.scroll', domain: 'computer',
+    description: 'Scroll the front window (or at a spot of the last screenshot).',
+    params: [
+      { name: 'direction', type: 'enum', required: true, enum: ['up', 'down', 'left', 'right'] },
+      { name: 'amount', type: 'number', required: false, desc: 'lines, default 5' },
+      { name: 'x', type: 'number', required: false }, { name: 'y', type: 'number', required: false },
+      { name: 'display', type: 'string', required: false },
+    ], side_effect: SIDE_EFFECT.READ, executor: EXECUTOR.MAIN, via: { channel: 'computer', action: 'scroll', raw: true },
+    preflight: true, claude_only: true, desk_only: true, permission: { ceiling: 'never' },
+    returns: '{ ok, verified (it moved), b64 }' },
+  { name: 'computer.pasteToClaudeCode', domain: 'computer',
+    description: 'Put a brief/prompt into Fred\'s Claude Code session and send it: finds the session (Claude desktop app first, then Terminal/iTerm), checks it is idle, pastes, sends, verifies. Use ONLY when Fred asked to put something in Claude Code (his ask is the approval).',
+    params: [
+      { name: 'text', type: 'string', required: true, desc: 'the full text, exactly as Fred wants it sent' },
+      { name: 'session', type: 'string', required: false, desc: 'which session when there are several (number or name from the list you got back)' },
+      { name: 'wait_seconds', type: 'number', required: false, desc: 'when it is busy: how long to wait for it to finish (up to 900). Tell Fred you are waiting first.' },
+    ], side_effect: SIDE_EFFECT.READ, executor: EXECUTOR.MAIN, via: { channel: 'computer', action: 'pasteToClaudeCode', raw: true },
+    preflight: true, claude_only: true, desk_only: true, permission: { ceiling: 'never' },
+    returns: '{ ok, verified, session, message }  or { busy:true } / { needs_choice:true, sessions[] }' },
+
   // ═══════════════════════ CAMERA STEERING (OBSBOT Tiny 3) ═══════════════════════
   // The 'hands' beside vision.capture's 'eyes'. Real control over OSC → OBSBOT
   // Center (electron/services/camera-control.js, channel 'camera:control').
@@ -863,7 +945,8 @@ function writeTools() { return bySideEffect(SIDE_EFFECT.WRITE); }
 function isWrite(name) { const t = getTool(name); return !!t && t.side_effect === SIDE_EFFECT.WRITE; }
 function toolNames() { return TOOLS.map((t) => t.name); }
 // Tools the Planner is allowed to compose (planner_safe !== false).
-function plannerTools() { return TOOLS.filter((t) => t.planner_safe !== false); }
+// claude_only tools (computer.*) are never offered to the planner either.
+function plannerTools() { return TOOLS.filter((t) => t.planner_safe !== false && !t.claude_only); }
 // Whether Stage 4's gate must prompt before this tool runs.
 function confirmRequired(name) { const t = getTool(name); return !!t && t.confirm === true; }
 

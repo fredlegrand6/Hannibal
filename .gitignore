@@ -12,3 +12,7 @@ data/*.tmp
 data/nudges.json
 data/threads.json
 data/*.vectors.json
+
+# Hannibal's hands: the compiled helper and the action log (may hold typed text)
+native/hands/hands
+data/computer-actions.log

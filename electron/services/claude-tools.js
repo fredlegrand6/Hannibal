@@ -173,11 +173,35 @@ async function runTool(apiName, input, opts = {}) {
     return { tool: name, status: 'invalid', is_error: true, content: `Missing required parameter(s): ${missing.map((p) => p.name).join(', ')}.` };
   }
 
+  // Desk-only tools (Hannibal's hands on the Mac) never run from the phone.
+  if (tool.desk_only && !opts.desk) {
+    return { tool: name, status: 'unavailable', is_error: true, content: `${name} only works when Fred is at his desk talking to Hannibal on the Mac, not from the phone.` };
+  }
+  // Preflight (computer.*): the service looks at the real target first. It can
+  // refuse, answer straight away, or turn this one call into a confirm-first
+  // write with its own exact wording. Its resolved target rides along in params.
+  let gated = false, summary = null;
+  if (tool.preflight) {
+    if (!preflightImpl) return { tool: name, status: 'unavailable', is_error: true, content: `${name} is not available here.` };
+    let pf;
+    try { pf = (await preflightImpl(name, params, opts)) || {}; }
+    catch (e) { return { tool: name, status: 'error', is_error: true, content: `The check before ${name} failed: ${e.message}` }; }
+    if (pf.block) return { tool: name, status: 'blocked', is_error: true, content: pf.block };
+    if (pf.result) {
+      const ok = pf.result.ok !== false;
+      return { tool: name, status: ok ? 'ok' : (pf.result.stopped ? 'stopped' : 'error'), is_error: !ok, content: toolResultContent(pf.result) };
+    }
+    if (pf.extra) Object.assign(params, pf.extra);
+    if (pf.confirm) { gated = true; summary = pf.confirm; }
+  }
+
+  const sideEffect = gated ? catalog.SIDE_EFFECT.WRITE : tool.side_effect;
   const step = {
-    step: 1, tool: name, params, depends_on: [],
-    description: tool.description, side_effect: tool.side_effect,
+    step: 1, tool: name, params, depends_on: [], literal: true,
+    description: tool.description, side_effect: sideEffect,
     // Fail safe: a write is gated unless the catalog explicitly says confirm:false.
-    ...(tool.side_effect === catalog.SIDE_EFFECT.WRITE ? { confirm: tool.confirm !== false } : {}),
+    ...(sideEffect === catalog.SIDE_EFFECT.WRITE ? { confirm: gated || tool.confirm !== false } : {}),
+    ...(summary ? { summary } : {}),
   };
   let res;
   try {
@@ -195,6 +219,7 @@ async function runTool(apiName, input, opts = {}) {
 
   const rec = (res.record || []).find((r) => r.step === 1) || {};
   if (rec.ok) return { tool: name, status: 'ok', is_error: false, content: toolResultContent(rec.output) };
+  if (rec.ok === false && /Fred said stop/.test(rec.error || '')) return { tool: name, status: 'stopped', is_error: true, content: rec.error };
   if (rec.skipped && /no clear answer/.test(rec.reason || '')) {
     return { tool: name, status: 'unheard', is_error: false,
       content: "Fred's answer to the yes/no question was not heard clearly (silence or noise), so it was NOT done. He did not say no. Tell him in one short line that you didn't catch his answer and ask whether to do it; if he then says yes, call this tool again." };
@@ -207,9 +232,13 @@ async function runTool(apiName, input, opts = {}) {
   return { tool: name, status: 'error', is_error: true, content: `The action failed: ${why}` };
 }
 
+// The computer service's preflight(name, params, opts) (set by main on the Mac).
+let preflightImpl = null;
+function setPreflight(fn) { preflightImpl = typeof fn === 'function' ? fn : null; }
+
 const enabled = () => !/^(0|false|off|no)$/i.test(process.env.HANNIBAL_CLAUDE_TOOLS || '');
 
-module.exports = { toolDefinitions, runTool, setAvailableChannels, toApiName, fromApiName, exposed, enabled, stringify, toolResultContent, mediaType };
+module.exports = { toolDefinitions, runTool, setAvailableChannels, setPreflight, toApiName, fromApiName, exposed, enabled, stringify, toolResultContent, mediaType };
 
 // `node electron/services/claude-tools.js` lists what Claude can use (no app needed).
 if (require.main === module) {
