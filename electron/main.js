@@ -1014,8 +1014,19 @@ function makeIpcConfirmer(timeoutMs = 120000) {
     if (!target) { resolve(false); return; }
     const id = `cf_${step.step}_${Date.now()}`;
     const channel = `agent:confirm-response:${id}`;
-    const timer = setTimeout(() => { ipcMain.removeAllListeners(channel); resolve(false); }, timeoutMs);
-    ipcMain.once(channel, (_e, ok) => { clearTimeout(timer); resolve(!!ok); });
+    const timer = setTimeout(() => {
+      ipcMain.removeAllListeners(channel);
+      console.warn(`[gate] ${step.tool}: no answer in ${timeoutMs / 1000}s → not done`);
+      resolve({ approved: false, answer: 'unheard' });
+    }, timeoutMs);
+    // The renderer answers { approved, answer:'yes'|'no'|'unheard' } (or a bare
+    // boolean from older code). Only approved === true runs the action.
+    ipcMain.once(channel, (_e, ok) => {
+      clearTimeout(timer);
+      const ans = (ok && typeof ok === 'object') ? { approved: ok.approved === true, answer: ok.answer } : { approved: ok === true };
+      console.log(`[gate] ${step.tool}: ${ans.approved ? 'YES → running it' : `${ans.answer === 'unheard' ? 'no clear answer' : 'NO'} → not done`}`);
+      resolve(ans);
+    });
     target.webContents.send('agent:confirm-request', { id, step: step.step, tool: step.tool, summary });
   });
 }
