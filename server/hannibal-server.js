@@ -249,7 +249,15 @@ let phoneApp = null;
 if (process.env.PHONE_APP_TOKEN) {
   try {
     const { createPhoneApp } = require('./phone-app');
+    const { createPush } = require('./apns');
+    const push = createPush({
+      keyB64: process.env.APNS_KEY_B64, keyId: process.env.APNS_KEY_ID, teamId: process.env.APNS_TEAM_ID,
+      topic: process.env.APNS_TOPIC || 'com.revalisgroup.hannibal',
+      filePath: path.join(CFG.dataDir, 'push-tokens.json'),
+    });
+    console.log(`[push] ${push.configured ? `ready, ${push.count()} iPhone(s)` : 'APNS_* not set: no iPhone notifications'}`);
     phoneApp = createPhoneApp({
+      push,
       token: process.env.PHONE_APP_TOKEN,
       // Tailscale only (+ localhost for `tailscale serve` https). Never the public address.
       hosts: ['127.0.0.1', process.env.BODY_LINK_HOST || '100.99.70.113'],

@@ -69,6 +69,7 @@ final class HannibalModel {
     @ObservationIgnored private var wantRecording = false
     @ObservationIgnored private var backoff: Double = 1
     @ObservationIgnored private let liveVoice = LiveVoice()
+    @ObservationIgnored private var pushToken: String?
     @ObservationIgnored private var liveActiveAt = Date()
     @ObservationIgnored private var liveWatch: Task<Void, Never>?
     private static let historyKey = "history.v1"
@@ -186,6 +187,49 @@ final class HannibalModel {
     private func use(_ c: Connection) {
         connection = c
         api = HannibalAPI(conn: c)
+        if let t = pushToken, let api { Task { await api.registerPush(token: t) } }
+    }
+
+    // MARK: Push notifications (app closed)
+
+    func registerPush(token: String) {
+        pushToken = token
+        guard let api else { return }
+        Task { await api.registerPush(token: token) }
+    }
+
+    private static func stripAsk(_ text: String) -> String {
+        text.replacingOccurrences(of: "\n\nShall I go ahead?", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// A reminder or the brief that came in as a notification while the app was closed.
+    func showPushed(_ text: String) {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty, lines.last?.text != t else { return }
+        add(.notify, t)
+    }
+
+    /// Fred tapped a Yes/No notification: ask again in the app (the server still waits ~2 min).
+    func showPushedConfirm(id: String, text: String) {
+        guard !lines.contains(where: { $0.confirmId == id }) else { return }
+        lines.append(Line(kind: .confirm, text: Self.stripAsk(text), confirmId: id, expires: Date().addingTimeInterval(110)))
+        scheduleExpiry()
+    }
+
+    /// Yes / No pressed right on the lock screen.
+    func answerFromPush(id: String, summary: String, yes: Bool) async {
+        guard let api else { return }
+        let result = await api.confirm(id: id, yes: yes)
+        let text = Self.stripAsk(summary)
+        let outcome: String
+        switch result {
+        case .done: outcome = yes ? "Going ahead (from the lock screen)." : "Not done (from the lock screen)."
+        case .expired: outcome = "That question had already closed, so nothing new was done."
+        case .unknown: outcome = "Your answer from the lock screen may not have arrived. Check before asking again."
+        }
+        if let i = lines.firstIndex(where: { $0.confirmId == id }) { lines[i].outcome = outcome }
+        else { lines.append(Line(kind: .confirm, text: text, confirmId: id, outcome: outcome)) }
+        saveHistory()
     }
 
     // MARK: Live events (reminders, brief, Yes/No)
