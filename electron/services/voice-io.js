@@ -83,11 +83,17 @@ function createVoiceIO({ send = () => {} } = {}) {
     });
   }
 
-  async function play(bytes) {
+  // Wait for the sentence's own length plus a margin, not two minutes: a hung
+  // helper used to keep him "speaking" (deaf and silent) for that long.
+  async function play(bytes, durationMs) {
     const f = path.join(os.tmpdir(), `hannibal-say-${process.pid}-${++seq}.mp3`);
     fs.writeFileSync(f, Buffer.from(bytes));
-    try { return await request({ cmd: 'play', path: f }, 120000); }
-    finally { fs.unlink(f, () => {}); }
+    const limit = durationMs > 0 ? Math.max(6000, durationMs + 4000) : 60000;
+    try {
+      const j = await request({ cmd: 'play', path: f }, limit);
+      if (j.error === 'timeout') { log(`play hung for ${limit} ms — stopping the helper`); stop(); }
+      return j;
+    } finally { fs.unlink(f, () => {}); }
   }
 
   async function clip(ms) {
@@ -103,7 +109,7 @@ function createVoiceIO({ send = () => {} } = {}) {
 
   function register(ipcMain) {
     ipcMain.handle('vio:status', () => ({ ready }));
-    ipcMain.handle('vio:play', async (_e, bytes) => { const j = await play(bytes); return { ok: !j.error, stopped: !!j.stopped, error: j.error }; });
+    ipcMain.handle('vio:play', async (_e, bytes, ms) => { const j = await play(bytes, ms); return { ok: !j.error, stopped: !!j.stopped, error: j.error }; });
     ipcMain.handle('vio:stop', () => { stop(); return { ok: true }; });
     ipcMain.handle('vio:warm', () => { warm(); return { ok: true }; });
     ipcMain.handle('vio:release', () => { release(); return { ok: true }; });

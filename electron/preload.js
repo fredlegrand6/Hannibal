@@ -14,7 +14,7 @@ contextBridge.exposeInMainWorld('hannibal', {
   tts: (text) => ipcRenderer.invoke('voice:tts', text),
   // Voice helper (Apple echo cancelling): play his voice, cut it, and grab clean mic clips.
   vioStatus: () => ipcRenderer.invoke('vio:status'),
-  vioPlay: (bytes) => ipcRenderer.invoke('vio:play', bytes),
+  vioPlay: (bytes, ms) => ipcRenderer.invoke('vio:play', bytes, ms),
   vioStop: () => ipcRenderer.invoke('vio:stop'),
   vioWarm: () => ipcRenderer.invoke('vio:warm'),
   vioRelease: () => ipcRenderer.invoke('vio:release'),
