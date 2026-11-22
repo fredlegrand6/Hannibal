@@ -233,14 +233,22 @@ function createBriefScheduler({ send, statePath = path.join(DATA, 'proactive.jso
     const day = dayKey(d);
     if (state.lastBrief === day) return 'done-today';
     if (inFlight && inFlight.day === day && d - inFlight.since < 15 * 60000) return 'waiting';
+    // A restart forgets inFlight, so count tries on disk: at most two a day,
+    // or every restart in the morning would start a fresh brief.
+    if (!state.briefTries || state.briefTries.day !== day) state.briefTries = { day, n: 0 };
+    if (state.briefTries.n >= 2) { state.lastBrief = day; save(); return 'gave-up-today'; }
+    state.briefTries.n += 1; save();
     inFlight = { day, since: d };
     send({ kind: 'morning-brief', day, prompt: BRIEF_PROMPT });
     return 'sent';
   }
 
   // The renderer reports back. Only a spoken brief marks the day as done.
-  function done({ kind, day, ok } = {}) {
+  // `started`: he began speaking it, so it counts even if a restart or Fred
+  // cuts it short (no second brief that morning).
+  function done({ kind, day, ok, started } = {}) {
     if (kind !== 'morning-brief') return { ok: false };
+    if (started) { state.lastBrief = day; save(); return { ok: true }; }
     if (inFlight && inFlight.day === day) inFlight = null;
     if (ok) { state.lastBrief = day; save(); }
     return { ok: true };

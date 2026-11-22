@@ -184,5 +184,20 @@ async function test(name, fn) {
     assert(/mood: fine/.test(note.content));
   });
 
+  await test('morning brief: once a day, even across restarts', () => {
+    const statePath = tmp('brief');
+    const at = new Date('2026-11-22T09:00:00');
+    const mk = () => createBriefScheduler({ statePath, now: () => at, env: {}, send: () => sent++ });
+    let sent = 0;
+    let b = mk(); assert.strictEqual(b.tick(), 'sent');
+    b = mk(); assert.strictEqual(b.tick(), 'sent', 'restart: one retry');
+    b = mk(); assert.strictEqual(b.tick(), 'gave-up-today', 'no third brief');
+    assert.strictEqual(sent, 2);
+    const s2 = tmp('brief');
+    const c = createBriefScheduler({ statePath: s2, now: () => at, env: {}, send: () => {} });
+    c.tick(); c.done({ kind: 'morning-brief', day: c.state.briefTries.day, started: true });
+    assert.strictEqual(createBriefScheduler({ statePath: s2, now: () => at, env: {}, send: () => {} }).tick(), 'done-today', 'started counts');
+  });
+
   console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ''}`);
 })();

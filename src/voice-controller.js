@@ -3599,8 +3599,13 @@ RULES:
     let briefText = '';
     try {
       for (let w = 0; !isQuiet() && w < 600; w++) await new Promise((r) => setTimeout(r, 1000)); // ≤10 min
-      if (!isQuiet()) { console.log('[proactive] never got a quiet moment — main will retry'); return; }
+      // A nudge also waits until the conversation has paused for 2 minutes, so
+      // "improve your mail" never lands in the middle of a topic.
+      const between = () => Date.now() - Math.max(lastUserSpeakTs || 0, lastSpokeAt || 0) > 120000;
+      if (job.kind === 'nudge') for (let w = 0; !(isQuiet() && between()) && w < 600; w++) await new Promise((r) => setTimeout(r, 1000));
+      if (!isQuiet() || (job.kind === 'nudge' && !between())) { console.log('[proactive] never got a quiet moment — main will retry'); return; }
       console.log(`[proactive] delivering ${job.kind === 'nudge' ? 'a nudge' : 'morning brief'}`);
+      if (job.kind === 'morning-brief') { try { await window.hannibal.proactiveDone({ kind: job.kind, day: job.day, started: true }); } catch (_) {} }
       if (phase === 'listening') abortListening();   // drop the open resting turn (no STT)
       if (cfg.claudeEnabled && cfg.claudeTools) {
         setPhase('thinking');
