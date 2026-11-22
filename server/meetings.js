@@ -19,18 +19,18 @@ const crypto = require('crypto');
 const MAX_TRANSCRIPT_CHARS = 180000;      // ~3 hours of talk; longer is cut for the write-up only
 
 /** Long recordings with speakers: ElevenLabs Scribe, diarized. */
-function makeMeetingTranscriber({ apiKey, model = 'scribe_v1', fetchImpl = fetch }) {
+function makeMeetingTranscriber({ apiKey, model = 'scribe_v1', fetchImpl = fetch, diarize = true, timeoutMs = 20 * 60e3 }) {
   return async (audio, mime = 'audio/mp4') => {
     if (!apiKey) throw new Error('ELEVENLABS_API_KEY is not set');
     const type = String(mime || 'audio/mp4').split(';')[0].trim();
     const ext = (/mp4|m4a|aac/.test(type) && 'm4a') || (/webm/.test(type) && 'webm') || (/wav/.test(type) && 'wav') || (/mpeg|mp3/.test(type) && 'mp3') || 'ogg';
     const form = new FormData();
     form.append('model_id', model);
-    form.append('diarize', 'true');
+    form.append('diarize', diarize ? 'true' : 'false');
     form.append('tag_audio_events', 'false');
     form.append('file', new Blob([audio], { type }), `meeting.${ext}`);
     const r = await fetchImpl('https://api.elevenlabs.io/v1/speech-to-text', {
-      method: 'POST', headers: { 'xi-api-key': apiKey }, body: form, signal: AbortSignal.timeout(20 * 60e3),
+      method: 'POST', headers: { 'xi-api-key': apiKey }, body: form, signal: AbortSignal.timeout(timeoutMs),
     });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error((j && j.detail && (j.detail.message || j.detail)) || `speech-to-text HTTP ${r.status}`);
@@ -58,6 +58,15 @@ function speakerLines(words) {
   return lines.join('\n');
 }
 
+function followUpPrompt(summary) {
+  return [
+    'Fred just recorded a meeting and has already received this write-up:',
+    summary,
+    '',
+    'Now, briefly: for HIS OWN action items that have a date, set reminders with the reminders tool (each one asks him yes/no first). If a follow-up mail to the others makes sense, show a short draft in the language of the meeting and ask if he wants it sent; never send without his yes. If there is nothing to do, answer with just "-".',
+  ].join('\n');
+}
+
 function writeUpPrompt({ transcript, minutes, title, when }) {
   const cut = transcript.length > MAX_TRANSCRIPT_CHARS ? `${transcript.slice(0, MAX_TRANSCRIPT_CHARS)}\n[… the rest was cut]` : transcript;
   return [
@@ -67,7 +76,6 @@ function writeUpPrompt({ transcript, minutes, title, when }) {
     '2. Summary: 3 to 6 lines.',
     '3. Decisions (if any).',
     '4. Action items: who does what, by when.',
-    'Then: for Fred\'s OWN action items with a date, offer to set reminders (use the reminders tool; he answers yes/no). If a follow-up mail makes sense, offer a short draft in the language of the meeting, but do not send anything without his yes.',
     'Answer in English unless the meeting was in another language Fred would prefer.',
     '',
     'TRANSCRIPT:',
@@ -76,9 +84,11 @@ function writeUpPrompt({ transcript, minutes, title, when }) {
 }
 
 // dir: data/meetings. transcribe(buf, mime) → { transcript, text, language }.
-// writeUp(prompt) → text (the brain, with tools + Fred's yes/no). notify(text).
+// writeUp(prompt) → text (one plain Claude call: the long transcript never
+// enters the conversation history). followUp(prompt) → text (the brain with
+// tools: offers reminders / a mail draft, each on Fred's yes). notify(text).
 // remember(text) → memory store (optional).
-function createMeetings({ dir, transcribe, writeUp, notify, remember, now = () => Date.now(), log = (...a) => console.log('[meetings]', ...a) } = {}) {
+function createMeetings({ dir, transcribe, writeUp, followUp, notify, remember, now = () => Date.now(), log = (...a) => console.log('[meetings]', ...a) } = {}) {
   if (dir) { try { fs.mkdirSync(dir, { recursive: true }); } catch (_) {} }
   const file = (id) => path.join(dir, `${id}.json`);
   const load = (id) => { try { return JSON.parse(fs.readFileSync(file(id), 'utf8')); } catch (_) { return null; } };
@@ -121,6 +131,12 @@ function createMeetings({ dir, transcribe, writeUp, notify, remember, now = () =
         try { fs.unlinkSync(audioFile(m.id)); } catch (_) {}
         if (remember) remember(`Meeting "${m.title}" (${when}, ${m.minutes} min):\n${m.summary}`).catch(() => {});
         await notify(`🎙 Meeting written up\n\n${m.summary}`);
+        if (followUp) {
+          try {
+            const next = String(await followUp(followUpPrompt(m.summary)) || '').trim();
+            if (next && next !== '-') await notify(next);
+          } catch (e) { log('follow-up failed:', e.message); }
+        }
       } catch (e) {
         m.status = 'failed'; m.error = e.message; save(m);
         log('failed:', e.message);
@@ -165,4 +181,4 @@ function createMeetings({ dir, transcribe, writeUp, notify, remember, now = () =
   return { accept, recent, find, retry, _all: all };
 }
 
-module.exports = { createMeetings, makeMeetingTranscriber, speakerLines, writeUpPrompt };
+module.exports = { createMeetings, makeMeetingTranscriber, speakerLines, writeUpPrompt, followUpPrompt };

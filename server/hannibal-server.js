@@ -117,10 +117,12 @@ const nav = createNav({
 });
 // Meeting memory: recordings from the iPhone → transcript + write-up (server/meetings.js).
 const { createMeetings, makeMeetingTranscriber } = require('./meetings');
+const { createInterpreter } = require('./interpreter');
 const meetings = createMeetings({
   dir: path.join(CFG.dataDir, 'meetings'),
   transcribe: makeMeetingTranscriber({ apiKey: process.env.ELEVENLABS_API_KEY, model: process.env.ELEVENLABS_STT_MODEL || 'scribe_v1' }),
-  writeUp: (prompt) => { if (!phoneApp) throw new Error('the phone app is off'); return phoneApp.think(prompt); },
+  writeUp: (prompt) => claudeBrain.summarizeForJournal(prompt, 'You write clear, short meeting notes for Fred (Revalis Group). Plain text, no markdown tables.'),
+  followUp: (prompt) => (phoneApp ? phoneApp.think(prompt) : ''),
   notify: (text) => tellFred(text),
   remember: (text) => memory.store(text, { type: 'meeting', channel: 'phone-app' }),
 });
@@ -311,6 +313,12 @@ if (process.env.PHONE_APP_TOKEN) {
       onReset: () => claudeBrain.resetHistory(),
       places,
       meetings,
+      interpreter: createInterpreter({
+        transcribe: makeMeetingTranscriber({ apiKey: process.env.ELEVENLABS_API_KEY, model: process.env.ELEVENLABS_STT_MODEL || 'scribe_v1', diarize: false, timeoutMs: 60000 }),
+        // One plain Claude call (not the conversation: nothing is kept).
+        translate: (system, user) => claudeBrain.summarizeForJournal(user, system),
+        speak: voiceMp3,
+      }),
       // A place reminder fired on the phone (it showed it already), or the place wasn't found.
       onPlace: (what, r, err) => {
         if (what === 'failed') tellFred(`📍 I couldn't find "${r.place}" on the map, so I can't remind you there: ${r.message}. Tell me the address and I'll set it again.`).catch(() => {});

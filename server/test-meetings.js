@@ -25,7 +25,7 @@ const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'meet-'));
 
   await test('the write-up prompt asks for summary, actions, and yes before reminders/mail', () => {
     const p = writeUpPrompt({ transcript: 'Speaker 1: hi', minutes: 12, title: 'HTS', when: '2026-11-23 10:00' });
-    assert.match(p, /Action items/); assert.match(p, /offer to set reminders/); assert.match(p, /do not send anything without his yes/); assert.match(p, /Speaker 1: hi/);
+    assert.match(p, /Action items/); assert.match(p, /Speaker 1: hi/);
   });
 
   await test('a recording is written up, told to Fred, remembered and findable', async () => {
@@ -34,6 +34,7 @@ const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'meet-'));
       dir,
       transcribe: async (buf, mime) => ({ transcript: `Speaker 1: HTS wants the price list by Friday (${buf.length} bytes, ${mime})\nSpeaker 2: fine`, language: 'en' }),
       writeUp: async (prompt) => { assert.match(prompt, /HTS wants the price list/); return 'HTS pricing call\nSummary: send prices Friday.'; },
+      followUp: async (p) => { assert.match(p, /HTS pricing call/); assert.match(p, /never send without his yes/); return 'Shall I remind you Friday 9:00 to send the prices?'; },
       notify: async (t) => told.push(t), remember: async (t) => kept.push(t), now: () => Date.parse('2026-11-23T09:00:00Z'),
     });
     const { id, done } = m.accept(Buffer.from('audio'), { mime: 'audio/mp4', seconds: 600 });
@@ -42,6 +43,7 @@ const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'meet-'));
     assert.strictEqual(r.status, 'done');
     assert.strictEqual(r.title, 'HTS pricing call');
     assert.match(told[0], /Meeting written up\n\nHTS pricing call/);
+    assert.match(told[1], /remind you Friday/);
     assert.match(kept[0], /HTS pricing call/);
     assert.ok(!fs.existsSync(path.join(dir, `${id}.audio`)), 'audio removed once done');
     const f = m.find('price list');

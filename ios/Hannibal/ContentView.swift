@@ -90,6 +90,7 @@ struct ChatView: View {
             VStack(spacing: 0) {
                 header
                 if let since = model.meetingSince { meetingBar(since) }
+                if let p = model.interpreter { interpreterBar(p) }
                 orb
                 conversation
                 inputBar
@@ -141,6 +142,11 @@ struct ChatView: View {
             }
             .accessibilityLabel(model.voiceAlways ? "Read every answer aloud" : "Only speak when I talk")
             Menu {
+                Menu {
+                    ForEach(HannibalModel.interpreterLanguages, id: \.code) { lang in
+                        Button(lang.code == "en" ? "English (I speak Dutch)" : lang.name) { model.startInterpreter(theirs: lang.code) }
+                    }
+                } label: { Label("Interpreter", systemImage: "character.bubble") }
                 Button("Clear conversation", role: .destructive) { model.clearChat() }
                 Button("Change server link") { model.forgetLink() }
             } label: { Image(systemName: "ellipsis.circle") }
@@ -148,6 +154,23 @@ struct ChatView: View {
         .foregroundStyle(Palette.cyan)
         .padding(.horizontal, 16)
         .padding(.top, 6)
+    }
+
+    /// While the interpreter runs: which languages; tap = stop.
+    private func interpreterBar(_ p: (mine: String, theirs: String)) -> some View {
+        Button { model.stopLive() } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "character.bubble.fill")
+                Text("Interpreter  \(HannibalModel.languageName(p.mine)) ⇄ \(HannibalModel.languageName(p.theirs))").font(.subheadline.weight(.semibold))
+                Spacer()
+                Text("Stop").font(.subheadline.bold())
+            }
+            .foregroundStyle(Palette.bg)
+            .padding(.horizontal, 14).padding(.vertical, 10)
+            .background(Palette.gold, in: RoundedRectangle(cornerRadius: 12))
+            .padding(.horizontal, 16).padding(.top, 8)
+        }
+        .accessibilityLabel("Stop the interpreter")
     }
 
     /// While a meeting is recorded: red bar with the time; tap = stop and send.

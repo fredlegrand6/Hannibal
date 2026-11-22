@@ -13,6 +13,17 @@ struct Reply: Decodable {
     var spoken: Bool?
 }
 
+/// The interpreter's answer to one sentence (/api/interpret).
+struct Interpretation: Decodable {
+    var ok: Bool?
+    var heard: String?
+    var from: String?
+    var to: String?
+    var text: String?
+    var audio: String?      // mp3, base64: his voice saying the translation
+    var error: String?
+}
+
 /// What the home / lock screen widget shows (/api/glance).
 struct Glance: Codable {
     struct Event: Codable, Hashable { var title: String; var ts: Double; var endTs: Double?; var allDay: Bool? }
@@ -117,6 +128,15 @@ final class HannibalAPI {
     /// Live talk with the camera on: the sentence and the current frame together.
     func voiceLook(_ audio: Data, mime: String, jpeg: Data) async throws -> Reply {
         try await reply(request("api/voice-look", body: jsonBody(["audio": audio.base64EncodedString(), "mime": mime, "image": jpeg.base64EncodedString()])))
+    }
+
+    /// One sentence for the interpreter: translated into the other side's language.
+    func interpret(_ audio: Data, mime: String, mine: String, theirs: String) async throws -> Interpretation {
+        let (data, resp) = try await session.data(for: request("api/interpret", body: jsonBody(["audio": audio.base64EncodedString(), "mime": mime, "mine": mine, "theirs": theirs]), timeout: 60))
+        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        if code == 401 || code == 403 { throw APIError.unauthorized }
+        if let r = try? JSONDecoder().decode(Interpretation.self, from: data) { return r }
+        throw APIError.status(code)
     }
 
     func look(jpegBase64: String, text: String) async throws -> Reply {

@@ -301,6 +301,18 @@ function createPhoneApp(opts = {}) {
       return;
     }
 
+    // Interpreter: one sentence of audio → translated text + his voice (nothing stored).
+    if (req.method === 'POST' && url.pathname === '/api/interpret') {
+      if (!opts.interpreter) { json(res, 501, { ok: false, error: 'The interpreter is not set up on the server.' }); return; }
+      let body = {};
+      try { body = JSON.parse((await readBody(req)).toString('utf8')); } catch (_) {}
+      const audio = Buffer.from(String(body.audio || ''), 'base64');
+      if (!audio.length) { json(res, 400, { ok: false, error: 'No audio.' }); return; }
+      try { json(res, 200, await opts.interpreter.interpret(audio, String(body.mime || 'audio/wav'), { mine: body.mine, theirs: body.theirs })); }
+      catch (e) { log('interpret failed:', e.message); json(res, 500, { ok: false, error: e.message }); }
+      return;
+    }
+
     // A recorded meeting (raw audio). Answered at once; the write-up comes as a message.
     if (req.method === 'POST' && url.pathname === '/api/meeting') {
       if (!opts.meetings) { json(res, 501, { ok: false, note: 'Meeting memory is not set up on the server.' }); return; }
