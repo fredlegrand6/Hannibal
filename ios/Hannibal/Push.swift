@@ -45,6 +45,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         let no = UNNotificationAction(identifier: "NO", title: "No", options: [.destructive])
         let confirm = UNNotificationCategory(identifier: "CONFIRM", actions: [yes, no], intentIdentifiers: [], options: [])
         center.setNotificationCategories([confirm])
+        PlaceWatcher.shared.start()          // geofence events, also when iOS relaunched us for one
+        Task { await PlaceWatcher.shared.sync() }
         return true
     }
 
@@ -60,6 +62,13 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
         let hex = deviceToken.map { String(format: "%02x", $0) }.joined()
         Task { @MainActor in self.model?.registerPush(token: hex) }
+    }
+
+    /// Silent push from the server: the place reminders changed.
+    func application(_ application: UIApplication, didReceiveRemoteNotification userInfo: [AnyHashable: Any]) async -> UIBackgroundFetchResult {
+        guard (userInfo["sync"] as? String) == "places" else { return .noData }
+        await PlaceWatcher.shared.sync()
+        return .newData
     }
 
     func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {

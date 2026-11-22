@@ -23,6 +23,15 @@ struct Glance: Codable {
     var waiting: Int?
 }
 
+/// A place reminder the phone watches (/api/places).
+struct PlaceReminder: Codable, Hashable {
+    var id: String
+    var message: String
+    var place: String
+    var on: String          // "arrive" | "leave"
+}
+private struct PlaceList: Decodable { var reminders: [PlaceReminder] }
+
 struct HannibalEvent: Decodable {
     var type: String
     var id: String?
@@ -136,6 +145,23 @@ final class HannibalAPI {
         if code == 401 || code == 403 { throw APIError.unauthorized }
         guard code == 200 else { throw APIError.status(code) }
         return try JSONDecoder().decode(Glance.self, from: data)
+    }
+
+    func places() async throws -> [PlaceReminder] {
+        let (data, resp) = try await session.data(for: request("api/places", method: "GET", contentType: nil, timeout: 20))
+        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        if code == 401 || code == 403 { throw APIError.unauthorized }
+        guard code == 200 else { throw APIError.status(code) }
+        return try JSONDecoder().decode(PlaceList.self, from: data).reminders
+    }
+
+    func placeFired(_ id: String) async -> Bool {
+        guard let r = try? await session.data(for: request("api/places/fired", body: jsonBody(["id": id]), timeout: 20)) else { return false }
+        return (r.1 as? HTTPURLResponse)?.statusCode == 200
+    }
+
+    func placeFailed(_ id: String, error: String) async {
+        _ = try? await session.data(for: request("api/places/failed", body: jsonBody(["id": id, "error": error]), timeout: 20))
     }
 
     func registerPush(token: String) async {

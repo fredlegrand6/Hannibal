@@ -17,6 +17,7 @@ const C = { cookie: `hannibal_k=${TOKEN}` };
 let toolCalls = [];
 let lastPayload = null;
 const voiceDrops = [];
+const placeEvents = [];
 const app = createPhoneApp({
   token: TOKEN, hosts: ['127.0.0.1'], port: PORT, persona: 'P', log: () => {},
   chat: async (payload, _on, { runTool }) => {
@@ -29,6 +30,8 @@ const app = createPhoneApp({
   speak: async (t) => Buffer.from(`mp3:${t}`),
   status: () => ({ mac: true }),
   onVoiceDrop: (d) => voiceDrops.push(d),
+  places: (() => { const { createPlaceReminders } = require('./place-reminders'); return createPlaceReminders({}); })(),
+  onPlace: (what, r) => placeEvents.push([what, r.message]),
   glance: async () => ({
     events: [{ title: 'Past', ts: Date.now() - 7200000, endTs: Date.now() - 3600000 },
       { title: 'Lunch with Jay', ts: Date.now() + 3600000, endTs: Date.now() + 7200000 },
@@ -100,6 +103,21 @@ const app = createPhoneApp({
     assert.deepStrictEqual(j.events.map((e) => e.title), ['Now', 'Lunch with Jay']);
     assert.deepStrictEqual(j.reminders.map((r) => r.message), ['Call Gaian']);
     assert.strictEqual(j.waiting, 0);
+  });
+
+  await test('place reminders: the phone lists them and reports fired / not found', async () => {
+    assert.strictEqual((await fetch(`${base}/api/places`)).status, 401);
+    const a = app._places.add('Buy milk', 'Bussum');
+    const b = app._places.add('Call Jay', 'Atlantis');
+    const list = await (await fetch(`${base}/api/places`, { headers: C })).json();
+    assert.deepStrictEqual(list.reminders.map((r) => r.message), ['Buy milk', 'Call Jay']);
+    const f = await (await fetch(`${base}/api/places/fired`, { method: 'POST', headers: C, body: JSON.stringify({ id: a.id }) })).json();
+    assert.strictEqual(f.ok, true);
+    const again = await (await fetch(`${base}/api/places/fired`, { method: 'POST', headers: C, body: JSON.stringify({ id: a.id }) })).json();
+    assert.strictEqual(again.ok, false);
+    await fetch(`${base}/api/places/failed`, { method: 'POST', headers: C, body: JSON.stringify({ id: b.id, error: 'not found' }) });
+    assert.deepStrictEqual(placeEvents, [['fired', 'Buy milk'], ['failed', 'Call Jay']]);
+    assert.deepStrictEqual((await (await fetch(`${base}/api/places`, { headers: C })).json()).reminders, []);
   });
 
   await test('a photo needs the key', async () => {

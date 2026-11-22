@@ -357,6 +357,8 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Hannibal;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Hannibal looks at the photos you take for him, and through the live camera while you talk.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Hannibal listens while you hold the mic button or talk with him live.";
+				INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription = "For reminders like \"when I get home\" or \"when I land in Ibiza\": the phone watches only those places, even with the app closed.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "For reminders like \"when I get home\": the phone watches only the places you ask about.";
 				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -389,6 +391,8 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Hannibal;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Hannibal looks at the photos you take for him, and through the live camera while you talk.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Hannibal listens while you hold the mic button or talk with him live.";
+				INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription = "For reminders like \"when I get home\" or \"when I land in Ibiza\": the phone watches only those places, even with the app closed.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "For reminders like \"when I get home\": the phone watches only the places you ask about.";
 				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;

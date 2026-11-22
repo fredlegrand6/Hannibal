@@ -336,6 +336,9 @@ final class HannibalModel {
             backoff = 1
             expireOldConfirms()          // a close may have been missed while away
             WidgetCenter.shared.reloadAllTimelines()
+            Task { await PlaceWatcher.shared.sync() }
+        case "places":
+            Task { await PlaceWatcher.shared.sync() }
         case "notify":
             guard let t = ev.text, !t.isEmpty else { return }
             WidgetCenter.shared.reloadAllTimelines()

@@ -103,7 +103,25 @@ function createPush(opts = {}) {
     return ok;
   }
 
-  return { configured, register, notify, count: () => tokens.length, _tokens: () => tokens };
+  /** Silent push: wakes the app in the background to sync (no banner). */
+  async function wake(data = {}) {
+    if (!configured || !tokens.length) return 0;
+    const payload = JSON.stringify({ aps: { 'content-available': 1 }, ...data });
+    let ok = 0;
+    for (const t of [...tokens]) {
+      const r = await send({
+        host: HOSTS[t.env] || HOSTS.sandbox,
+        path: `/3/device/${t.token}`,
+        headers: { authorization: `bearer ${bearer()}`, 'apns-topic': topic, 'apns-push-type': 'background', 'apns-priority': '5', 'content-type': 'application/json' },
+        body: payload,
+      });
+      if (r.status === 200) ok += 1;
+      else log(`silent push to …${t.token.slice(-6)} failed: ${r.status} ${r.body || r.error || ''}`);
+    }
+    return ok;
+  }
+
+  return { configured, register, notify, wake, count: () => tokens.length, _tokens: () => tokens };
 }
 
 module.exports = { createPush, makeJwt };

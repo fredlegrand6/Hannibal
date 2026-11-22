@@ -100,6 +100,12 @@ claudeBrain.setThreads(threads);
 claudeBrain.setJournal(journal, { liveFile: path.join(CFG.dataDir, 'conversation-live.json'), whereName: process.env.HANNIBAL_WHERE || 'phone' });
 
 const reminders = createReminderTools({ filePath: path.join(CFG.dataDir, 'reminders.json') });
+// Arrive/leave reminders: the iPhone app watches the places (server/place-reminders.js).
+const { createPlaceReminders } = require('./place-reminders');
+const places = createPlaceReminders({ filePath: path.join(CFG.dataDir, 'place-reminders.json'), onChange: () => { if (phoneApp) phoneApp.placesChanged(); } });
+ipc.handle('reminders:place', (_e, message, place, on) => places.add(message, place, on));
+ipc.handle('reminders:places', () => places.upcoming());
+ipc.handle('reminders:cancelPlace', (_e, query) => places.cancel(query));
 ipc.handle('reminders:add', (_e, message, at) => reminders.add(message, at));
 // Reminders set at the desk live on the Mac: when it is linked, both lists count.
 async function macUpcoming() {
@@ -280,6 +286,12 @@ if (process.env.PHONE_APP_TOKEN) {
         return { events: (cal && cal.ok && cal.events) || [], reminders: (rem && rem.reminders) || [] };
       },
       onReset: () => claudeBrain.resetHistory(),
+      places,
+      // A place reminder fired on the phone (it showed it already), or the place wasn't found.
+      onPlace: (what, r, err) => {
+        if (what === 'failed') tellFred(`📍 I couldn't find "${r.place}" on the map, so I can't remind you there: ${r.message}. Tell me the address and I'll set it again.`).catch(() => {});
+        else console.log('[places] fired:', r.message, '@', r.place);
+      },
     });
     phoneApp.start();
   } catch (e) { console.warn('[phone] app disabled:', e.message); phoneApp = null; }
@@ -366,6 +378,10 @@ if (process.env.BODY_LINK_TOKEN) {
         'phone.notify': async ({ text, voice } = {}) => { await tellFred(String(text || ''), { voice: !!voice }); return { ok: true }; },
         // The desk moves or deletes a calendar event whose reminder was set here (from the phone).
         'reminders.linked': () => ({ reminders: reminders.upcoming().reminders.filter((r) => r.eventId) }),
+        // Place reminders set at the desk live here (the phone watches them).
+        'reminders.place': ({ message, place, on } = {}) => places.add(message, place, on),
+        'reminders.places': () => places.upcoming(),
+        'reminders.cancelPlace': ({ query } = {}) => places.cancel(query),
         'reminders.cancelId': ({ id } = {}) => reminders.cancel(String(id || '')),
         'reminders.retime': ({ id, ts } = {}) => reminders.retime(String(id || ''), Number(ts)),
       },

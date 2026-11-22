@@ -224,6 +224,23 @@ function createPhoneApp(opts = {}) {
       return;
     }
 
+    // Place reminders: the iPhone app turns these into geofences, then says
+    // when one fired or a place couldn't be found (opts.places, see place-reminders.js).
+    if (url.pathname === '/api/places' && req.method === 'GET') {
+      json(res, 200, opts.places ? opts.places.upcoming() : { ok: true, reminders: [] });
+      return;
+    }
+    if ((url.pathname === '/api/places/fired' || url.pathname === '/api/places/failed') && req.method === 'POST') {
+      let body = {};
+      try { body = JSON.parse((await readBody(req, 4096)).toString('utf8')); } catch (_) {}
+      if (!opts.places || !body.id) { json(res, 400, { ok: false }); return; }
+      const fired = url.pathname.endsWith('fired');
+      const r = fired ? opts.places.fired(body.id) : opts.places.failed(body.id, body.error);
+      if (r && opts.onPlace) { try { opts.onPlace(fired ? 'fired' : 'failed', r, body.error); } catch (_) {} }
+      json(res, 200, { ok: !!r });
+      return;
+    }
+
     if (req.method === 'POST' && url.pathname === '/api/speak') {
       if (!opts.speak) { res.writeHead(501); res.end(); return; }
       try {
@@ -293,7 +310,13 @@ function createPhoneApp(opts = {}) {
     return clients.size;
   }
 
-  return { start, stop, notify, handle, _confirmer: confirmer, _pending: pending };
+  /** Place reminders changed: tell an open app now, wake a closed one quietly. */
+  function placesChanged() {
+    push({ type: 'places' });
+    if (!clients.size && canPush() && opts.push.wake) opts.push.wake({ sync: 'places' }).catch((e) => log('silent push failed:', e.message));
+  }
+
+  return { start, stop, notify, placesChanged, handle, _confirmer: confirmer, _pending: pending, _places: opts.places };
 }
 
 module.exports = { createPhoneApp, PHONE_APP_CONTEXT };

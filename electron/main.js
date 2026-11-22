@@ -477,6 +477,16 @@ ipcMain.handle('voice:who', async (_e, n) => {
 ipcMain.handle('room:people', () => { try { return faceFollow.people(); } catch (_) { return null; } });
 
 // System metrics, calendar, mail and web live in services/info-handlers.js
+// Place reminders ("when I get home / land in Ibiza / leave the office") live
+// on the server, because Fred's iPhone app watches the places. The desk passes
+// them on while it is linked.
+const viaServer = (method, params) => (linked()
+  ? bodyLink.request(method, params).catch((e) => ({ ok: false, error: `The server didn't answer: ${e.message}` }))
+  : Promise.resolve({ ok: false, error: 'Place reminders live on the server, and the desk is not linked to it right now. Ask me on the phone or Telegram.' }));
+ipcMain.handle('reminders:place', (_e, message, place, on) => viaServer('reminders.place', { message, place, on }));
+ipcMain.handle('reminders:places', () => viaServer('reminders.places', {}));
+ipcMain.handle('reminders:cancelPlace', (_e, query) => viaServer('reminders.cancelPlace', { query }));
+
 // (shared with the always-on server, server/hannibal-server.js).
 // Reminders linked to calendar events (booked "with a reminder 15 minutes
 // before"): the desk's own list, plus the server's while linked (one booked
