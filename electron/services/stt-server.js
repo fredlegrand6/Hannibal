@@ -19,7 +19,16 @@
 //
 // Run: node electron/services/stt-server.js   (main.js starts it)
 // Env: WHISPER_MODEL, STT_PORT (8765), STT_ENGINE_PORT (8767),
-//      WHISPER_SERVER_BIN, FFMPEG, HANNIBAL_STT_PROMPT, HANNIBAL_SPEAKER_CHECK=1
+//      WHISPER_SERVER_BIN, FFMPEG, HANNIBAL_STT_PROMPT
+//
+// Who is talking (speaker-id.js), same server:
+//   GET  /speaker/status          enrolled? how many sentences, the sentences to read
+//   POST /speaker/enrol/start     begin (or redo) learning Fred's voice
+//   POST /speaker/enrol/sample    one recorded sentence (audio body)
+//   POST /speaker/enrol/finish    save the voiceprint      POST /speaker/enrol/cancel
+//   POST /speaker/forget          delete the voiceprint
+//   POST /speaker/log             the renderer's decision for one line (JSON body)
+//   GET  /speaker/recent?n=20     recent tags, for debugging
 'use strict';
 const http = require('http');
 const fs = require('fs');
@@ -137,15 +146,20 @@ function toWav16k(buf) {
   });
 }
 
-// Optional: only answer Fred's voice (old HoloAssistant voiceprint check).
-function speakerOk(wav) {
-  const print = '/Users/Shared/HoloAssistant/voiceprint/fred_voiceprint.pt';
-  if (process.env.HANNIBAL_SPEAKER_CHECK !== '1' || !fs.existsSync(print)) return true;
-  const f = path.join(os.tmpdir(), `hannibal-spk-${Date.now()}.wav`);
-  fs.writeFileSync(f, wav);
-  const r = require('child_process').spawnSync('/opt/homebrew/bin/python3', ['/Users/Shared/HoloAssistant/ui/verify-speaker.py', f], { timeout: 15000 });
-  fs.unlink(f, () => {});
-  return r.status !== 1;
+// Who is talking (speaker-id.js): every clip is also compared with Fred's
+// enrolled voice and tagged fred / other / unknown. The old HoloAssistant
+// voiceprint check (HANNIBAL_SPEAKER_CHECK, wav2vec2, dropped "not Fred" lines)
+// is gone: it was broken on the Mac's torchaudio and it threw lines away;
+// now nothing is dropped here, the renderer decides what to do with a tag.
+const { createSpeakerId, createPythonEmbedder } = require('./speaker-id');
+let speaker = null, embedder = null;
+function getSpeaker() {
+  if (!speaker) {
+    embedder = createPythonEmbedder({ log: (...a) => log('[who]', ...a) });
+    speaker = createSpeakerId({ embed: embedder.embed, log: (...a) => log('[who]', ...a) });
+    if (speaker.status().enrolled) embedder.start();   // warm the model up front
+  }
+  return speaker;
 }
 
 async function inference(wav, language, verbose) {
@@ -173,7 +187,9 @@ async function transcribe(audio, language, hint, deps = {}) {
   if (wav.length < 16000 + 22400) return { text: '', ms: Date.now() - t0 };     // < ~0.5 s of audio
   const heard = filter.audioVerdict(wav);
   if (!heard.keep) { drop({ reason: 'silence', detail: heard.detail }); return { text: '', ms: Date.now() - t0, dropped: 'silence' }; }
-  if (!deps.inference && !speakerOk(wav)) { log('speaker rejected (not Fred)'); return { text: '', ms: Date.now() - t0 }; }
+  // Who is talking runs alongside Whisper (≈30 ms), so it adds no wait.
+  const who = deps.speaker !== undefined ? deps.speaker : (deps.inference ? null : getSpeaker());
+  const whoP = who ? who.tag(wav).catch(() => ({ tag: 'unknown', score: 0, why: 'error' })) : Promise.resolve(null);
   if (!deps.inference && !(await waitEngine())) throw new Error('speech engine not ready');
   let j; let used = language;
   if (language !== 'auto') {
@@ -191,7 +207,42 @@ async function transcribe(audio, language, hint, deps = {}) {
   }
   const v = filter.judge(j, { clean: cleanTranscript, prompt: PROMPT });
   for (const d of v.dropped) drop(d);
-  return { text: v.text, confidence: v.confidence, ms: Date.now() - t0, language: used, dropped: !v.text && v.dropped.length ? v.dropped[0].reason : undefined };
+  const spk = await whoP;
+  return { text: v.text, confidence: v.confidence, ms: Date.now() - t0, language: used, speaker: spk || undefined, dropped: !v.text && v.dropped.length ? v.dropped[0].reason : undefined };
+}
+
+// /speaker/* routes. deps lets the tests use a fake speaker store and no ffmpeg.
+function speakerRoute(req, res, url, send, deps = {}) {
+  const who = deps.speaker || getSpeaker();
+  const toWav = deps.toWav || toWav16k;
+  const p = url.pathname;
+  const body = () => new Promise((resolve) => { const c = []; req.on('data', (d) => c.push(d)); req.on('end', () => resolve(Buffer.concat(c))); });
+  const run = async () => {
+    if (req.method === 'GET' && p === '/speaker/status') return send(200, who.status());
+    if (req.method === 'GET' && p === '/speaker/recent') return send(200, who.recent(Number(url.searchParams.get('n')) || 20));
+    if (req.method !== 'POST') return send(404, { ok: false, error: 'not found' });
+    if (p === '/speaker/enrol/start') {
+      // Load the voice model first (the very first time it is downloaded, ~80 MB).
+      const ready = deps.speaker ? true : (embedder ? await embedder.ready() : false);
+      return send(200, { ...who.enrolStart(), modelReady: ready });
+    }
+    if (p === '/speaker/enrol/cancel') return send(200, who.enrolCancel());
+    if (p === '/speaker/enrol/finish') return send(200, who.enrolFinish());
+    if (p === '/speaker/forget') return send(200, who.forget());
+    if (p === '/speaker/enrol/sample') {
+      const wav = await toWav(await body());
+      const heard = filter.audioVerdict(wav);
+      if (!heard.keep) return send(200, { ok: false, why: 'silence' });
+      return send(200, await who.enrolAdd(wav));
+    }
+    if (p === '/speaker/log') {
+      let d = {};
+      try { d = JSON.parse(String(await body()) || '{}'); } catch (_) {}
+      return send(200, { ok: true, entry: who.record(d) });
+    }
+    return send(404, { ok: false, error: 'not found' });
+  };
+  return run().catch((e) => send(500, { ok: false, error: e.message }));
 }
 
 function createServer() {
@@ -203,6 +254,7 @@ function createServer() {
     if (req.method === 'OPTIONS') { res.writeHead(200); res.end(); return; }
     const url = new URL(req.url, `http://127.0.0.1:${PORT}`);
     if (req.method === 'GET' && url.pathname === '/health') return send(200, { status: 'ok', engine: 'hannibal-stt', model: path.basename(model), ready: engineReady });
+    if (url.pathname.startsWith('/speaker/')) return speakerRoute(req, res, url, send);
     if (req.method !== 'POST' || url.pathname !== '/transcribe') { res.writeHead(404); res.end('Not found'); return; }
     let language = (url.searchParams.get('language') || 'en').toLowerCase().trim();
     if (!ALLOWED_LANGS.has(language)) language = 'en';
@@ -211,9 +263,9 @@ function createServer() {
     req.on('data', (c) => chunks.push(c));
     req.on('end', async () => {
       try {
-        const { text, ms, language: used, confidence, dropped } = await transcribe(Buffer.concat(chunks), language, hint);
-        log(`✅ Transcript (${ms} ms, ${used || language}, ${confidence || dropped || 'empty'}): "${text}"`);
-        send(200, { success: true, transcript: text, confidence: confidence || null, dropped: dropped || null });
+        const { text, ms, language: used, confidence, dropped, speaker: spk } = await transcribe(Buffer.concat(chunks), language, hint);
+        log(`✅ Transcript (${ms} ms, ${used || language}, ${confidence || dropped || 'empty'}${spk ? `, ${spk.tag} ${spk.score}` : ''}): "${text}"`);
+        send(200, { success: true, transcript: text, confidence: confidence || null, dropped: dropped || null, language: used || null, speaker: spk || null });
       } catch (e) {
         log('❌', e.message);
         send(500, { success: false, error: e.message });
@@ -230,4 +282,4 @@ if (require.main === module) {
   process.stdout.on('error', () => {}); process.stderr.on('error', () => {});
 }
 
-module.exports = { pickModel, cleanTranscript, pickLanguage, transcribe, PROMPT };
+module.exports = { pickModel, cleanTranscript, pickLanguage, transcribe, speakerRoute, PROMPT };

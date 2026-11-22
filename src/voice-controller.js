@@ -36,7 +36,12 @@ const SYSTEM_PROMPT =
   "volume up or down, next) you may just do it, but say what you understood. Never read a " +
   "mood or feeling into a short, garbled or unsure fragment: ask a neutral question first. " +
   "Never send, delete, book or change anything from an unsure line without first saying " +
-  "back what you understood.";
+  "back what you understood. " +
+  // Who is talking (src/addressee.js): Fred talks to other people in the room too.
+  "Each spoken turn's notes also say WHO spoke (Fred, someone else, or unknown) and whether " +
+  "the line seemed meant for you. Never treat a guest's words as Fred's, never read Fred's " +
+  "mood from a line that was not clearly his and for you, and answer Fred in English unless " +
+  "he asked for another language.";
 
 // ── Qdrant vector memory ────────────────────────────────────────────────────
 // GEX131 runs Qdrant with the hannibal_memory collection (768-dim, nomic-embed-text).
@@ -208,6 +213,13 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   // to English; we only update when detectLanguage gives a non-default answer
   // OR when the message is long enough that "English by default" is genuine.
   let currentLanguage = 'english';
+  // The language he ANSWERS in (src/addressee.js): English to Fred, whatever he
+  // is speaking, until Fred clearly asks ("speak Dutch", "antwoord in het Frans").
+  // currentLanguage above stays what Fred is speaking (for the ears).
+  let replyLanguage = 'english';
+  let turnWho = null;            // this turn's who/for-me decision (null = typed or unknown)
+  let speakerEnrolled = false;   // Fred's voice learned? (asked from the speech server)
+  let enrolState = null;         // { step, ok } while "learn my voice" runs
   function updateLanguage(text) {
     const detected = detectLanguage(text);
     const words = String(text || '').trim().split(/\s+/).filter(Boolean).length;
@@ -341,9 +353,15 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     // persona language) doesn't get a redundant line. The LLM honors this for
     // the spoken reply; ElevenLabs Daniel + eleven_multilingual_v2 already
     // adapts pronunciation, no model switch needed.
-    const langLine = (currentLanguage && currentLanguage !== 'english')
-      ? ` Fred is speaking ${currentLanguage.charAt(0).toUpperCase() + currentLanguage.slice(1)}. Respond in the same language.`
-      : '';
+    // English to Fred by default; another language only when Fred asked for it,
+    // or for a guest who talks to Hannibal directly (that answer only).
+    const cap = (l) => l.charAt(0).toUpperCase() + l.slice(1);
+    const outLang = turnWho && turnWho.guest ? turnWho.replyLanguage : replyLanguage;
+    const langLine = outLang && outLang !== 'english'
+      ? ` Reply in ${cap(outLang)}${turnWho && turnWho.guest ? ' (a guest is talking to you in it)' : ' (Fred asked you to)'}.`
+      : (currentLanguage && currentLanguage !== 'english'
+        ? ` Fred is speaking ${cap(currentLanguage)}, but reply in English (his default) unless he asks you to switch.`
+        : '');
     return `${base} ${persona}${moodLine}${hStateLine}${langLine}${care}\n`;
   }
 
@@ -491,7 +509,12 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   // per heard/typed turn; `emitAssistant` streams the growing reply (done=false) and
   // fires a final done=true. Both are no-ops if the host didn't supply a handler.
   const emitUser = (text) => { try { onUser && onUser(text); } catch (_) {} };
-  const emitAssistant = (text, done) => { try { onAssistant && onAssistant(text, done); } catch (_) {} };
+  // His last finished line, so "is Fred answering my question?" can be told (src/addressee.js).
+  let lastAssistantAsked = false;
+  const emitAssistant = (text, done) => {
+    if (done) lastAssistantAsked = /\?\s*["'”’)]?\s*$/.test(String(text || '').trim());
+    try { onAssistant && onAssistant(text, done); } catch (_) {}
+  };
   // names the backend driving the current turn (fast/heavy model, vision model, or
   // 'system' for a local action) so the UI can show which LLM is in use.
   const emitModel = (name) => { try { onModel && onModel(name); } catch (_) {} };
@@ -770,11 +793,130 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
   // ISO codes (the heuristic emits 'dutch'/'french'/'english').
   const LANG_CODE = { dutch: 'nl', french: 'fr', english: 'en', spanish: 'es' };
   const sttCode = () => (cfg.sttLanguage === 'follow' ? (LANG_CODE[currentLanguage] || 'en') : (cfg.sttLanguage || 'auto'));
+  // ── WHO IS TALKING / IS IT FOR ME (src/addressee.js, speaker-id.js) ──
+  // → the decision, or null when switched off (HANNIBAL_ADDRESSEE=0).
+  function decideWho(transcript, spk, uttCode, fromBarge) {
+    if (!window.Addressee || cfg.addressee === false) return null;
+    const A = window.Addressee;
+    const now = Date.now();
+    const fu = Number(cfg.nameFollowUpMs) || 20000;
+    // Fred asks for another reply language ("speak Dutch") — before deciding,
+    // so that line itself is not counted as a language switch.
+    const nextLang = A.nextReplyLanguage(replyLanguage, transcript, spk && spk.tag);
+    if (nextLang !== replyLanguage) { console.log(`[lang] reply language ${replyLanguage} → ${nextLang} (Fred asked)`); replyLanguage = nextLang; }
+    const inConv = !!(lastSpokeAt && now - lastSpokeAt < fu);
+    const d = A.decide({
+      text: transcript,
+      speaker: spk,
+      enrolled: speakerEnrolled,
+      mentionsName: !!(window.NameGate && window.NameGate.mentionsName(transcript)),
+      wake: !!(wokeAt && now - wokeAt < fu) || fromBarge,
+      pending: !!(pendingConfirmation || teachState || confirmInFlight),
+      repliesToQuestion: inConv && lastAssistantAsked,
+      inConversation: inConv || !continuousListen,
+      lang: uttCode || LANG_CODE[detectLanguage(transcript)] || null,
+      replyLanguage,
+      othersInFrame: roomOthers,
+    });
+    recordWho(transcript, d, spk);
+    console.log('[who]', A.tagLine(d), JSON.stringify(transcript.slice(0, 80)));
+    return d;
+  }
+  // How many people besides Fred the camera saw a moment ago (refreshed in the background).
+  let roomOthers = 0;
+  setInterval(async () => {
+    try { const p = window.hannibal.roomPeople ? await window.hannibal.roomPeople() : null; roomOthers = p && p.count > 1 ? p.count - 1 : 0; } catch (_) { roomOthers = 0; }
+  }, 1500);
+  function recordWho(text, d, spk) {
+    fetch(`${cfg.whisperUrl}/speaker/log`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, speaker: d.speaker, speakerScore: d.speakerScore, sim: spk && spk.sim, addressed: d.addressed, addressedScore: d.score, action: d.action, why: d.why, lang: d.lang && window.Addressee.CODE[d.lang] }) })
+      .catch(() => {});
+  }
+  async function refreshSpeakerStatus() {
+    try { const j = await (await fetch(`${cfg.whisperUrl}/speaker/status`)).json(); speakerEnrolled = !!(j && j.enrolled); return j; } catch (_) { return null; }
+  }
+  setTimeout(refreshSpeakerStatus, 3000);
+
+  // "Hannibal, learn my voice": he says five short sentences one by one, Fred
+  // says each one back, and the five clips become Fred's voiceprint (stored on
+  // the Mac only). "Cancel" stops it; doing it again replaces the old one.
+  const ENROL_CANCEL = /^(?:cancel|stop|never ?mind|forget it|annuleer|stop maar|laat maar|annule|arrête|cancela|para)\b/i;
+  async function startEnrolment() {
+    emitModel('system');
+    setPhase('thinking');
+    let st = null;
+    try { st = await (await fetch(`${cfg.whisperUrl}/speaker/enrol/start`, { method: 'POST' })).json(); } catch (_) {}
+    if (!st || !st.ok || !Array.isArray(st.sentences)) { await speakLine("I can't learn your voice right now: my ears aren't answering."); restOrRearm(); return; }
+    if (st.modelReady === false) { await speakLine("I can't learn your voice right now: the voice model didn't load. It's in my log."); restOrRearm(); return; }
+    enrolState = { step: 0, ok: 0, tries: 0, sentences: st.sentences };
+    await speakLine(`Let's learn your voice. I'll say ${st.sentences.length} short sentences. After each one, say it back to me in your normal voice. Say cancel to stop.`);
+    await enrolPrompt();
+  }
+  async function enrolPrompt() {
+    const s = enrolState;
+    await speakLine(`Number ${s.step + 1}: ${s.sentences[s.step]}`);
+    startListening({ conversation: true });
+  }
+  async function enrolSample(blob) {
+    const s = enrolState;
+    setPhase('thinking');
+    // Cancel? (quick look at the words first)
+    let words = '';
+    try {
+      const r = await fetch(`${cfg.whisperUrl}/transcribe?language=auto&hint=en`, { method: 'POST', body: blob });
+      words = (((await r.json()) || {}).transcript || '').trim();
+    } catch (_) {}
+    if (ENROL_CANCEL.test(words.replace(/^[\s,.!?]+/, ''))) {
+      enrolState = null;
+      fetch(`${cfg.whisperUrl}/speaker/enrol/cancel`, { method: 'POST' }).catch(() => {});
+      await speakLine(speakerEnrolled ? 'Stopped. I kept your old voiceprint.' : 'Stopped. Your voice is not learned yet.');
+      restOrRearm(); return;
+    }
+    let j = null;
+    try { j = await (await fetch(`${cfg.whisperUrl}/speaker/enrol/sample`, { method: 'POST', body: blob })).json(); } catch (_) {}
+    if (!j || !j.ok) {
+      s.tries++;
+      if (s.tries >= 2) { s.tries = 0; s.step++; }            // skip a sentence that keeps failing
+      else { await speakLine(j && j.why === 'too short' ? "That was a bit short. Once more, please." : "I didn't get that one. Once more, please."); startListening({ conversation: true }); return; }
+    } else { s.ok++; s.tries = 0; s.step++; }
+    if (s.step < s.sentences.length) { await enrolPrompt(); return; }
+    enrolState = null;
+    let f = null;
+    try { f = await (await fetch(`${cfg.whisperUrl}/speaker/enrol/finish`, { method: 'POST' })).json(); } catch (_) {}
+    await refreshSpeakerStatus();
+    if (f && f.ok) await speakLine(`Done. I know your voice now, from ${f.samples} sentences. When someone else talks, I'll know it's not you.`);
+    else await speakLine("That didn't work: I need at least three clear sentences. Say \"Hannibal, learn my voice\" to try again.");
+    restOrRearm();
+  }
+  async function forgetVoice() {
+    try { await fetch(`${cfg.whisperUrl}/speaker/forget`, { method: 'POST' }); } catch (_) {}
+    await refreshSpeakerStatus();
+    emitModel('system');
+    await speakLine("Done, I've forgotten your voice. Say \"Hannibal, learn my voice\" to teach me again.");
+    startListening({ conversation: true });
+  }
+  async function whoDidYouHear() {
+    emitModel('system');
+    let j = null;
+    try { j = window.hannibal.voiceWho ? await window.hannibal.voiceWho(10) : null; } catch (_) {}
+    const tags = (j && j.tags) || [];
+    if (!j || !j.ok) { await speakLine("I can't read my log of who I heard right now."); startListening({ conversation: true }); return; }
+    const last = tags.filter((x) => x.action === 'silent').slice(-1)[0];
+    let line = `${speakerEnrolled ? 'I know your voice.' : "I haven't learned your voice yet."} ${j.summary}`;
+    if (last) line += ` The last line I kept quiet on: "${String(last.text).slice(0, 60)}", ${last.speaker === 'other' ? 'someone else' : last.speaker === 'fred' ? 'you' : 'not sure who'}, ${last.why}.`;
+    await speakLine(line);
+    startListening({ conversation: true });
+  }
+  window.hannibalWho = { status: refreshSpeakerStatus, learn: () => startEnrolment(), forget: () => forgetVoice() };
+
   async function transcribeAndRespond(blob, heardText = null, heardConfidence = null) {
     if (confirmInFlight) return;   // gate is active — this audio is not for chat
     setPhase('thinking');
     let transcript = heardText || '';
     let confidence = heardConfidence;
+    let spk = null, uttCode = null;
+    // "Learn my voice" is running: this clip is one enrolment sentence, not a request.
+    if (enrolState && blob) { await enrolSample(blob); return; }
     // The big Whisper model detects the language itself ('auto'), so switching to
     // Dutch or French just works; HANNIBAL_STT_LANG=en|nl|fr pins one.
     const code = cfg.sttLanguage === 'follow' ? (LANG_CODE[currentLanguage] || 'en') : (cfg.sttLanguage || 'auto');
@@ -783,13 +925,18 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
       const j = await r.json();
       transcript = ((j && j.transcript) || '').trim();
       confidence = (j && j.confidence) || null;
+      spk = (j && j.speaker) || null;
+      uttCode = (j && j.language) || null;
     } catch (e) {
       console.warn('[voice] whisper failed', e);
     }
     if (!transcript) { restOrRearm(); return; }   // empty STT (silence/noise) → back to the open mic
     transcript = fixTranscript(transcript);
     // "Hannibal" is the wake word: in always-listen mode, outside a conversation,
-    // only answer when he hears his name (src/name-gate.js).
+    // only answer when he hears his name (src/name-gate.js). On top of that
+    // (src/addressee.js): WHO is talking (Fred / someone else / not sure) and
+    // whether the line is meant for him. Side-talk → silent, only logged.
+    const who = decideWho(transcript, spk, uttCode, heardText != null);
     if (continuousListen && window.NameGate) {
       const gate = window.NameGate.decide(transcript, {
         lastSpokeAt, wokeAt,
@@ -798,17 +945,27 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
         enabled: cfg.nameGate !== false,
       });
       lastHeardAnyAt = Date.now();   // Fred is talking (maybe to someone else): not a gap for a nudge
-      if (!gate.answer) { console.warn('[voice] not for me (no "Hannibal"):', JSON.stringify(transcript)); restOrRearm(); return; }
+      if (who && who.action === 'silent' && cfg.nameGate !== false) {
+        console.warn('[who] not for me, staying quiet:', window.Addressee.tagLine(who), JSON.stringify(transcript));
+        restOrRearm(); return;
+      }
+      if (!who && !gate.answer) { console.warn('[voice] not for me (no "Hannibal"):', JSON.stringify(transcript)); restOrRearm(); return; }
       if (gate.why === 'name' && gate.nameOnly) {
         // Just "Hannibal?" → answer like a wake word and listen for the request.
         wokeAt = Date.now();
         emitModel('system');
-        try { await speakLine('Yes, Fred?'); } catch (_) {}
+        try { await speakLine(who && who.speaker === 'other' ? 'Yes?' : 'Yes, Fred?'); } catch (_) {}
         restOrRearm();
         return;
       }
       transcript = gate.text;
+    } else if (who && who.action === 'silent' && who.speaker === 'other' && !heardText) {
+      // Not always-listen: the mic opened for Fred, but a clearly other voice
+      // that did not talk to Hannibal is still not answered.
+      console.warn('[who] other voice, not for me:', window.Addressee.tagLine(who), JSON.stringify(transcript));
+      restOrRearm(); return;
     }
+    turnWho = who;
     lastUserSpeakTs = Date.now();   // arbiter: Fred just spoke → hold camera chit-chat briefly (he's engaged)
     lastHeardAnyAt = lastUserSpeakTs;
     if (window.NudgeGate && window.NudgeGate.isQuietRequest(transcript)) {
@@ -977,7 +1134,8 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     // freshest read on Fred's mood when downstream LLM calls fire. Saved to
     // disk on transition (no-op writes for stable neutral state).
     // ...but never from a garbled, unsure or tiny line ("Mm", "No, there's no way").
-    if (!window.SttGuard || window.SttGuard.shouldReadMood(transcript, turnConfidence)) updateMood(transcript);
+    const moodOk = !turnWho || (turnWho.action === 'answer' && turnWho.speaker !== 'other');   // never from a guest or an unsure line
+    if (moodOk && (!window.SttGuard || window.SttGuard.shouldReadMood(transcript, turnConfidence))) updateMood(transcript);
     // Same idea for language — detect on every utterance so ctxPreamble can
     // tell the LLM which language to reply in. No disk persistence: language
     // is a per-utterance signal, not a learned preference.
@@ -992,6 +1150,20 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     // Runs BEFORE pendingConfirmation so a teach in progress isn't derailed
     // by a stray yes/no from an unrelated alias prompt.
     if (teachState) return await handleTeachStep(transcript);
+
+    // ── Fred's voice (speaker-id.js): learn it, forget it, "who did you hear?" ──
+    {
+      const v = String(transcript || '').toLowerCase();
+      const LEARN = /\b(?:learn|enrol+|re-?enrol+|re-?learn|train on|teach you|memori[sz]e|record)\b.{0,15}\bmy voice\b|\bleer mijn stem\b|\bapprends? ma voix\b|\baprende mi voz\b/;
+      const FORGET = /\b(?:forget|delete|remove|wipe)\b.{0,10}\bmy voice(?:print)?\b|\bvergeet mijn stem\b|\boublie ma voix\b|\bolvida mi voz\b/;
+      const WHO = /\bwho (?:did you|have you|was it you) (?:just )?hear(?:d)?\b|\bwho (?:was|is) (?:that )?talking\b|\b(?:voice|speaker) tags\b|\bdo you (?:know|recogni[sz]e) my voice\b|\bwhy did you (?:answer|reply to|respond to) that\b/;
+      if (LEARN.test(v) || FORGET.test(v)) {
+        if (turnWho && turnWho.speaker === 'other') { emitModel('system'); await speakLine('Only Fred can change that.'); startListening({ conversation: true }); return true; }
+        if (LEARN.test(v)) await startEnrolment(); else await forgetVoice();
+        return true;
+      }
+      if (WHO.test(v)) { await whoDidYouHear(); return true; }
+    }
 
     // ── Confirmation gate ──
     if (pendingConfirmation) {
@@ -1125,7 +1297,7 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
         return true;
       }
       try {
-        const res = await window.hannibal.runSkill('morning-brief', { language: currentLanguage });
+        const res = await window.hannibal.runSkill('morning-brief', { language: replyLanguage });
         if (res && res.ok) return true;
         console.warn('[briefing] skill did not run, falling back to legacy:', res && res.error);
       } catch (e) { console.warn('[briefing] skill error, falling back to legacy:', e.message); }
@@ -2565,6 +2737,8 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
       lastTask: turnPrev.task && turnPrev.task !== 'chat' ? turnPrev.task : '',
     }) : '';
     if (sttNote && confidence !== 'high') console.warn('[stt] brain note:', sttNote.trim());
+    // Who spoke and how sure we are that it was meant for him (src/addressee.js).
+    const whoNote = turnWho && window.Addressee ? window.Addressee.whoNote(turnWho) : '';
 
     // Pull relevant long-term memories (best-effort) and inject as system context.
     let memoryContext = '';
@@ -2581,14 +2755,14 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     }
 
     const messages = [
-      { role: 'system', content: ctxPreamble() + SYSTEM_PROMPT + memoryContext + sttNote },
+      { role: 'system', content: ctxPreamble() + SYSTEM_PROMPT + memoryContext + sttNote + whoNote },
       { role: 'user', content: transcript },
     ];
     // For Claude the persona stays fixed (cacheable) and this turn's context +
     // memories travel as a separate note; main keeps the running conversation.
     const claude = {
       system: SYSTEM_PROMPT + ' Notes about the current situation and any relevant memories arrive as system messages during the conversation.',
-      context: ctxPreamble() + memoryContext + sttNote,
+      context: ctxPreamble() + memoryContext + sttNote + whoNote,
       user: transcript,
     };
     const reply = await streamChatAndSpeak({ model, messages, claude,
@@ -2604,7 +2778,8 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
 
     // Store the exchange — fire-and-forget so it never delays the next turn.
     // (not when the ears were unsure: a misheard line must not become a memory)
-    if (qdrantReady && reply && reply.trim() && (!window.SttGuard || window.SttGuard.shouldRemember(confidence))) {
+    const whoOk = !turnWho || (turnWho.speaker !== 'other' && turnWho.action === 'answer');
+    if (qdrantReady && whoOk && reply && reply.trim() && (!window.SttGuard || window.SttGuard.shouldRemember(confidence))) {
       const exchange = `Fred said: ${transcript}\nHannibal replied: ${reply}`;
       storeMemory(exchange, cfg.ollamaUrl, { type: 'conversation' }).catch(() => {});
     }
@@ -3205,6 +3380,11 @@ RULES:
     // confidence (it would block a typed command or echo an old line at the gate).
     turnPrev = { heard: lastHeard, task: lastTaskType };
     turnConfidence = null;
+    turnWho = null;   // typed = Fred, clearly for Hannibal
+    if (window.Addressee) {
+      const nl = window.Addressee.nextReplyLanguage(replyLanguage, t, 'fred');
+      if (nl !== replyLanguage) { console.log(`[lang] reply language ${replyLanguage} → ${nl} (Fred asked)`); replyLanguage = nl; }
+    }
     lastHeard = { text: t, confidence: null, at: Date.now() };
     console.log('[voice] submitText:', JSON.stringify(t));
     emitUser(t);
@@ -3429,6 +3609,13 @@ RULES:
         try {
           const r = await fetch(`${cfg.whisperUrl}/transcribe?language=${code}&hint=${LANG_CODE[currentLanguage] || 'en'}`, { method: 'POST', body: blob });
           const j = await r.json();
+          // A clearly different voice (a guest, the TV) cannot say yes for Fred:
+          // treated as no answer, so he asks again. Short "yes"/"ja" clips are
+          // "unknown" and still count, as before.
+          if (cfg.addressee !== false && j && j.speaker && j.speaker.tag === 'other') {
+            console.warn('[gate] answer was not Fred\'s voice, ignored:', JSON.stringify(j.transcript || ''), j.speaker);
+            resolve(''); return;
+          }
           resolve(fixTranscript(((j && j.transcript) || '').trim()));
         } catch (e) { console.warn('[gate] transcribe failed', e); resolve(null); }
       };
@@ -3582,7 +3769,7 @@ RULES:
     try {
       if (ev.type === 'plan:start') {
         updateLanguage(ev.goal || '');                  // detect Dutch/French/English from the goal
-        agentRun = { goal: ev.goal || '', lang: currentLanguage, total: ev.steps || 0, items: [] };
+        agentRun = { goal: ev.goal || '', lang: replyLanguage, total: ev.steps || 0, items: [] };
         brain.setState('thinking'); brain.pulse && brain.pulse(50);
         return;
       }
@@ -3688,8 +3875,8 @@ RULES:
     if (!d.speak) { console.log(`[arbiter] withhold ${candidate.source} (${d.reason}): "${String(candidate.text).slice(0, 60)}"`); return false; }
     lastAutonomousTs = state.now; lastAutonomousPriority = candidate.priority;
     let line = candidate.text;
-    if (candidate.translate && currentLanguage && currentLanguage !== 'english') {
-      try { line = await translate(line, currentLanguage); } catch (_) {}
+    if (candidate.translate && replyLanguage && replyLanguage !== 'english') {
+      try { line = await translate(line, replyLanguage); } catch (_) {}
     }
     emitModel('system');
     console.log(`[arbiter] SPEAK ${candidate.source} (prio ${candidate.priority}): "${line}"`);
@@ -3818,7 +4005,7 @@ RULES:
         now: Date.now(), urgent: !!job.urgent, idleMs: cfg.nudgeIdleMs,
         lastHeardAt: Math.max(lastHeardAnyAt || 0, lastUserSpeakTs || 0), lastSpokeAt: speaking || playingOne ? Date.now() : lastSpokeAt,
         fredTalking: fredTalking(), confirmPending: confirmInFlight,
-        hannibalBusy: speaking || playingOne || autonomousSpeaking || chatTurnActive || narrating || !!teachState || phase === 'thinking' || phase === 'speaking',
+        hannibalBusy: speaking || playingOne || autonomousSpeaking || chatTurnActive || narrating || !!teachState || !!enrolState || phase === 'thinking' || phase === 'speaking',
         quietMode: nudgeQuiet || presenceMuted || presenceSleeping,
       });
       const ready = () => (job.kind === 'nudge' ? nudgeOk().ok : isQuiet());
@@ -3854,7 +4041,7 @@ RULES:
         if (ok) briefText = reply.trim();
         startListening({ conversation: true });       // he can answer the brief straight away
       } else if (job.kind === 'morning-brief') {
-        const res = await window.hannibal.runSkill('morning-brief', { language: currentLanguage });
+        const res = await window.hannibal.runSkill('morning-brief', { language: replyLanguage });
         ok = !!(res && res.ok);
       }
     } catch (e) {

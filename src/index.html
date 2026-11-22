@@ -253,6 +253,15 @@
   .qa.gold { border-color: rgba(212,162,76,0.4); background: rgba(212,162,76,0.07); }
   .qa.gold:hover { border-color: var(--gold); box-shadow: 0 0 16px rgba(212,162,76,0.3); }
 
+  /* ── WHO'S TALKING (voice id + recent tags, src/addressee.js) ── */
+  .panel.who { flex: 0 0 auto; }
+  .who-list { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; max-height: 150px; overflow-y: auto; }
+  .who-row { font-size: 10.5px; line-height: 1.35; color: #cdd6de; border-left: 2px solid rgba(0,229,255,0.25); padding-left: 6px; }
+  .who-row .m { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.04em; color: var(--muted); }
+  .who-row.silent { opacity: 0.6; border-left-color: rgba(212,162,76,0.5); }
+  .who-row.other .m b { color: var(--gold); }
+  .who-row.fred .m b { color: var(--cyan); }
+
   /* ── AGENTS panel (live Claude Code sessions) ── */
   .panel.agents { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   .agents .panel-body { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 7px; }
@@ -460,6 +469,18 @@
       </div>
     </div>
 
+    <div class="panel who">
+      <div class="panel-h">WHO'S TALKING</div>
+      <div class="panel-body">
+        <div class="stat-row"><span class="k">My voice</span><span class="v" id="whoStatus">—</span></div>
+        <div class="qa-grid">
+          <button class="qa gold" data-cmd="learn my voice">Learn my voice</button>
+          <button class="qa" data-cmd="forget my voice">Forget my voice</button>
+        </div>
+        <div class="who-list" id="whoList"></div>
+      </div>
+    </div>
+
     <div class="panel agents">
       <div class="panel-h">AGENTS <span class="badge" id="agentsBadge">0</span></div>
       <div class="panel-body" id="agentsList"></div>
@@ -494,6 +515,7 @@
   </script>
 
   <script src="./name-gate.js"></script>
+  <script src="./addressee.js"></script>
   <script src="./confirm-words.js"></script>
   <script src="./stt-guard.js"></script>
   <script src="./nudge-gate.js"></script>
@@ -916,6 +938,28 @@
 
     // Live Agents panel — hydrates from main's session map, then live cc:event updates
     initAgents();
+
+    // ── WHO'S TALKING: is Fred's voice learned + the last lines heard, with
+    // who said them, whether they seemed meant for Hannibal and what he did.
+    // Straight from the speech server (speaker-id.js), every 5 s.
+    const whoStatusEl = $('#whoStatus'), whoListEl = $('#whoList');
+    async function pollWho() {
+      try {
+        const hcfg = await window.hannibal.config();
+        const base = hcfg.whisperUrl || 'http://127.0.0.1:8765';
+        const st = await (await fetch(`${base}/speaker/status`, { signal: AbortSignal.timeout(2000) })).json();
+        whoStatusEl.textContent = st.enrolling ? `learning… ${st.enrolling.count}/${st.enrolling.of}`
+          : st.enrolled ? `learned · ${st.samples} sentences · ${String(st.enrolledAt || '').slice(0, 10)}` : 'not learned yet';
+        const rec = await (await fetch(`${base}/speaker/recent?n=8`, { signal: AbortSignal.timeout(2000) })).json();
+        const who = { fred: 'Fred', other: 'someone else', unknown: 'not sure' };
+        const did = { answer: 'answered', brief: 'short reply', silent: 'quiet' };
+        whoListEl.innerHTML = (rec.tags || []).slice().reverse().map((x) => `<div class="who-row ${esc(x.speaker || '')} ${x.action === 'silent' ? 'silent' : ''}">`
+          + `<div class="m">${esc(String(x.t || '').slice(11, 16))} · <b>${esc(who[x.speaker] || x.speaker || '?')} ${Number(x.speakerScore || 0).toFixed(2)}</b> · for me: ${esc(x.addressed || '?')} ${Number(x.addressedScore || 0).toFixed(2)} · ${esc(did[x.action] || x.action || '')}</div>`
+          + `<div>${esc(String(x.text || ''))}</div>${x.why ? `<div class="m">${esc(String(x.why))}</div>` : ''}</div>`).join('');
+      } catch (_) { whoStatusEl.textContent = 'ears offline'; }
+    }
+    pollWho();
+    setInterval(pollWho, 5000);
 
     // Quick Actions → run command as if spoken
     $$('.qa').forEach((b) => b.addEventListener('click', () => {

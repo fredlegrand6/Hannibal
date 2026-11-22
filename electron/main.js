@@ -266,6 +266,9 @@ const CONFIG = {
   // Answer only when called "Hannibal" (outside a conversation). HANNIBAL_NAME_GATE=0 → answer everything.
   nameGate: !/^(0|false|off|no)$/i.test(process.env.HANNIBAL_NAME_GATE || ''),
   nameFollowUpMs: Number(process.env.HANNIBAL_FOLLOW_UP_S || 20) * 1000,
+  // Who is talking + is it meant for him (src/addressee.js). HANNIBAL_ADDRESSEE=0
+  // goes back to the plain name gate.
+  addressee: !/^(0|false|off|no)$/i.test(process.env.HANNIBAL_ADDRESSEE || ''),
 };
 
 function createWindow() {
@@ -462,6 +465,16 @@ ipcMain.handle('voice:tts', async (_e, text) => {
 const { createVoiceDropLog, registerVoiceDrops } = require('./services/voice-drops');
 const voiceDrops = createVoiceDropLog();
 registerVoiceDrops(ipcMain, voiceDrops, { where: 'desk' });
+// Who is talking (services/speaker-id.js, run by the speech server): recent
+// tags for the voice.who tool, and how many people the camera sees right now
+// (a hint for "is Fred talking to someone else?", src/addressee.js).
+ipcMain.handle('voice:who', async (_e, n) => {
+  try {
+    const r = await fetch(`${CONFIG.whisperUrl}/speaker/recent?n=${Number(n) || 20}`, { signal: AbortSignal.timeout(3000) });
+    return await r.json();
+  } catch (e) { return { ok: false, error: `speech server not reachable: ${e.message}` }; }
+});
+ipcMain.handle('room:people', () => { try { return faceFollow.people(); } catch (_) { return null; } });
 
 // System metrics, calendar, mail and web live in services/info-handlers.js
 // (shared with the always-on server, server/hannibal-server.js).
@@ -538,6 +551,7 @@ ipcMain.handle('voice:config', () => ({
   alwaysListen: CONFIG.alwaysListen,
   nameGate: CONFIG.nameGate,
   nameFollowUpMs: CONFIG.nameFollowUpMs,
+  addressee: CONFIG.addressee,
   nudgeIdleMs: (Number(process.env.HANNIBAL_NUDGE_IDLE_S) || 25) * 1000,   // quiet gap before a nudge
   bargeIn: process.env.HANNIBAL_BARGE_IN !== '0',   // talk over him to cut him off
   bargeMinBar: Number(process.env.HANNIBAL_BARGE_BAR) || 0,   // mic level that counts as Fred talking (default 0.006)
