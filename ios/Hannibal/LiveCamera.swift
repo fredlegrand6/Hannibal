@@ -36,9 +36,17 @@ final class LiveCamera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, 
         }
     }
 
+    // Every session change (configure, start, stop, flip) runs on the same
+    // serial queue, so a pending startRunning can never land between
+    // beginConfiguration and commitConfiguration (that crashes the app).
     func start(front: Bool = false) throws {
-        try configure(front: front)
-        queue.async { if !self.session.isRunning { self.session.startRunning() } }
+        guard AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: front ? .front : .back) != nil else {
+            throw NSError(domain: "Hannibal", code: 1, userInfo: [NSLocalizedDescriptionKey: "No camera found."])
+        }
+        queue.async {
+            try? self.configure(front: front)
+            if !self.session.isRunning { self.session.startRunning() }
+        }
     }
 
     func stop() {
@@ -46,7 +54,9 @@ final class LiveCamera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, 
         lock.lock(); latest = nil; lock.unlock()
     }
 
-    func flip() { try? configure(front: !front) }
+    func flip() {
+        queue.async { try? self.configure(front: !self.front) }
+    }
 
     private func configure(front: Bool) throws {
         guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: front ? .front : .back) else {
