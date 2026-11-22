@@ -3081,6 +3081,11 @@ RULES:
     // before parseCommand sees them. (Spoken input went through this at the
     // mic level on line 236; typed input previously skipped it.)
     t = fixTranscript(t);
+    // Typed, so nothing was misheard: don't carry over an unsure spoken turn's
+    // confidence (it would block a typed command or echo an old line at the gate).
+    turnPrev = { heard: lastHeard, task: lastTaskType };
+    turnConfidence = null;
+    lastHeard = { text: t, confidence: null, at: Date.now() };
     console.log('[voice] submitText:', JSON.stringify(t));
     emitUser(t);
     const wasTeaching = teachState !== null;

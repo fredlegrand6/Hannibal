@@ -46,11 +46,14 @@ function audioStats(buf, rate = 16000) {
 function audioVerdict(buf, limits = LIMITS()) {
   const { frames, frameMs, peak } = audioStats(buf);
   // Voice = louder than the fixed floor AND clearly above this clip's own
-  // background (the quietest fifth of the real frames; padding zeros skipped)
-  const live = frames.filter((v) => v >= 1).sort((a, b) => a - b);
-  const floor = live.length ? live[Math.floor(live.length * 0.2)] : 0;
-  // (capped, so steady music or a fan can't push the bar above normal speech)
-  const bar = Math.max(limits.voiceRms, Math.min(floor * 2, 1500));
+  // background: the quietest fifth of ALL frames, true silence included, so a
+  // clean or noise-suppressed recording keeps a floor near 0 instead of one
+  // taken from the speech itself. Capped, so steady music or a fan can't push
+  // the bar above normal speech.
+  const sorted = frames.slice().sort((a, b) => a - b);
+  const floor = sorted.length ? sorted[Math.floor(sorted.length * 0.2)] : 0;
+  // (and never above half the loudest frame, so one long even sound still counts)
+  const bar = Math.max(limits.voiceRms, Math.min(floor * 2, 1500, peak * 0.5));
   const speechMs = frames.filter((v) => v >= bar).length * frameMs;
   const info = { speechMs, peak: Math.round(peak), floor: Math.round(floor) };
   if (peak < limits.peakRms) return { keep: false, reason: 'silence', detail: `too quiet (peak ${info.peak})`, ...info };
