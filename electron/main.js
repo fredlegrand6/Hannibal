@@ -111,6 +111,7 @@ function sharedMemory() {
 const { createJournal, registerJournal } = require('./services/conversation-journal');
 const deskJournal = createJournal({
   filePath: path.join(path.dirname(deskFacts.file), 'conversations.json'),
+  embed: (t) => sharedMemory().embed(t),   // find conversations by meaning
   summarize: (t, p) => claudeBrain.summarizeForJournal(t, p),
   onEpisode: (ep) => {
     if (!linked()) return;
@@ -119,6 +120,24 @@ const deskJournal = createJournal({
   },
 });
 registerJournal(ipcMain, deskJournal);
+// Threads: each thing Fred and Hannibal are working on, with its current status
+// (threads.js). Changes go up to the server, and the server's come down.
+const { createThreadStore, registerThreads } = require('./services/threads');
+let threadsUpTimer = null;
+const deskThreads = createThreadStore({
+  filePath: path.join(path.dirname(deskFacts.file), 'threads.json'),
+  embed: (t) => sharedMemory().embed(t),
+  onChange: () => {
+    if (threadsUpTimer) clearTimeout(threadsUpTimer);
+    threadsUpTimer = setTimeout(() => {
+      if (!linked()) return;
+      bodyLink.request('threads.sync', { threads: deskThreads.all() })
+        .then((r) => deskThreads.merge(r && r.threads)).catch((e) => console.warn('[body] threads.sync failed:', e.message));
+    }, 3000);
+  },
+});
+registerThreads(ipcMain, deskThreads);
+claudeBrain.setThreads(deskThreads);
 claudeBrain.setJournal(deskJournal, { liveFile: path.join(path.dirname(deskFacts.file), 'conversation-live.json'), whereName: 'desk' });
 registerMemoryIpc(ipcMain, { store: (t, m) => sharedMemory().store(t, m), search: (t, l) => sharedMemory().search(t, l) });
 // Claude's memory.query tool uses the same picky search.
@@ -440,6 +459,7 @@ const nudger = createNudger({
   getMail: () => info.waitingMail(48, 7),
   isKnown: (m) => knownPeople(deskFacts.all().map((f) => f.text).join('\n'))(m),
   zone: () => zoneWatch.status(),
+  skip: (n) => deskThreads.isClosedTopic(n.text),
   // Spoken at the desk, at a quiet moment (the renderer waits up to 10 min for one).
   deliver: (n) => new Promise((resolve) => {
     const id = `n${++nudgeSeq}`;
@@ -1028,7 +1048,9 @@ function makeIpcConfirmer(timeoutMs = 120000) {
       console.log(`[gate] ${step.tool}: ${ans.approved ? 'YES → running it' : `${ans.answer === 'unheard' ? 'no clear answer' : 'NO'} → not done`}`);
       resolve(ans);
     });
-    target.webContents.send('agent:confirm-request', { id, step: step.step, tool: step.tool, summary });
+    // expiresAt lets a request that waited in the renderer's queue too long be
+    // skipped instead of asked (main would ignore that answer anyway).
+    target.webContents.send('agent:confirm-request', { id, step: step.step, tool: step.tool, summary, expiresAt: Date.now() + timeoutMs - 5000 });
   });
 }
 
@@ -1257,12 +1279,15 @@ function startBodyLink() {
         if (ns && ns.keys) nudger.markSaid(ns.keys);
         const j = await bodyLink.request('journal.sync', { episodes: deskJournal.all() });
         const got = deskJournal.merge(j && j.episodes);
+        const th = await bodyLink.request('threads.sync', { threads: deskThreads.all() }).catch(() => null);
+        if (th && th.threads) deskThreads.merge(th.threads);
         console.log(`[body] diary in sync with the server (${deskJournal.size} conversations${got ? `, ${got} new from the phone` : ''})`);
       } catch (e) { console.warn('[body] setup after link failed:', e.message); }
     })
     .on('event', (name, data) => {
       if (name === 'facts') applyServerFacts(data && data.facts);
       if (name === 'journal') deskJournal.merge(data && data.episodes);
+      if (name === 'threads') deskThreads.merge(data && data.threads);
     })
     .on('close', () => { if (wasLinked) console.warn('[body] link to the server dropped, reconnecting'); wasLinked = false; })
     .on('error', () => {});   // routine connect errors while offline; the reconnect loop handles them

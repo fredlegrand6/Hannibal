@@ -60,7 +60,8 @@ Believe Fred about what happened: when he says something already went out or alr
 Your speech-to-text is already locked to English, Dutch, French and Spanish (done 21 Nov 2026), so that item is finished: don't list it as a wish any more. When a yes/no tool result says Fred's answer wasn't heard, don't call it declined: say you didn't catch it and ask again. Fred talks to you through speech-to-text, which sometimes mishears (a name as a weekday, the TV as words). When a short answer only makes sense as the reply to the question you just asked, take it that way (after "how is Mandy saved?", "Monday" means "Mandy") and carry on, saying briefly what you understood. Ignore lines that are clearly background noise.
 Eyes: you can see. If Fred asks about anything you'd have to look at — himself, what he's holding or wearing, the room, something he shows you, his screen — call vision__capture (kind "camera", or "screen") and look before answering. Never guess what you can't see; if the image is unclear, say what you can make out and ask him to hold it closer.
 Memory: the saved facts below are things you know for sure. When Fred tells you something lasting — about a person, a project or client, how he likes things done, a decision, a place, a routine — save it with memory__remember as one short self-contained fact (do it quietly, no need to announce it unless he asked you to remember). If a saved fact is wrong or outdated, forget it and save the correct one. When he says "forget that", use memory__forget. Don't save small talk, passing moods or things that only matter right now.
-Conversations: your diary of recent conversations with Fred (desk and phone) is below, with the threads left open. Use it to follow the thread: pick up where you left off, remember what you promised, and don't make him repeat himself. For anything older, or when he asks "what did we say about…", search with memory__conversations.
+Conversations: your diary of recent conversations with Fred (desk and phone) is below. Use it to follow the thread: pick up where you left off, remember what you promised, and don't make him repeat himself. It is history: what is still open or already closed is in THREADS. For older conversations search with memory__conversations (it finds them by meaning, not only by exact words).
+Threads: the THREADS list below has the CURRENT status of each thing you and Fred are working on. Reason from it, not from older diary lines or memories: never suggest redoing, testing or chasing something listed as done or dropped. The moment Fred says something is done, fixed, tested, cancelled, to forget, for later, or waiting on someone, call memory__thread with that thread and the new status (his word wins, no proof needed). Asked what was said or decided about something, call memory__threads and answer with its current status and the key steps, not raw quotes.
 You are spoken aloud: before a slow or multi-step task say one short sentence about what you're doing, and when done give the result in one or two plain sentences (no lists, no markdown).`;
 
 function nowStamp(d = new Date()) {
@@ -81,6 +82,7 @@ let factStore = getDefaultFactStore;
 //     after a long break (RESUME_MS) a fresh conversation starts and the
 //     diary carries what came before.
 let journal = null;
+let threads = null;      // threads.js: each thing being worked on, with its current status
 let livePath = null;
 let where = () => process.env.HANNIBAL_WHERE || 'desk';
 const RESUME_MS = () => parseInt(process.env.HANNIBAL_RESUME_HOURS || '6', 10) * 3600 * 1000;
@@ -107,8 +109,17 @@ function loadLive() {
 }
 function closeEpisode() {
   if (!journal) return Promise.resolve(null);
-  return journal.close().catch((e) => { console.warn('[journal] close failed:', e && e.message); return null; });
+  return journal.close().then((ep) => {
+    // Then map that stretch onto the threads (by meaning; statuses move on).
+    if (ep && threads && journal.lastTranscript) {
+      threads.reconcile({ transcript: journal.lastTranscript, summarize: summarizeForJournal })
+        .then((r) => { if (r && r.ok && r.updated.length) console.log(`[threads] after the conversation: ${r.updated.join('; ')}`); })
+        .catch(() => {});
+    }
+    return ep;
+  }).catch((e) => { console.warn('[journal] close failed:', e && e.message); return null; });
 }
+function setThreads(store) { threads = store || null; }
 // Write the diary for a finished stretch: one plain Claude call, JSON back.
 async function summarizeForJournal(transcriptText, instructions) {
   const msg = await getClient().beta.messages.create({
@@ -175,9 +186,32 @@ function noteEvent(text) {
   const d = new Date();
   const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
   pendingNotes.push(`${hm} ${t}`);
+  try { threads && threads.observe(t, 'event'); } catch (_) {}
   if (pendingNotes.length > 8) pendingNotes = pendingNotes.slice(-8);
   return true;
 }
+// The last few things Fred said, so a follow-up ("and when is his flight?")
+// is looked up with its thread, not on its own words.
+function threadText(user) {
+  const said = history.filter((m) => m.role === 'user' && typeof m.content === 'string').slice(-2).map((m) => m.content);
+  return [...said, String(user || '')].join('\n').slice(-1200);
+}
+async function recallForThread(user) {
+  if (!threads && !(journal && journal.recall)) return '';
+  const text = threadText(user);
+  const work = (async () => {
+    const [ts, eps] = await Promise.all([
+      threads ? threads.relevant(text).catch(() => []) : [],
+      journal && journal.recall ? journal.recall(text).catch(() => []) : [],
+    ]);
+    return [threads && ts.length ? threads.renderRelevant(ts) : '', journal && eps.length ? journal.renderRecall(eps) : ''].filter(Boolean).join('\n');
+  })();
+  return Promise.race([work, new Promise((r) => setTimeout(() => r(''), 1200))]).catch(() => '');
+}
+function isWriteTool(name) {
+  try { const t = require('./agent/catalog').getTool(name); return !!t && t.side_effect === require('./agent/catalog').SIDE_EFFECT.WRITE; } catch (_) { return false; }
+}
+
 function interrupt() {
   if (!running) return false;
   running.cut = true;
@@ -221,15 +255,20 @@ async function chatTurn({ system, context, user, images }, onText, opts, me) {
   // turn must not lose the only record of what was done).
   const carried = pendingNotes.slice();
   const dropCarried = () => { pendingNotes = pendingNotes.filter((n) => !carried.includes(n)); };
-  turn.push({ role: 'system', content: [nowLine, happened, String(context || '').trim()].filter(Boolean).join('\n') });
+  // Follow the thread: the threads (with their current status) and older
+  // diary conversations that the last few lines are about, by meaning.
+  const recalled = await recallForThread(user);
+  turn.push({ role: 'system', content: [nowLine, happened, String(context || '').trim(), recalled].filter(Boolean).join('\n') });
 
   const useTools = !!runTool && claudeTools.enabled();
   const tools = useTools ? claudeTools.toolDefinitions() : undefined;
   let facts = '';
   try { facts = factStore().renderForPrompt(); } catch (_) {}
   let diary = '';
-  try { diary = journal ? journal.renderForPrompt() : ''; } catch (_) {}
-  const sys = String(system || '') + (useTools ? TOOL_GUIDE : '') + facts + diary;
+  try { diary = journal ? journal.renderForPrompt({ openThreads: !threads }) : ''; } catch (_) {}
+  let threadList = '';
+  try { threadList = threads ? threads.renderForPrompt() : ''; } catch (_) {}
+  const sys = String(system || '') + (useTools ? TOOL_GUIDE : '') + facts + diary + threadList;
 
   let streamed = '';
   const working = [...turn];      // this turn's messages: user, note, then assistant/tool rounds
@@ -284,6 +323,10 @@ async function chatTurn({ system, context, user, images }, onText, opts, me) {
         try { onToolEvent && onToolEvent({ phase: 'start', tool: claudeTools.fromApiName(c.name) }); } catch (_) {}
         const r = await runTool(c.name, c.input);
         toolsUsed.push({ tool: r.tool, status: r.status });
+        // A change that went through is an event the threads can close on.
+        if (threads && r.status === 'ok' && isWriteTool(r.tool) && !/^memory\./.test(r.tool)) {
+          try { threads.observe(`${r.tool} done: ${JSON.stringify(c.input || {}).slice(0, 200)}`, 'event'); } catch (_) {}
+        }
         console.log(`[claude] tool ${r.tool} → ${r.status}`);
         try { onToolEvent && onToolEvent({ phase: 'finish', tool: r.tool, status: r.status }); } catch (_) {}
         results.push({ type: 'tool_result', tool_use_id: c.id, content: r.content, ...(r.is_error ? { is_error: true } : {}) });
@@ -349,4 +392,4 @@ function registerClaudeBrain(ipcMain, opts = {}) {
 }
 
 module.exports = { registerClaudeBrain, chat, interrupt, noteEvent, enabled, model, toolsEnabled: () => !!runToolImpl && claudeTools.enabled(),
-  resetHistory: () => { history = []; saveLive(); }, setJournal, summarizeForJournal, closeEpisode, _setClient: (c) => { client = c; }, _setFactStore: (f) => { factStore = () => f; } };
+  resetHistory: () => { history = []; saveLive(); }, setJournal, setThreads, summarizeForJournal, closeEpisode, _setClient: (c) => { client = c; }, _setFactStore: (f) => { factStore = () => f; } };

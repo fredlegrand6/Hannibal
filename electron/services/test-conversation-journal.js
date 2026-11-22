@@ -130,5 +130,39 @@ const reply = (o) => async () => JSON.stringify(o);
     brain.setJournal(null);
   });
 
+  await test('the brain shows THREADS with their status, brings the relevant one into the turn, and runs the pass after a conversation', async () => {
+    const { createThreadStore } = require('./threads');
+    const embed = async (t) => [/brief|morning/i.test(t) ? 1 : 0, /jay/i.test(t) ? 1 : 0, 0.1];
+    const th = createThreadStore({ filePath: file(), embed, log: () => {} });
+    await th.upsert({ title: 'Morning brief once a day at 08:00', status: 'done', note: 'PR #45 merged', source: 'event' });
+    await th.upsert({ title: 'Call Jay about Mutuele', status: 'open' });
+    let seen = null; let passInput = '';
+    brain._setClient({ beta: { messages: {
+      stream: (req) => { seen = req; const h = {}; return {
+        on: (ev, fn) => { h[ev] = fn; },
+        finalMessage: async () => ({ content: [{ type: 'text', text: 'Done.' }], stop_reason: 'end_turn', usage: {} }), abort() {} }; },
+      create: async (req) => {
+        if (/THREADS/.test(req.system)) { passInput = req.messages[0].content; return { content: [{ type: 'text', text: '{"updates":[{"title":"Call Jay about Mutuele","status":"done","note":"called","source":"fred"}]}' }] }; }
+        return { content: [{ type: 'text', text: '{"title":"Jay","summary":"Fred called Jay.","open":[]}' }] };
+      },
+    } } });
+    brain.resetHistory();
+    const j = createJournal({ filePath: file(), summarize: (t, p) => brain.summarizeForJournal(t, p) });
+    brain.setJournal(j, { liveFile: file(), whereName: 'desk' });
+    brain.setThreads(th);
+    await brain.chat({ system: 'persona', user: 'what about the morning brief?' });
+    assert.ok(/OPEN:\n- \[t-\w+\] Call Jay about Mutuele — open/.test(seen.system), seen.system);
+    assert.ok(/RECENTLY CLOSED[^\n]*\n- Morning brief once a day at 08:00 — done/.test(seen.system), seen.system);
+    assert.ok(!/OPEN THREADS \(left open/.test(seen.system), 'the old never-closing list is gone');
+    const note = seen.messages[seen.messages.length - 1].content;
+    assert.ok(/Threads this is about \(CURRENT status/.test(note) && /Morning brief once a day at 08:00 — done/.test(note), note);
+    brain.noteEvent('Fred called Jay from his phone');
+    await brain.closeEpisode();
+    await new Promise((r) => setTimeout(r, 30));
+    assert.ok(/Fred called Jay from his phone/.test(passInput), passInput);
+    assert.strictEqual(th.all().find((x) => /Jay/.test(x.title)).status, 'done');
+    brain.setThreads(null); brain.setJournal(null);
+  });
+
   console.log(`${passed} passed`);
 })();

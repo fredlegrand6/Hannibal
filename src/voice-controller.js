@@ -2407,7 +2407,11 @@ export async function initVoice(brain, { onPhase, onUser, onAssistant, onModel, 
     // Pull relevant long-term memories (best-effort) and inject as system context.
     let memoryContext = '';
     if (qdrantReady) {
-      const memories = await queryMemory(transcript, cfg.ollamaUrl);
+      // Look memories up with the thread (his previous line too, if recent), so
+      // a follow-up like "and when does he land?" finds what it is about.
+      const thread = prevFredLine && Date.now() - prevFredAt < 5 * 60000 ? `${prevFredLine}\n${transcript}` : transcript;
+      prevFredLine = transcript; prevFredAt = Date.now();
+      const memories = await queryMemory(thread, cfg.ollamaUrl);
       if (memories.length) {
         memoryContext = '\n\nRELEVANT MEMORIES (past conversations, may be out of date):\n' + memories.map((m) => `- ${m.ts ? `(${m.ts.slice(0, 10)}) ` : ''}${m.text}`).join('\n');
         console.log(`[memory] injected ${memories.length} memories (top score ${memories[0].score?.toFixed(2)})`);
@@ -3294,6 +3298,9 @@ RULES:
   async function handleConfirmRequest(req) {
     // main asks per-action and awaits each reply, so only one is ever in flight;
     // deny any overlap defensively.
+    // It waited in the queue past main's timeout: main has stopped listening, so
+    // asking now would be a question whose yes does nothing.
+    if (req.expiresAt && Date.now() > req.expiresAt) { console.warn(`[gate] "${req.summary}" expired in the queue, not asked`); return; }
     if (confirmInFlight) { console.warn('[gate] overlapping request refused'); try { window.hannibal.agentConfirmResponse(req.id, { approved: false, answer: 'unheard' }); } catch (_) {} return; }
     confirmInFlight = true;   // from here, the normal voice loop is fully suspended
     // Seize the mic: stop any in-progress normal capture so its recorder can't
@@ -3356,6 +3363,10 @@ RULES:
     }
     if (gateUI) { try { gateUI.finish(decision); } catch (_) {} }
     // The spoken line, the log and the answer to main all come from `decision`.
+    if (decision && req.expiresAt && Date.now() > req.expiresAt) {
+      console.warn(`[gate] "${req.summary}" → yes came after the time limit, not done`);
+      decision = false; heardVerdict = 'late';
+    }
     const said = decision ? 'yes' : (decidedHow === 'click' || heardVerdict === 'no' ? 'no' : 'unheard');
     try {
       if (said === 'yes') await speakLine('On it.');
@@ -3486,6 +3497,7 @@ RULES:
   let lastAutonomousTs = 0;
   let lastAutonomousPriority = 0;
   let lastUserSpeakTs = 0;
+  let prevFredLine = '', prevFredAt = 0;   // the thread for memory recall
   let screenBelief = { working: false, appClass: '', score: 0, ts: 0 };
 
   // Fuse a screen-awareness tick into the "is Fred heads-down working?" belief.

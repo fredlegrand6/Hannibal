@@ -79,10 +79,20 @@ ipc.handle('facts:list', (_e, category) => facts.list(category));
 const { createJournal, registerJournal } = require(path.join(SERVICES, 'conversation-journal'));
 const journal = createJournal({
   filePath: path.join(CFG.dataDir, 'conversations.json'),
+  embed: (t) => memory.embed(t),   // find conversations by meaning (memory is set up below)
   summarize: (t, p) => claudeBrain.summarizeForJournal(t, p),
   onEpisode: (ep) => { if (hub) hub.notify('journal', { episodes: [ep] }); },
 });
 registerJournal(ipc, journal);
+// Threads with their current status (threads.js); synced with the desk by id.
+const { createThreadStore, registerThreads } = require(path.join(SERVICES, 'threads'));
+const threads = createThreadStore({
+  filePath: path.join(CFG.dataDir, 'threads.json'),
+  embed: (t) => memory.embed(t),
+  onChange: (all) => { if (hub) hub.notify('threads', { threads: all }); },
+});
+registerThreads(ipc, threads);
+claudeBrain.setThreads(threads);
 claudeBrain.setJournal(journal, { liveFile: path.join(CFG.dataDir, 'conversation-live.json'), whereName: process.env.HANNIBAL_WHERE || 'phone' });
 
 const reminders = createReminderTools({ filePath: path.join(CFG.dataDir, 'reminders.json') });
@@ -293,6 +303,8 @@ if (process.env.BODY_LINK_TOKEN) {
           return { episodes: journal.all() };
         },
         'journal.add': ({ episodes } = {}) => { journal.merge(episodes); return { ok: true }; },
+        // Threads: by id, the newer update wins; the desk gets them all back.
+        'threads.sync': ({ threads: list } = {}) => { const n = threads.merge(list); if (n) console.log(`[body] threads: ${n} from the desk`); return { threads: threads.all() }; },
         // Nudges: which ones were already said, on either side.
         'nudge.said': ({ keys } = {}) => ({ added: nudger.markSaid(keys) }),
         'nudge.sync': ({ keys } = {}) => { nudger.markSaid(keys); return { keys: nudger.said() }; },
@@ -356,6 +368,7 @@ const nudger = createNudger({
   getEvents: () => info.calendar(8),
   getMail: () => info.waitingMail(48, 7),
   isKnown: (m) => knownPeople(facts.all().map((f) => f.text).join('\n'))(m),
+  skip: (n) => threads.isClosedTopic(n.text),
   deliver: async (n) => {
     if (hub && hub.linked()) return false;          // the desk has it
     try { await tellFred(`👋 ${n.text}`); return true; } catch (_) { return false; }
