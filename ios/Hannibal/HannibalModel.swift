@@ -17,6 +17,7 @@ struct Line: Identifiable, Codable, Equatable {
     var outcome: String? = nil      // for a Yes/No card once it's answered or expired
     var expires: Date? = nil        // the server gives up on a Yes/No after 2 minutes
     var sending = false             // Yes/No answer on its way
+    var url: String? = nil          // a route Fred can start (Google Maps)
 }
 
 @MainActor
@@ -343,6 +344,7 @@ final class HannibalModel {
             guard let t = ev.text, !t.isEmpty else { return }
             WidgetCenter.shared.reloadAllTimelines()
             add(.notify, t)
+            if let u = ev.url, let i = lines.indices.last { lines[i].url = u; saveHistory() }
             pulses += 1
             UINotificationFeedbackGenerator().notificationOccurred(.success)
             speaker.say(t)
@@ -357,6 +359,16 @@ final class HannibalModel {
             guard let id = ev.id, let i = lines.firstIndex(where: { $0.confirmId == id }) else { return }
             if lines[i].outcome == nil { lines[i].outcome = ev.note ?? ((ev.ok ?? false) ? "Going ahead." : "Not done.") }
             saveHistory()
+        case "navigate":
+            guard let u = ev.url else { return }
+            lines.append(Line(kind: .notify, text: ev.text ?? "🚗 Route ready.", url: u))
+            saveHistory()
+            Nav.start(url: u, text: ev.text ?? "Tap to start the route in Google Maps.")
+        case "ask":
+            guard let id = ev.id else { return }
+            var q: [String: Any] = ["id": id, "kind": ev.kind ?? ""]
+            if let d = ev.destination { q["destination"] = d }
+            Task { await Nav.answer(q) }
         default:
             break
         }

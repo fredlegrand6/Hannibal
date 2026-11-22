@@ -87,6 +87,8 @@ function parseICalEvents(xml, now, tz = assist.fredTz()) {
       const body = vevent.split('END:VEVENT')[0];
       const uid = ((body.match(/(?:^|\n)UID[^:\n]*:(.*)/) || [])[1] || '').trim();
       const summary = (body.match(/\nSUMMARY[^:]*:(.*)/) || body.match(/^SUMMARY[^:]*:(.*)/) || [])[1];
+      // Where it is (for drive times and the "leave now" warning on the phone).
+      const loc = unesc2(((body.match(/(?:^|\n)LOCATION[^:\n]*:(.*)/) || [])[1] || '').trim()).replace(/\\n/gi, ', ');
       const dtLine = (body.match(/DTSTART([^:\n]*):([0-9TZ]+)/) || []);
       if (!dtLine[2]) continue;
       const params = dtLine[1] || '', v = dtLine[2];
@@ -109,7 +111,7 @@ function parseICalEvents(xml, now, tz = assist.fredTz()) {
       // A repeat of a recurring event (the server expanded it): keep which one it
       // is, so delete/move can change just this one.
       const rid = ((body.match(/(?:^|\n)RECURRENCE-ID[^:\n]*:([0-9TZ]+)/) || [])[1] || '').trim();
-      events.push({ ts: when.getTime(), ...(endTs > when.getTime() ? { endTs } : {}), time, allDay, title: unesc2((summary || '(no title)').trim()), ...(uid ? { uid } : {}), ...(rid ? { repeats: true, occurrence: rid } : {}) });
+      events.push({ ts: when.getTime(), ...(endTs > when.getTime() ? { endTs } : {}), time, allDay, title: unesc2((summary || '(no title)').trim()), ...(loc ? { location: loc } : {}), ...(uid ? { uid } : {}), ...(rid ? { repeats: true, occurrence: rid } : {}) });
     }
   }
   const today = assist.dayOf(now.getTime(), tz);

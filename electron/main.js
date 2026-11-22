@@ -482,10 +482,12 @@ ipcMain.handle('room:people', () => { try { return faceFollow.people(); } catch 
 // them on while it is linked.
 const viaServer = (method, params) => (linked()
   ? bodyLink.request(method, params).catch((e) => ({ ok: false, error: `The server didn't answer: ${e.message}` }))
-  : Promise.resolve({ ok: false, error: 'Place reminders live on the server, and the desk is not linked to it right now. Ask me on the phone or Telegram.' }));
+  : Promise.resolve({ ok: false, error: 'That runs on the server (through Fred\'s iPhone), and the desk is not linked to it right now. Ask me on the phone or Telegram.' }));
 ipcMain.handle('reminders:place', (_e, message, place, on) => viaServer('reminders.place', { message, place, on }));
 ipcMain.handle('reminders:places', () => viaServer('reminders.places', {}));
 ipcMain.handle('reminders:cancelPlace', (_e, query) => viaServer('reminders.cancelPlace', { query }));
+ipcMain.handle('nav:go', (_e, destination) => viaServer('nav.go', { destination }));
+ipcMain.handle('nav:eta', (_e, destination) => viaServer('nav.eta', { destination }));
 
 // (shared with the always-on server, server/hannibal-server.js).
 // Reminders linked to calendar events (booked "with a reminder 15 minutes
