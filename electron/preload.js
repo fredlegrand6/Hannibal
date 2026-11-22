@@ -32,6 +32,11 @@ contextBridge.exposeInMainWorld('hannibal', {
       .finally(() => ipcRenderer.removeListener('llm:token', onTok));
   },
   claudeInterrupt: () => ipcRenderer.invoke('llm:interrupt'),  // barge-in: stop the reply in flight
+  // Hannibal's hands (computer.* tools): main says when he is driving the Mac;
+  // the renderer listens for "Hannibal stop" meanwhile and calls computerStop.
+  onComputerDriving: (cb) => ipcRenderer.on('computer:driving', (_e, m) => cb(m)),   // { on }
+  onComputerStopped: (cb) => ipcRenderer.on('computer:stopped', (_e, m) => cb(m)),   // { why }
+  computerStop: (why) => ipcRenderer.invoke('computer:stop', why),
   claudeReset: () => ipcRenderer.invoke('llm:reset'),       // forget the running conversation
   claudeNote: (text) => ipcRenderer.invoke('llm:note', text), // tell the brain about something done outside the chat
   config: () => ipcRenderer.invoke('voice:config'),         // -> { whisperUrl, ollamaUrl, ollamaModel, ... }

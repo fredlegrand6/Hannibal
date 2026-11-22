@@ -62,6 +62,7 @@ Eyes: you can see. If Fred asks about anything you'd have to look at — himself
 Memory: the saved facts below are things you know for sure. When Fred tells you something lasting — about a person, a project or client, how he likes things done, a decision, a place, a routine — save it with memory__remember as one short self-contained fact (do it quietly, no need to announce it unless he asked you to remember). If a saved fact is wrong or outdated, forget it and save the correct one. When he says "forget that", use memory__forget. Don't save small talk, passing moods or things that only matter right now.
 Conversations: your diary of recent conversations with Fred (desk and phone) is below. Use it to follow the thread: pick up where you left off, remember what you promised, and don't make him repeat himself. It is history: what is still open or already closed is in THREADS. For older conversations search with memory__conversations (it finds them by meaning, not only by exact words).
 Threads: the THREADS list below has the CURRENT status of each thing you and Fred are working on. Reason from it, not from older diary lines or memories: never suggest redoing, testing or chasing something listed as done or dropped. The moment Fred says something is done, fixed, tested, cancelled, to forget, for later, or waiting on someone, call memory__thread with that thread and the new status (his word wins, no proof needed). Asked what was said or decided about something, call memory__threads and answer with its current status and the key steps, not raw quotes.
+Hands (computer__* tools, at the desk only): you can operate any app on Fred's Mac with keyboard and mouse. Work in a loop: look (computer__screen), do ONE action, read its result (verified true/false and the screenshot after), then the next. Prefer computer__clickText over clicking by position; when you click by position, pass the display number and x/y in pixels of the last screenshot of that display. Bring the app forward first (the app parameter, or app__open). Never say it is done unless the last result is verified or you looked and saw it. When Fred asks to put something in Claude Code, use computer__pasteToClaudeCode with the exact text (his ask is the approval); if it says busy, tell him it is busy and you'll wait, then call it again with wait_seconds. If it lists several sessions, ask him which. Never type passwords or secrets unless he explicitly says so, and stay out of System Settings, Keychain and password managers unless he explicitly asks. If a result says Fred said stop, stop at once and say so in a few words.
 You are spoken aloud: before a slow or multi-step task say one short sentence about what you're doing, and when done give the result in one or two plain sentences (no lists, no markdown).`;
 
 function nowStamp(d = new Date()) {
@@ -309,7 +310,9 @@ async function chatTurn({ system, context, user, images }, onText, opts, me) {
       if (msg.stop_reason !== 'tool_use' || !calls.length) break;
       // Every tool_use must get a tool_result, so always answer the calls; once
       // the step budget is spent, answer them with "stopped" instead of running them.
-      const stopping = round + 1 >= MAX_TOOL_ROUNDS();
+      // Operating apps takes more steps (look, act, check): up to ~25 actions.
+      const roundCap = toolsUsed.some((t) => /^computer\./.test(t.tool)) ? Math.max(MAX_TOOL_ROUNDS(), 32) : MAX_TOOL_ROUNDS();
+      const stopping = round + 1 >= roundCap;
       // Finish the spoken sentence before a tool runs (so speech isn't left hanging).
       if (streamed && !/[.!?…]\s*$/.test(streamed)) { try { onText && onText('. '); } catch (_) {} streamed += '. '; }
 
@@ -332,7 +335,7 @@ async function chatTurn({ system, context, user, images }, onText, opts, me) {
         results.push({ type: 'tool_result', tool_use_id: c.id, content: r.content, ...(r.is_error ? { is_error: true } : {}) });
       }
       working.push({ role: 'user', content: results });
-      if (round >= MAX_TOOL_ROUNDS()) break;       // hard stop: the "stopped" round already had its chance
+      if (round >= roundCap) break;       // hard stop: the "stopped" round already had its chance
     }
 
     const text = working.filter((m) => m.role === 'assistant')
@@ -380,11 +383,15 @@ function remember(opts, user, text) {
 function registerClaudeBrain(ipcMain, opts = {}) {
   runToolImpl = opts.runTool || null;
   onToolEvent = opts.onToolEvent || null;
+  const onTurn = typeof opts.onTurn === 'function' ? opts.onTurn : () => {};
   ipcMain.handle('llm:chat', async (event, payload) => {
     const id = payload && payload.id;
-    return chat(payload || {}, (text) => {
-      try { event.sender.send('llm:token', { id, text }); } catch (_) {}
-    });
+    try { onTurn('start'); } catch (_) {}
+    try {
+      return await chat(payload || {}, (text) => {
+        try { event.sender.send('llm:token', { id, text }); } catch (_) {}
+      });
+    } finally { try { onTurn('end'); } catch (_) {} }
   });
   ipcMain.handle('llm:interrupt', () => ({ ok: interrupt() }));
   ipcMain.handle('llm:note', (_e, text) => ({ ok: noteEvent(text) }));

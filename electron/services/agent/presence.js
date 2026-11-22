@@ -144,7 +144,7 @@ function createPresence({ ollamaUrl, visionModel, textModel, emit, now = () => D
   async function safeInvoke(tool, params) {
     const record = { ts: now(), tool, params, ok: null, refused: false };
     // 1) catalog-driven boundary: never a write, never a confirm-gated tool.
-    if (catalog.isWrite(tool) || catalog.confirmRequired(tool)) {
+    if (catalog.isWrite(tool) || catalog.confirmRequired(tool) || (catalog.getTool(tool) || {}).claude_only) {
       record.refused = true; record.reason = 'write/confirm tool — blocked in autonomous loop';
       actionLog.push(record); if (actionLog.length > 200) actionLog.shift();
       log(`REFUSED autonomous write "${tool}" — the loop never executes writes. (Propose to Fred instead.)`);

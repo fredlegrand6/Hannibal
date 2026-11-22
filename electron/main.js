@@ -148,14 +148,37 @@ require('./services/agent/executor').setShim('memory.query', async ({ text, limi
 // as the agent loop (claude-tools.js). Turn off with HANNIBAL_CLAUDE_TOOLS=0.
 claudeBrain.registerClaudeBrain(ipcMain, {
   runTool: (name, input) => claudeTools.runTool(name, input, {
+    desk: true,   // Fred is at the Mac: Hannibal's hands (computer.*) may be used
     confirmer: makeIpcConfirmer(),
     // Log only: the renderer's agent:progress narration belongs to agent:run plans,
     // and Claude narrates its own work.
     emit: (ev) => { if (/^step:(start|finish|error|skipped|confirm)/.test(ev.type)) console.log('[claude-tool]', ev.type, ev.tool || ''); },
   }),
   onToolEvent: (ev) => { try { win && win.webContents.send('llm:tool', ev); } catch (_) {} },
+  // Each request from Fred is a new task for the hands: fresh step budget, stop cleared.
+  onTurn: (phase) => { if (phase === 'start') computer.newTask(); else computer.endTask(); },
 });
 registerControls(ipcMain); // 'browser-action' + 'mac-control' IPC handlers
+// ── HANDS: keyboard + mouse on any app (services/computer/). Every call goes
+// through computer.preflight (risky targets → the voice yes/no gate) and is
+// stopped at once by "Hannibal stop", Esc×3 or the wake word while driving.
+// Needs Accessibility for Electron: System Settings → Privacy & Security → Accessibility.
+const { createComputer, createIndicator } = require('./services/computer/computer-control');
+const { createHands } = require('./services/computer/hands');
+const computerHands = createHands({ onEvent: (ev) => { if (ev && ev.ev === 'esc') computer.onEsc(); } });
+const computer = createComputer({
+  hands: computerHands,
+  electron: { screen, nativeImage: require('electron').nativeImage, clipboard: require('electron').clipboard },
+  indicator: createIndicator({ BrowserWindow, screen }),
+  onAbort: (why) => {
+    console.warn('[computer] STOP:', why);
+    claudeBrain.interrupt();
+    try { win && win.webContents.send('computer:stopped', { why }); } catch (_) {}
+  },
+  onDriving: (on) => { try { win && win.webContents.send('computer:driving', { on }); } catch (_) {} },
+});
+computer.register(ipcMain);   // 'computer' (actions), 'computer:stop', 'computer:status'
+claudeTools.setPreflight((name, params) => computer.preflight(String(name).replace(/^computer\./, ''), params));
 registerWorld(ipcMain);    // 'world:crypto' (after registerControls so EYES can reuse 'browser-action' open)
 // The coordinator (single owner of the gimbal) is returned so we can stop its
 // follow-watchdog on quit. See camera-coordinator.js.
@@ -291,6 +314,8 @@ function startWakeWord() {
     const out = buf.toString();
     if (out.includes('WAKE_WORD_DETECTED')) {
       console.log('[wake] wake word detected');
+      // While Hannibal is driving the Mac, the wake word means STOP.
+      if (computer.driving && computer.abort('wake word')) return;
       win && win.webContents.send('voice:wake');
     }
     for (const line of out.split('\n')) {   // status lines ("Listening…", mic errors) into the log
@@ -1160,7 +1185,10 @@ function startBrain() {
   const voiceGate = makeIpcConfirmer();
   brainClient = new BrainClient();
   brainClient
-    .setHandler('body.invoke', async ({ tool, params }) => macInvoker(tool, params))
+    .setHandler('body.invoke', async ({ tool, params }) => {
+      if (/^computer\./.test(String(tool))) return { ok: false, error: 'computer control only runs at the desk' };
+      return macInvoker(tool, params);
+    })
     .setHandler('body.confirm', async ({ step, summary }) => voiceGate(step, summary))
     .setHandler('emit', async ({ event }) => {
       const target = win || BrowserWindow.getAllWindows()[0];
@@ -1266,13 +1294,15 @@ function startBodyLink() {
   bodyLink
     .setHandler('body.invoke', async ({ tool, params }) => {
       console.log('[body] server runs on the Mac:', tool);
+      // The hands (keyboard/mouse) are desk-only: never driven from the phone.
+      if (/^computer\./.test(String(tool))) return { ok: false, error: 'computer control only runs at the desk' };
       return macInvoker(tool, params || {});
     })
     .on('ready', async () => {
       wasLinked = true;
       console.log('[body] ✓ linked to the always-on server');
       try {
-        await bodyLink.request('body.register', { channels: Object.keys(installToolTap._registry || {}) });
+        await bodyLink.request('body.register', { channels: Object.keys(installToolTap._registry || {}).filter((c) => !/^computer(:|$)/.test(c)) });
         const r = await bodyLink.request('facts.sync', { facts: deskFacts.all(), lastSynced: lastSyncedFacts() });
         applyServerFacts(r && r.facts);
         const ns = await bodyLink.request('nudge.sync', { keys: nudger.said() }).catch(() => null);
@@ -1351,6 +1381,7 @@ app.whenReady().then(async () => {
     return;
   }
   createWindow();
+  computer.warm().then((r) => { if (r && r.trusted) console.log(`[computer] hands ready (Esc×3 stop ${r.esc ? 'on' : 'off'})`); });
   startBrain();   // links this Mac as a BODY to the GEX131 brain when HANNIBAL_BRAIN=1
   ensureWhisper();
   startTelegram();  // Hannibal on Fred's phone, when TELEGRAM_BOT_TOKEN is set
@@ -1416,6 +1447,7 @@ app.on('before-quit', () => { app.isQuiting = true; });
 app.on('will-quit', () => {
   if (wakeProc) wakeProc.kill();
   try { voiceIO.quit(); } catch (_) {}
+  try { computerHands.quit(); } catch (_) {}
   if (whisperProc) whisperProc.kill();
   if (telegram) telegram.stop();
   if (vadProc) { try { vadProc.kill(); } catch (_) {} }

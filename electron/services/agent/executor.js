@@ -126,6 +126,9 @@ function marshalControl(tool, params) {
   // mac-control / browser-action handlers take a single `params` arg: a bare
   // value for single-param actions, an object for multi-param ones (they do
   // `typeof params === 'string' ? JSON.parse : params`).
+  // raw: the handler takes the whole params object (computer.* — it also
+  // carries the preflight's resolved target and pass token).
+  if (tool.via && tool.via.raw) return { ...(params || {}) };
   const keys = tool.params.map((p) => p.name);
   if (keys.length === 0) return undefined;
   if (keys.length === 1) return params[keys[0]];
@@ -221,6 +224,8 @@ function resolveParams(step, results, inj) {
 // One plain sentence describing a write action, for the spoken/shown prompt.
 // Uses the RESOLVED params so the user hears exactly what will happen.
 function summarizeAction(step, params) {
+  // A caller that already knows the exact wording (computer preflight) passes it.
+  if (step.summary) return step.summary;
   const p = params || {};
   const q = (s) => `“${s}”`;
   switch (step.tool) {
@@ -481,7 +486,9 @@ async function execute(plan, opts = {}) {
     // applies to whole {{N}} refs feeding a NON-write tool — writes always get the
     // full, exact value so what's confirmed is what's sent.
     const inj = { summaries, useSummary: !isWrite && compress.injections === true, used: new Set() };
-    const { params, problems } = resolveParams(step, results, inj);
+    // literal steps (one Claude tool call) take their params as given: a brief
+    // that happens to contain "{{1}}" must be sent as written, not resolved.
+    const { params, problems } = step.literal ? { params: step.params || {}, problems: [] } : resolveParams(step, results, inj);
     if (problems.length) {
       emit({ type: 'step:error', ...base, error: 'dependency resolution failed', problems });
       const act = await onFailure(step, i, 'dependency resolution failed: ' + problems.join('; '));
