@@ -230,6 +230,15 @@ function summarizeAction(step, params) {
   const q = (s) => `“${s}”`;
   switch (step.tool) {
     case 'notes.remove': return `Remove the note ${q(p.query)} — remove it?`;
+    // Claude Code jobs: Fred hears which project and what it will do.
+    case 'codejob.start': {
+      const t = String(p.task || '').replace(/\s+/g, ' ').trim();
+      return `Start a Claude Code job on ${p.project}${p.title ? `, "${p.title}"` : ''}: ${q(t.length > 400 ? t.slice(0, 400) + '…' : t)} It works on a new branch and opens a draft PR; nothing is merged or deployed. Start it?`;
+    }
+    case 'codejob.followUp': {
+      const t = String(p.text || '').replace(/\s+/g, ' ').trim();
+      return `Send this to the Claude Code job${p.job ? ` "${p.job}"` : ''}: ${q(t.length > 400 ? t.slice(0, 400) + '…' : t)} — send it?`;
+    }
     case 'whatsapp.send': return `Send a WhatsApp to ${p.contact}${p.number ? ` (${p.number})` : ''}: ${q(p.message)} — send it?`;
     case 'imessage.send': return `Send an iMessage to ${p.contact || p.number}: ${q(p.message)} — send it?`;
     // mail.send only OPENS a pre-filled compose window (mailto:) — it does not

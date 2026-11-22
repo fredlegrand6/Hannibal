@@ -181,6 +181,32 @@ const computer = createComputer({
 });
 computer.register(ipcMain);   // 'computer' (actions), 'computer:stop', 'computer:status'
 claudeTools.setPreflight((name, params) => computer.preflight(String(name).replace(/^computer\./, ''), params));
+// ── CLAUDE CODE JOBS (services/code-jobs.js): Fred asks, says yes, Claude Code
+// works in the background on its own branch; when it ends Fred hears it here
+// and gets it on his phone. Never merges or deploys. Works from the phone too
+// (the server runs the 'codejob' channel on this Mac through the link).
+const { createCodeJobs } = require('./services/code-jobs');
+const phoneBacklog = [];   // job news that couldn't reach the phone yet (link down)
+function jobNewsToPhone(text) {
+  if (telegram) return telegram.notify(text).then(() => true);
+  if (linked()) return bodyLink.request('phone.notify', { text, voice: false }).then(() => true);
+  return Promise.reject(new Error('no phone link'));
+}
+const codeJobs = createCodeJobs({
+  onDone: async (job, { text, spoken }) => {
+    try { const { Notification } = require('electron'); if (Notification.isSupported()) new Notification({ title: 'Claude Code job', body: text.slice(0, 240) }).show(); } catch (_) {}
+    try { win && !win.isDestroyed() && win.webContents.send('reminders:due', { id: `job-${job.id}-${job.round || 1}`, message: spoken, say: true }); } catch (_) {}
+    try { await jobNewsToPhone(text); } catch (_) { phoneBacklog.push(text); }
+  },
+});
+codeJobs.register(ipcMain);   // 'codejob' (projects / start / status / stop / followUp)
+function flushJobNews() {
+  while (phoneBacklog.length) {
+    const t = phoneBacklog.shift();
+    jobNewsToPhone(t).catch(() => { phoneBacklog.unshift(t); });
+    if (!linked() && !telegram) break;
+  }
+}
 // Calendar: past times, clashes, which calendar/event, reminders, repeats are
 // sorted out before Fred is asked (services/calendar-assist.js). Set below,
 // once the calendar handlers are registered.
@@ -1351,6 +1377,7 @@ function startBodyLink() {
         if (th && th.threads) deskThreads.merge(th.threads);
         console.log(`[body] diary in sync with the server (${deskJournal.size} conversations${got ? `, ${got} new from the phone` : ''})`);
       } catch (e) { console.warn('[body] setup after link failed:', e.message); }
+      flushJobNews();   // a Claude Code job that ended while the link was down
     })
     .on('event', (name, data) => {
       if (name === 'facts') applyServerFacts(data && data.facts);
@@ -1435,6 +1462,8 @@ app.whenReady().then(async () => {
   ensureWhisper();
   startTelegram();  // Hannibal on Fred's phone, when TELEGRAM_BOT_TOKEN is set
   startBodyLink();  // …or, with the always-on server, link this Mac to it as Hannibal's body
+  codeJobs.startMonitor();   // Claude Code jobs: pick up ones still running from before a restart
+  codeJobs.prune().catch(() => {});
   if (process.env.HANNIBAL_CAMERA_FOLLOW !== '0') faceFollow.start();  // turn the OBSBOT to keep Fred in frame
   // Microphone: get macOS permission BEFORE starting the wake-word and VAD
   // helpers. They inherit this app's permission; started without it, opening
